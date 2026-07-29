@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="sr-Latn">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#171a18" />
+    <meta
+      name="description"
+      content="Mirna je privatna, lokalna aplikacija za planiranje ličnih finansija."
+    />
+    <link rel="icon" href="/app-icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Mirna — lične finansije</title>
+    <style>
+      #boot-splash {
+        min-height: 100vh;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        gap: 12px;
+        background: #f6f6f3;
+        color: #171a18;
+        font-family: system-ui, sans-serif;
+        text-align: center;
+      }
+      #boot-splash strong {
+        display: grid;
+        width: 52px;
+        height: 52px;
+        place-items: center;
+        margin: 0 auto 12px;
+        border-radius: 16px;
+        background: #171a18;
+        color: #f6f6f3;
+        font-size: 20px;
+      }
+      #boot-splash span {
+        display: block;
+        font-size: 14px;
+        font-weight: 700;
+      }
+      #boot-splash small {
+        display: block;
+        margin-top: 5px;
+        color: #69716c;
+        font-size: 12px;
+      }
+      @media (prefers-color-scheme: dark) {
+        #boot-splash {
+          background: #101311;
+          color: #f3f5f2;
+        }
+        #boot-splash strong {
+          background: #f3f5f2;
+          color: #101311;
+        }
+        #boot-splash small {
+          color: #9ca69f;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="boot-splash" role="status" aria-label="Mirna se pokreće">
+        <div>
+          <strong aria-hidden="true">M</strong>
+          <span>Mirna</span>
+          <small>Učitavam lokalne podatke…</small>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

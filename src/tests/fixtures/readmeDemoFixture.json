@@ -1,0 +1,499 @@
+{
+  "syntheticDataNotice": "Synthetic test data. Not based on any real person's financial records.",
+  "frozenAt": "2034-04-18T10:00:00.000Z",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "data": {
+    "accounts": [
+      {
+        "id": "docs_account_daily",
+        "name": "Svakodnevni račun",
+        "kind": "checking",
+        "openingBalance": 72000,
+        "protected": false,
+        "color": "#2f7d64",
+        "archived": false,
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_account_reserve",
+        "name": "Rezerva",
+        "kind": "savings",
+        "openingBalance": 95000,
+        "protected": true,
+        "color": "#3b82f6",
+        "archived": false,
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_account_workshop",
+        "name": "Jesenja radionica",
+        "kind": "savings",
+        "openingBalance": 22000,
+        "protected": true,
+        "color": "#d97706",
+        "archived": false,
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_account_cash",
+        "name": "Gotovina",
+        "kind": "cash",
+        "openingBalance": 5400,
+        "protected": false,
+        "color": "#64748b",
+        "archived": false,
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      }
+    ],
+    "transactions": [
+      {
+        "id": "docs_tx_salary",
+        "type": "income",
+        "amount": 176000,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_income",
+        "date": "2034-04-05",
+        "description": "Mesečni prihod",
+        "source": "planned-income",
+        "occurrenceKey": "income:docs_income_salary:2034-04",
+        "plannedIncomeId": "docs_income_salary",
+        "createdAt": "2034-04-05T09:00:00.000Z"
+      },
+      {
+        "id": "docs_tx_rent",
+        "type": "expense",
+        "amount": 52000,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_housing",
+        "date": "2034-04-02",
+        "description": "Stanovanje",
+        "source": "commitment",
+        "occurrenceKey": "docs_commit_rent:2034-04-02",
+        "createdAt": "2034-04-02T08:20:00.000Z"
+      },
+      {
+        "id": "docs_tx_internet",
+        "type": "expense",
+        "amount": 2800,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_housing",
+        "date": "2034-04-08",
+        "description": "Internet",
+        "source": "commitment",
+        "occurrenceKey": "docs_commit_internet:2034-04-08",
+        "createdAt": "2034-04-08T07:45:00.000Z"
+      },
+      {
+        "id": "docs_tx_software",
+        "type": "expense",
+        "amount": 2400,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_software",
+        "date": "2034-04-12",
+        "description": "Alat za rad",
+        "source": "commitment",
+        "occurrenceKey": "docs_commit_software:2034-04-12",
+        "createdAt": "2034-04-12T10:10:00.000Z"
+      },
+      {
+        "id": "docs_tx_groceries_1",
+        "type": "expense",
+        "amount": 6200,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_groceries",
+        "date": "2034-04-06",
+        "description": "Nedeljna kupovina",
+        "source": "manual",
+        "createdAt": "2034-04-06T15:30:00.000Z"
+      },
+      {
+        "id": "docs_tx_groceries_2",
+        "type": "expense",
+        "amount": 4850,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_groceries",
+        "date": "2034-04-13",
+        "description": "Namirnice",
+        "source": "quick-add",
+        "createdAt": "2034-04-13T16:10:00.000Z"
+      },
+      {
+        "id": "docs_tx_transport",
+        "type": "expense",
+        "amount": 3200,
+        "accountId": "docs_account_daily",
+        "categoryId": "docs_category_transport",
+        "date": "2034-04-11",
+        "description": "Gradski prevoz",
+        "source": "manual",
+        "createdAt": "2034-04-11T08:30:00.000Z"
+      },
+      {
+        "id": "docs_tx_household",
+        "type": "expense",
+        "amount": 1900,
+        "accountId": "docs_account_cash",
+        "categoryId": "docs_category_household",
+        "date": "2034-04-16",
+        "description": "Kućne potrepštine",
+        "source": "manual",
+        "createdAt": "2034-04-16T17:20:00.000Z"
+      },
+      {
+        "id": "docs_tx_reserve",
+        "type": "transfer",
+        "amount": 15000,
+        "accountId": "docs_account_daily",
+        "toAccountId": "docs_account_reserve",
+        "date": "2034-04-09",
+        "description": "Doprinos rezervi",
+        "source": "goal",
+        "goalId": "docs_goal_reserve",
+        "createdAt": "2034-04-09T09:15:00.000Z"
+      },
+      {
+        "id": "docs_tx_workshop",
+        "type": "transfer",
+        "amount": 10000,
+        "accountId": "docs_account_daily",
+        "toAccountId": "docs_account_workshop",
+        "date": "2034-04-10",
+        "description": "Doprinos za radionicu",
+        "source": "goal",
+        "goalId": "docs_goal_workshop",
+        "createdAt": "2034-04-10T09:15:00.000Z"
+      }
+    ],
+    "categories": [
+      {
+        "id": "docs_category_income",
+        "name": "Prihod",
+        "kind": "income",
+        "icon": "↗",
+        "color": "#2f7d64",
+        "archived": false
+      },
+      {
+        "id": "docs_category_housing",
+        "name": "Stanovanje",
+        "kind": "expense",
+        "icon": "⌂",
+        "color": "#7c3aed",
+        "archived": false
+      },
+      {
+        "id": "docs_category_groceries",
+        "name": "Namirnice",
+        "kind": "expense",
+        "icon": "▦",
+        "color": "#ea580c",
+        "archived": false
+      },
+      {
+        "id": "docs_category_transport",
+        "name": "Prevoz",
+        "kind": "expense",
+        "icon": "↔",
+        "color": "#0891b2",
+        "archived": false
+      },
+      {
+        "id": "docs_category_software",
+        "name": "Softver",
+        "kind": "expense",
+        "icon": "◇",
+        "color": "#6366f1",
+        "archived": false
+      },
+      {
+        "id": "docs_category_household",
+        "name": "Domaćinstvo",
+        "kind": "expense",
+        "icon": "⌂",
+        "color": "#0f766e",
+        "archived": false
+      },
+      {
+        "id": "docs_category_repair",
+        "name": "Popravke",
+        "kind": "expense",
+        "icon": "⌁",
+        "color": "#be123c",
+        "archived": false
+      },
+      {
+        "id": "docs_category_learning",
+        "name": "Učenje",
+        "kind": "expense",
+        "icon": "□",
+        "color": "#2563eb",
+        "archived": false
+      },
+      {
+        "id": "docs_category_debt",
+        "name": "Otplata",
+        "kind": "expense",
+        "icon": "◎",
+        "color": "#b45309",
+        "archived": false
+      },
+      {
+        "id": "docs_category_other",
+        "name": "Drugo",
+        "kind": "expense",
+        "icon": "•",
+        "color": "#64748b",
+        "archived": false
+      }
+    ],
+    "plannedIncomes": [
+      {
+        "id": "docs_income_salary",
+        "name": "Mesečni prihod",
+        "amount": 176000,
+        "categoryId": "docs_category_income",
+        "accountId": "docs_account_daily",
+        "frequency": "monthly",
+        "startDate": "2034-01-01",
+        "expectedDay": 5,
+        "active": true,
+        "isPrimarySalary": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      }
+    ],
+    "commitments": [
+      {
+        "id": "docs_commit_rent",
+        "name": "Stanovanje",
+        "amount": 52000,
+        "categoryId": "docs_category_housing",
+        "accountId": "docs_account_daily",
+        "frequency": "monthly",
+        "startDate": "2034-01-01",
+        "dueDay": 2,
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_commit_internet",
+        "name": "Internet",
+        "amount": 2800,
+        "categoryId": "docs_category_housing",
+        "accountId": "docs_account_daily",
+        "frequency": "monthly",
+        "startDate": "2034-01-01",
+        "dueDay": 8,
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_commit_software",
+        "name": "Alat za rad",
+        "amount": 2400,
+        "categoryId": "docs_category_software",
+        "accountId": "docs_account_daily",
+        "frequency": "monthly",
+        "startDate": "2034-01-01",
+        "dueDay": 12,
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_commit_transport",
+        "name": "Mesečna karta",
+        "amount": 4200,
+        "categoryId": "docs_category_transport",
+        "accountId": "docs_account_daily",
+        "frequency": "monthly",
+        "startDate": "2034-01-01",
+        "dueDay": 21,
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      }
+    ],
+    "variableBudgets": [
+      {
+        "id": "docs_budget_groceries",
+        "name": "Namirnice",
+        "defaultAmount": 32000,
+        "categoryId": "docs_category_groceries",
+        "overrides": {},
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_budget_transport",
+        "name": "Prevoz",
+        "defaultAmount": 8000,
+        "categoryId": "docs_category_transport",
+        "overrides": {},
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_budget_household",
+        "name": "Domaćinstvo",
+        "defaultAmount": 8500,
+        "categoryId": "docs_category_household",
+        "overrides": {},
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_budget_leisure",
+        "name": "Slobodno vreme",
+        "defaultAmount": 7000,
+        "categoryId": "docs_category_other",
+        "overrides": {},
+        "active": true,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      }
+    ],
+    "goals": [
+      {
+        "id": "docs_goal_reserve",
+        "name": "Sigurnosna rezerva",
+        "emoji": "◉",
+        "targetAmount": 420000,
+        "linkedAccountId": "docs_account_reserve",
+        "plannedMonthlyContribution": 15000,
+        "contributionOverrides": {},
+        "contributionStartMonth": "2034-01",
+        "goalType": "reserve",
+        "notes": "Sintetički fond za nepredviđene troškove.",
+        "archived": false,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_goal_workshop",
+        "name": "Jesenja radionica",
+        "emoji": "◇",
+        "targetAmount": 72000,
+        "targetDate": "2034-09-14",
+        "linkedAccountId": "docs_account_workshop",
+        "plannedMonthlyContribution": 10000,
+        "contributionOverrides": {},
+        "contributionStartMonth": "2034-01",
+        "contributionEndMonth": "2034-08",
+        "goalType": "sinking",
+        "notes": "Fiktivna stručna radionica i putni troškovi.",
+        "archived": false,
+        "createdAt": "2034-01-01T08:00:00.000Z"
+      }
+    ],
+    "debts": [
+      {
+        "id": "docs_debt_studio",
+        "creditor": "Atelje Orion",
+        "originalAmount": 42000,
+        "priority": "medium",
+        "status": "open",
+        "plannedMonthlyPayment": 6000,
+        "paymentDay": 25,
+        "paymentOverrides": {},
+        "notes": "Potpuno izmišljeni kreditor za dokumentacioni prikaz.",
+        "createdAt": "2034-02-01T08:00:00.000Z"
+      }
+    ],
+    "debtPayments": [],
+    "plannedEvents": [
+      {
+        "id": "docs_event_repair",
+        "title": "Popravka uređaja",
+        "date": "2034-04-27",
+        "plannedAmount": 32000,
+        "categoryId": "docs_category_repair",
+        "accountId": "docs_account_daily",
+        "notes": "Sintetički planirani servis uređaja.",
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_event_course",
+        "title": "Prolećni kurs",
+        "date": "2034-05-18",
+        "plannedAmount": 18000,
+        "categoryId": "docs_category_learning",
+        "accountId": "docs_account_daily",
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      },
+      {
+        "id": "docs_event_workshop",
+        "title": "Jesenja radionica",
+        "date": "2034-09-14",
+        "plannedAmount": 72000,
+        "categoryId": "docs_category_learning",
+        "accountId": "docs_account_workshop",
+        "linkedGoalId": "docs_goal_workshop",
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      }
+    ],
+    "presets": [
+      {
+        "id": "docs_preset_groceries",
+        "name": "Namirnice",
+        "emoji": "▦",
+        "type": "expense",
+        "categoryId": "docs_category_groceries",
+        "defaultAccountId": "docs_account_daily",
+        "position": 0,
+        "active": true
+      },
+      {
+        "id": "docs_preset_transport",
+        "name": "Prevoz",
+        "emoji": "↔",
+        "type": "expense",
+        "categoryId": "docs_category_transport",
+        "defaultAccountId": "docs_account_daily",
+        "position": 1,
+        "active": true
+      },
+      {
+        "id": "docs_preset_household",
+        "name": "Domaćinstvo",
+        "emoji": "⌂",
+        "type": "expense",
+        "categoryId": "docs_category_household",
+        "defaultAccountId": "docs_account_cash",
+        "position": 2,
+        "active": true
+      },
+      {
+        "id": "docs_preset_other",
+        "name": "Drugo",
+        "emoji": "•••",
+        "type": "expense",
+        "defaultAccountId": "docs_account_daily",
+        "position": 3,
+        "active": true
+      }
+    ],
+    "salaryScenarios": [
+      {
+        "id": "docs_scenario_adjusted",
+        "name": "Scenario promene prihoda",
+        "monthlyAmount": 192000,
+        "startMonth": "2034-07",
+        "createdAt": "2034-04-01T08:00:00.000Z"
+      }
+    ],
+    "settings": [
+      {
+        "id": "settings",
+        "onboardingCompleted": true,
+        "baseMonthlyIncome": 176000,
+        "currency": "RSD",
+        "locale": "sr-Latn-RS",
+        "appearance": "dark",
+        "defaultAccountId": "docs_account_daily",
+        "lastBackupAt": "2034-04-17T10:00:00.000Z",
+        "installHintDismissed": true,
+        "createdAt": "2034-01-01T08:00:00.000Z",
+        "updatedAt": "2034-04-17T10:00:00.000Z"
+      }
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a focused product improvement.
+title: '[Feature]: '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the problem without personal financial records.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Financial or privacy boundaries
+      description: Which documented invariants could this affect?
+  - type: checkboxes
+    id: local_first
+    attributes:
+      label: Local-first confirmation
+      options:
+        - label: The proposal does not silently transmit user financial data.
+          required: true
