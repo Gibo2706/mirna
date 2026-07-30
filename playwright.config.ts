@@ -21,6 +21,7 @@ export default defineConfig({
       name: 'Mobile Chrome',
       use: {
         ...devices['Pixel 7'],
+        timezoneId: 'Europe/Belgrade',
       },
     },
   ],

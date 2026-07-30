@@ -947,6 +947,25 @@ test('retroactive salary keeps the July occurrence linked and books actual cash 
 test('midnight rollover refreshes the current month and calculations without reload', async ({
   page,
 }) => {
+  expect(
+    await page.evaluate(() => {
+      const now = new Date();
+      return {
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        localTime: [
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate(),
+          now.getHours(),
+          now.getMinutes(),
+        ],
+      };
+    }),
+  ).toEqual({
+    timeZone: 'Europe/Belgrade',
+    localTime: [2032, 6, 31, 23, 59],
+  });
+
   await seedPlan(page);
   await receiveFirstPlannedIncome(page, '2032-07-31');
   await navigate(page, 'Početna');
@@ -958,6 +977,12 @@ test('midnight rollover refreshes the current month and calculations without rel
   await expect(spentCard).toContainText('360 RSD');
 
   await page.clock.runFor(2 * 60 * 1000);
+  expect(
+    await page.evaluate(() => {
+      const now = new Date();
+      return [now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes()];
+    }),
+  ).toEqual([2032, 7, 1, 0, 1]);
   await expect(page.getByRole('heading', { name: /avgust 2032/i })).toBeVisible();
   await expect(spentCard).toContainText('0 RSD');
 });
