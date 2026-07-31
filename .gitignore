@@ -14,11 +14,15 @@ artifacts/
 # Local deployment and private working material
 .vercel/
 .private/
+.wrangler/
+.dev.vars
+SOT.md
 
 # Environment files and local overrides
 .env
 .env.*
 !.env.example
+!.dev.vars.example
 *.local
 
 # Logs, caches and temporary files

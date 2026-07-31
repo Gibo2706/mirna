@@ -15,6 +15,16 @@ import type {
   VariableBudget,
 } from '@/domain/types';
 import { inferLegacyGoalType, isGoalCompletionEvent } from '@/domain/goals';
+import type {
+  SyncConflictRecord,
+  SyncDeviceRecord,
+  SyncFrontierRecord,
+  SyncInboxRecord,
+  SyncKeyRecord,
+  SyncMetadataRecord,
+  SyncOutboxRecord,
+  SyncVaultRecord,
+} from './sync/records';
 
 export class FinanceDatabase extends Dexie {
   accounts!: EntityTable<Account, 'id'>;
@@ -30,6 +40,14 @@ export class FinanceDatabase extends Dexie {
   presets!: EntityTable<QuickAddPreset, 'id'>;
   salaryScenarios!: EntityTable<SalaryScenario, 'id'>;
   settings!: EntityTable<AppSettings, 'id'>;
+  syncVault!: EntityTable<SyncVaultRecord, 'id'>;
+  syncDevice!: EntityTable<SyncDeviceRecord, 'id'>;
+  syncKeys!: EntityTable<SyncKeyRecord, 'id'>;
+  syncOutbox!: EntityTable<SyncOutboxRecord, 'id'>;
+  syncInbox!: EntityTable<SyncInboxRecord, 'id'>;
+  syncConflicts!: EntityTable<SyncConflictRecord, 'id'>;
+  syncFrontier!: EntityTable<SyncFrontierRecord, 'id'>;
+  syncMetadata!: EntityTable<SyncMetadataRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -237,6 +255,18 @@ export class FinanceDatabase extends Dexie {
           }
         }
       });
+
+    this.version(6).stores({
+      syncVault: 'id, &vaultId, status, keyEpoch',
+      syncDevice: 'id, vaultId, &deviceId, authorizationExpiresAt',
+      syncKeys: 'id, &[vaultId+keyEpoch], purpose, retiredAt',
+      syncOutbox: 'id, vaultId, &operationId, [vaultId+state], [vaultId+deviceSequence], createdAt',
+      syncInbox: 'id, vaultId, &operationId, [vaultId+state], [vaultId+serverCursor], receivedAt',
+      syncConflicts:
+        'id, vaultId, entityId, resolutionState, [vaultId+resolutionState], detectedAt',
+      syncFrontier: 'id, vaultId, &deviceId, [vaultId+deviceId], acknowledgedServerCursor',
+      syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
+    });
   }
 }
 

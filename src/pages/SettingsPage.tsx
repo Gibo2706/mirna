@@ -16,8 +16,15 @@ import { TransactionsManager } from '@/features/transactions/TransactionsManager
 import { SettingsLayout } from '@/components/SettingsLayout';
 import { AIPlanManager } from '@/features/ai-plan/AIPlanManager';
 import { HelpManager } from '@/features/settings/HelpManager';
+import { SyncManager } from '@/features/sync/SyncManager';
 
-export const SettingsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
+export const SettingsPage = ({
+  snapshot,
+  syncEnabled = false,
+}: {
+  snapshot: FinanceSnapshot;
+  syncEnabled?: boolean;
+}) => {
   const { section } = useParams();
   if (section === 'accounts') return <AccountsManager snapshot={snapshot} />;
   if (section === 'transactions') return <TransactionsManager snapshot={snapshot} />;
@@ -34,6 +41,7 @@ export const SettingsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   if (section === 'help') return <HelpManager />;
   if (section === 'appearance') return <AppearanceManager snapshot={snapshot} />;
   if (section === 'about') return <AboutManager />;
+  if (section === 'sync' && syncEnabled) return <SyncManager />;
   return (
     <SettingsLayout title="Sekcija nije pronađena">
       <p className="text-muted">Vratite se na pregled podešavanja.</p>

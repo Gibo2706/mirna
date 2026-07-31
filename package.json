@@ -1,7 +1,7 @@
 {
   "name": "mirna-finansije",
   "private": true,
-  "version": "2.3.2",
+  "version": "2.4.0-beta.1",
   "license": "AGPL-3.0-only",
   "author": "Bogdan Marković",
   "repository": {
@@ -26,25 +26,37 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "sync:typecheck": "tsc -p services/sync-worker/tsconfig.json --pretty false",
+    "sync:types": "wrangler types services/sync-worker/worker-configuration.d.ts --config services/sync-worker/wrangler.jsonc --env staging --env-interface SyncWorkerEnv --strict-vars false --include-runtime false --env-file /dev/null",
+    "sync:types:check": "npm run sync:types -- --check",
+    "sync:test": "vitest run src/domain/sync src/db/sync src/features/sync",
+    "sync:test:worker": "vitest run --config services/sync-worker/vitest.config.ts",
+    "sync:test:crypto": "vitest run src/domain/sync/canonical.test.ts src/domain/sync/encoding.test.ts src/domain/sync/crypto.test.ts src/domain/sync/crypto-vectors.test.ts src/domain/sync/manifest.test.ts",
+    "sync:test:e2e": "playwright test --config playwright.sync.config.ts",
+    "sync:migrations:local": "wrangler d1 migrations apply mirna-sync-local --local --config services/sync-worker/wrangler.jsonc",
+    "sync:dev": "wrangler dev --config services/sync-worker/wrangler.jsonc",
+    "sync:deploy:staging": "wrangler deploy --env staging --config services/sync-worker/wrangler.jsonc",
     "docs:assets": "node scripts/generate-readme-assets.mjs",
     "public:check": "node scripts/public-repo-check.mjs",
     "public:history": "node scripts/public-history-check.mjs",
     "package:source": "node scripts/package-source.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run public:check && npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build"
+    "check": "npm run public:check && npm run format:check && npm run lint && npm run typecheck && npm run sync:typecheck && npm run test && npm run sync:test:worker && npm run build"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-select": "^2.2.6",
     "@tailwindcss/vite": "^4.3.3",
+    "canonicalize": "3.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "dexie": "^4.4.4",
     "dexie-react-hooks": "^4.4.0",
     "lucide-react": "^0.536.0",
+    "qrcode": "1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "8.3.0",
@@ -55,6 +67,8 @@
     "zod": "^4.0.14"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.20.1",
+    "@cloudflare/workers-types": "5.20260731.1",
     "@eslint/js": "^9.32.0",
     "@playwright/test": "^1.61.1",
     "@testing-library/dom": "^10.4.1",
@@ -62,6 +76,7 @@
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/node": "^24.1.0",
+    "@types/qrcode": "1.5.6",
     "@types/react": "^19.1.9",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^6.0.4",
@@ -79,6 +94,7 @@
     "vite": "^8.1.5",
     "vite-plugin-pwa": "^1.3.0",
     "vitest": "^4.1.10",
-    "workbox-window": "^7.4.0"
+    "workbox-window": "^7.4.0",
+    "wrangler": "4.118.0"
   }
 }

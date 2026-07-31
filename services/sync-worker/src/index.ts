@@ -1,0 +1,128 @@
+import { runScheduledCleanup } from './cleanup';
+import { enforceEdgeRateLimit } from './abuse';
+import type { RequestContext } from './context';
+import type { Env } from './env';
+import { HttpError } from './errors';
+import {
+  createRequestId,
+  errorResponse,
+  getAllowedOrigin,
+  hasDisallowedOrigin,
+  isJsonContentType,
+  noContentResponse,
+  requiresJsonContentType,
+  validatePreflightHeaders,
+} from './http';
+import { allowedMethodsForPath, routeRequest } from './router';
+
+const HEALTH_PATH = '/v1/health';
+
+const handlePreflight = (
+  request: Request,
+  requestId: string,
+  allowedOrigin: string | null,
+): Response => {
+  if (allowedOrigin === null) {
+    return errorResponse('ORIGIN_NOT_ALLOWED', 'Origin is not allowed.', 403, { requestId });
+  }
+
+  const methods = allowedMethodsForPath(new URL(request.url).pathname);
+  if (!methods) {
+    return errorResponse('ROUTE_NOT_FOUND', 'Route was not found.', 404, {
+      requestId,
+      allowedOrigin,
+    });
+  }
+
+  const requestedMethod = request.headers.get('Access-Control-Request-Method');
+  if (
+    !requestedMethod ||
+    !methods.includes(requestedMethod) ||
+    !validatePreflightHeaders(request)
+  ) {
+    return errorResponse('PREFLIGHT_NOT_ALLOWED', 'Preflight request is not allowed.', 403, {
+      requestId,
+      allowedOrigin,
+    });
+  }
+
+  return noContentResponse({ requestId, allowedOrigin, allowedMethods: [...methods, 'OPTIONS'] });
+};
+
+const fetchHandler = async (
+  request: Request,
+  env: Env,
+  requestId: string,
+  allowedOrigin: string | null,
+): Promise<Response> => {
+  if (hasDisallowedOrigin(request, env)) {
+    return errorResponse('ORIGIN_NOT_ALLOWED', 'Origin is not allowed.', 403, { requestId });
+  }
+
+  if (request.method === 'OPTIONS') {
+    return handlePreflight(request, requestId, allowedOrigin);
+  }
+
+  const requestedProtocol = request.headers.get('X-Mirna-Protocol-Version');
+  const pathname = new URL(request.url).pathname;
+  if (
+    (pathname !== HEALTH_PATH && requestedProtocol !== '1') ||
+    (requestedProtocol !== null && requestedProtocol !== '1')
+  ) {
+    return errorResponse(
+      'PROTOCOL_UPGRADE_REQUIRED',
+      'Sync protocol version is not supported.',
+      426,
+      { requestId, allowedOrigin },
+    );
+  }
+
+  if (requiresJsonContentType(request) && !isJsonContentType(request)) {
+    return errorResponse(
+      'UNSUPPORTED_CONTENT_TYPE',
+      'Content-Type must be application/json.',
+      415,
+      { requestId, allowedOrigin },
+    );
+  }
+
+  if (pathname !== HEALTH_PATH && allowedOrigin === null) {
+    return errorResponse('ORIGIN_REQUIRED', 'An allowed Origin header is required.', 403, {
+      requestId,
+      allowedOrigin,
+    });
+  }
+
+  await enforceEdgeRateLimit(request, env);
+
+  return routeRequest({ request, env, requestId, allowedOrigin } satisfies RequestContext);
+};
+
+const worker: ExportedHandler<Env> = {
+  async fetch(request, env) {
+    const requestId = createRequestId();
+    const allowedOrigin = getAllowedOrigin(request, env);
+
+    try {
+      return await fetchHandler(request, env, requestId, allowedOrigin);
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return errorResponse(error.code, error.message, error.status, {
+          requestId,
+          allowedOrigin,
+          headers: error.status === 405 ? { Allow: 'GET, POST, OPTIONS' } : undefined,
+        });
+      }
+      return errorResponse('INTERNAL_ERROR', 'Request could not be processed.', 500, {
+        requestId,
+        allowedOrigin,
+      });
+    }
+  },
+
+  scheduled(controller, env, context) {
+    context.waitUntil(runScheduledCleanup(env, controller.scheduledTime));
+  },
+};
+
+export default worker;

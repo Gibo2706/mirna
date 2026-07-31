@@ -1,7 +1,8 @@
 import { lazy, Suspense } from 'react';
-import { Navigate, Route, Routes } from 'react-router';
+import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { AppShell } from '@/components/AppShell';
 import { useFinanceSnapshot } from '@/db/queries';
+import { readSyncClientConfig } from '@/features/sync/config';
 import { ThemeSync } from './ThemeSync';
 
 // Start fetching the first route while IndexedDB opens to avoid a network/DB waterfall on cold start.
@@ -35,6 +36,9 @@ const MorePage = lazy(() =>
 const SettingsPage = lazy(() =>
   import('@/pages/SettingsPage').then((module) => ({ default: module.SettingsPage })),
 );
+const SyncManager = lazy(() =>
+  import('@/features/sync/SyncManager').then((module) => ({ default: module.SyncManager })),
+);
 
 const StartupScreen = () => (
   <div className="grid min-h-dvh place-items-center text-center" role="status">
@@ -59,10 +63,22 @@ const PageLoader = () => (
 
 export const App = () => {
   const snapshot = useFinanceSnapshot();
+  const location = useLocation();
+  const syncConfig = readSyncClientConfig();
 
   if (snapshot === undefined) return <StartupScreen />;
 
   if (snapshot === null || !snapshot.settingsRecord.onboardingCompleted) {
+    if (syncConfig.enabled && location.pathname === '/more/sync') {
+      return (
+        <Suspense fallback={<StartupScreen />}>
+          <Routes>
+            <Route path="/more/sync" element={<SyncManager preOnboarding />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      );
+    }
     return (
       <Suspense fallback={<StartupScreen />}>
         <OnboardingPage snapshot={snapshot} />
@@ -80,8 +96,14 @@ export const App = () => {
             <Route path="month" element={<MonthPage snapshot={snapshot} />} />
             <Route path="goals" element={<GoalsPage snapshot={snapshot} />} />
             <Route path="forecast" element={<ForecastPage snapshot={snapshot} />} />
-            <Route path="more" element={<MorePage snapshot={snapshot} />} />
-            <Route path="more/:section" element={<SettingsPage snapshot={snapshot} />} />
+            <Route
+              path="more"
+              element={<MorePage snapshot={snapshot} syncEnabled={syncConfig.enabled} />}
+            />
+            <Route
+              path="more/:section"
+              element={<SettingsPage snapshot={snapshot} syncEnabled={syncConfig.enabled} />}
+            />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
