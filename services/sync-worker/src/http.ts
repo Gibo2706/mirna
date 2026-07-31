@@ -7,6 +7,7 @@ const ALLOWED_REQUEST_HEADERS = new Set([
   'authorization',
   'content-type',
   'idempotency-key',
+  'x-mirna-snapshot-envelope',
   'x-mirna-protocol-version',
 ]);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH']);
@@ -73,7 +74,10 @@ const applySecurityHeaders = (
 
   if (allowedOrigin !== null) {
     headers.set('Access-Control-Allow-Origin', allowedOrigin);
-    headers.set('Access-Control-Expose-Headers', 'X-Mirna-Protocol-Version, X-Request-Id');
+    headers.set(
+      'Access-Control-Expose-Headers',
+      'Content-Length, X-Mirna-Protocol-Version, X-Mirna-Snapshot-Envelope, X-Request-Id',
+    );
   }
 };
 
@@ -94,6 +98,23 @@ export const jsonResponse = (
     status: options.status ?? 200,
     headers,
   });
+};
+
+export const binaryResponse = (
+  body: BodyInit,
+  options: {
+    requestId: string;
+    allowedOrigin?: string | null;
+    contentLength: number;
+    headers?: HeadersInit;
+  },
+): Response => {
+  const headers = new Headers(options.headers);
+  headers.set('Content-Type', 'application/octet-stream');
+  headers.set('Content-Length', String(options.contentLength));
+  applySecurityHeaders(headers, options.requestId, options.allowedOrigin ?? null);
+
+  return new Response(body, { status: 200, headers });
 };
 
 export const noContentResponse = (options: {
@@ -136,6 +157,10 @@ export const errorResponse = (
 export const isJsonContentType = (request: Request): boolean =>
   request.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() ===
   'application/json';
+
+export const isBinaryContentType = (request: Request): boolean =>
+  request.headers.get('Content-Type')?.split(';', 1)[0]?.trim().toLowerCase() ===
+  'application/octet-stream';
 
 export const requiresJsonContentType = (request: Request): boolean =>
   MUTATING_METHODS.has(request.method.toUpperCase());

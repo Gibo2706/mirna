@@ -4,6 +4,10 @@ import {
   SYNC_PROTOCOL_VERSION,
   SYNC_TRANSCRIPT_TYPES,
 } from '@/domain/sync/constants';
+import { generateDeviceKeyPairs } from '@/domain/sync/crypto';
+import { bytesToBase64Url, utf8 } from '@/domain/sync/encoding';
+import { createEncryptedSnapshot, type EncryptedSnapshotArtifactV1 } from '@/domain/sync/snapshot';
+import { emptyFinanceData } from '@/tests/factories';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MirnaSyncApi, SyncApiError } from './api';
 import type { SyncClientConfig } from './config';
@@ -87,6 +91,43 @@ const initialManifest = {
   },
   signature: signature('J'),
 } as const;
+
+const createSnapshotArtifact = async (): Promise<EncryptedSnapshotArtifactV1> => {
+  const keys = await generateDeviceKeyPairs();
+  return createEncryptedSnapshot({
+    data: emptyFinanceData(),
+    vaultId: opaqueId('A'),
+    revision: 1,
+    baseRevision: 0,
+    keyEpoch: 1,
+    creatingDeviceId: opaqueId('B'),
+    createdAt: NOW,
+    parentManifestHash: hash('P'),
+    previousSnapshotHash: null,
+    causalFrontier: { serverCursor: 0, devices: [] },
+    vaultMasterKey: new Uint8Array(32).fill(7),
+    signingPrivateKey: keys.signing.privateKey,
+    compression: 'none',
+  });
+};
+
+const sessionResponse = () =>
+  protocolResponse(
+    {
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      accessToken: hash('T'),
+      expiresAt: LATER,
+      authorizationExpiresAt: AUTHORIZATION_EXPIRY,
+    },
+    201,
+  );
+
+const establishSession = (api: MirnaSyncApi) =>
+  api.createSession({
+    protocolVersion: SYNC_PROTOCOL_VERSION,
+    challenge: authChallenge,
+    signature: signature('K'),
+  });
 
 afterEach(() => {
   vi.useRealTimers();
@@ -297,5 +338,73 @@ describe('Mirna sync API transport', () => {
 
     await vi.advanceTimersByTimeAsync(25);
     await rejection;
+  });
+
+  it('uploads snapshot ciphertext as a bounded binary body with a canonical envelope header', async () => {
+    const artifact = await createSnapshotArtifact();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(sessionResponse())
+      .mockResolvedValueOnce(
+        protocolResponse(
+          {
+            protocolVersion: 1,
+            snapshotId: artifact.envelope.snapshotId,
+            revision: 1,
+            snapshotHash: hash('Q'),
+            committed: true,
+          },
+          201,
+        ),
+      );
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock });
+    await establishSession(api);
+
+    await expect(api.uploadSnapshot(artifact, hash('I'))).resolves.toMatchObject({
+      snapshotId: artifact.envelope.snapshotId,
+      revision: 1,
+    });
+    const [url, init] = fetchMock.mock.calls[1] ?? [];
+    expect(url).toBe(`${API_ORIGIN}/v1/snapshots/${artifact.envelope.snapshotId}`);
+    expect(init?.method).toBe('PUT');
+    expect(new Uint8Array(init?.body as ArrayBuffer)).toEqual(artifact.ciphertext);
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Content-Type')).toBe('application/octet-stream');
+    expect(headers.get('Idempotency-Key')).toBe(hash('I'));
+    expect(headers.get('X-Mirna-Snapshot-Envelope')).toBe(
+      bytesToBase64Url(utf8(canonicalizeJson(artifact.envelope))),
+    );
+    expect(headers.get('Authorization')).toBe(`Bearer ${hash('T')}`);
+  });
+
+  it('downloads only a canonical, size-bounded binary snapshot response', async () => {
+    const artifact = await createSnapshotArtifact();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(sessionResponse())
+      .mockResolvedValueOnce(
+        new Response(artifact.ciphertext.slice().buffer, {
+          status: 200,
+          headers: {
+            'Content-Length': String(artifact.ciphertext.byteLength),
+            'Content-Type': 'application/octet-stream',
+            'X-Mirna-Protocol-Version': '1',
+            'X-Mirna-Snapshot-Envelope': bytesToBase64Url(
+              utf8(canonicalizeJson(artifact.envelope)),
+            ),
+          },
+        }),
+      );
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock });
+    await establishSession(api);
+
+    await expect(api.downloadCurrentSnapshot()).resolves.toEqual({
+      envelope: artifact.envelope,
+      ciphertext: artifact.ciphertext,
+    });
+    const [url, init] = fetchMock.mock.calls[1] ?? [];
+    expect(url).toBe(`${API_ORIGIN}/v1/snapshots/current`);
+    expect(new Headers(init?.headers).get('Accept')).toBe('application/octet-stream');
+    expect(init?.cache).toBe('no-store');
   });
 });

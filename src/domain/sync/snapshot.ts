@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { assertFinanceDataIntegrity } from '@/domain/integrity';
+import { assertFinanceDataIntegrity } from '../integrity';
 import {
   accountSchema,
   appSettingsSchema,
@@ -15,8 +15,8 @@ import {
   salaryScenarioSchema,
   transactionSchema,
   variableBudgetSchema,
-} from '@/domain/schemas';
-import type { AppSettings, FinanceData } from '@/domain/types';
+} from '../schemas';
+import type { AppSettings, FinanceData } from '../types';
 import { canonicalBytes } from './canonical';
 import {
   SYNC_CRYPTO_SUITE,
@@ -36,7 +36,7 @@ import {
   verifyDomainSeparatedCanonicalSignature,
   type CryptoRuntime,
 } from './crypto';
-import { base64UrlToBytes, bytesToBase64Url, decodeUtf8 } from './encoding';
+import { base64UrlToBytes, bytesToBase64Url, clearBytes, decodeUtf8 } from './encoding';
 import {
   aesGcmNonceSchema,
   opaqueIdSchema,
@@ -49,6 +49,7 @@ export const SYNC_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 export const SYNC_SNAPSHOT_TYPE = 'mirna-sync-snapshot-v1' as const;
 
 export const SNAPSHOT_CONTENT_HASH_DOMAIN = 'MIRNA-E2EE-V1/snapshot-content' as const;
+export const SNAPSHOT_DATA_HASH_DOMAIN = 'MIRNA-E2EE-V1/snapshot-finance-data' as const;
 export const SNAPSHOT_FRONTIER_HASH_DOMAIN = 'MIRNA-E2EE-V1/snapshot-frontier' as const;
 export const SNAPSHOT_SIGNATURE_DOMAIN = 'MIRNA-E2EE-V1/snapshot-envelope' as const;
 export const SNAPSHOT_COMMIT_HASH_DOMAIN = 'MIRNA-E2EE-V1/snapshot-commit' as const;
@@ -58,8 +59,6 @@ export const MAX_SNAPSHOT_COMPRESSION_RATIO = 100;
 
 const safeNonNegativeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const positiveSafeInteger = safeNonNegativeInteger.positive();
-const canonicalBase64Url = z.string().regex(/^[A-Za-z0-9_-]+$/u);
-const maximumCiphertextCharacters = Math.ceil((SYNC_LIMITS.maxSnapshotBytes * 4) / 3);
 
 const sortedById = <T extends { id: string }>(values: readonly T[]): T[] =>
   [...values].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
@@ -264,7 +263,6 @@ export const unsignedEncryptedSnapshotEnvelopeSchema = z
     aad: snapshotAadSchema,
     ciphertextLength: z.number().int().min(16).max(SYNC_LIMITS.maxSnapshotBytes),
     ciphertextHash: sha256Schema,
-    ciphertext: canonicalBase64Url.min(22).max(maximumCiphertextCharacters),
   })
   .superRefine((envelope, context) => {
     const expected = {
@@ -304,6 +302,16 @@ export type UnsignedEncryptedSnapshotEnvelopeV1 = z.infer<
   typeof unsignedEncryptedSnapshotEnvelopeSchema
 >;
 export type EncryptedSnapshotEnvelopeV1 = z.infer<typeof encryptedSnapshotEnvelopeSchema>;
+
+/**
+ * Ciphertext is deliberately separate from the signed clear envelope so the
+ * Worker can authenticate metadata and stream the opaque body directly to R2.
+ */
+export interface EncryptedSnapshotArtifactV1 {
+  readonly envelope: EncryptedSnapshotEnvelopeV1;
+  readonly ciphertext: Uint8Array;
+  readonly snapshotContentHash: string;
+}
 
 const validateFullFinanceData = (value: FinanceData): FinanceData => {
   financeDataSchema.parse(value);
@@ -351,6 +359,12 @@ export const createSyncFinanceData = (value: FinanceData): SyncFinanceDataV1 => 
     }),
   );
 };
+
+export const computeSyncFinanceDataHash = (
+  value: FinanceData,
+  runtime?: CryptoRuntime,
+): Promise<string> =>
+  hashDomainSeparatedCanonical(SNAPSHOT_DATA_HASH_DOMAIN, createSyncFinanceData(value), runtime);
 
 const financeDataForIntegrityCheck = (
   data: SyncFinanceDataV1,
@@ -592,81 +606,90 @@ export interface EncryptSnapshotInput extends Omit<CreateSyncSnapshotInput, 'sna
 export const createEncryptedSnapshot = async (
   input: EncryptSnapshotInput,
   runtime?: CryptoRuntime,
-): Promise<EncryptedSnapshotEnvelopeV1> => {
+): Promise<EncryptedSnapshotArtifactV1> => {
   const snapshotId = input.snapshotId ?? createOpaqueId(runtime);
   const snapshot = await createSyncSnapshot({ ...input, snapshotId }, runtime);
   const plaintext = canonicalBytes(snapshot);
   if (plaintext.length > MAX_SNAPSHOT_DECOMPRESSED_BYTES) {
     throw new Error('Kanonski snimak prelazi dozvoljenu veličinu.');
   }
-  const candidateCompression = await compressSnapshotBytes(plaintext, input.compression);
-  const compressed =
-    candidateCompression.compression === 'gzip' &&
-    plaintext.length > candidateCompression.bytes.length * MAX_SNAPSHOT_COMPRESSION_RATIO
+  let compressedBytes: Uint8Array | undefined;
+  try {
+    const candidateCompression = await compressSnapshotBytes(plaintext, input.compression);
+    const exceedsCompressionRatio =
+      candidateCompression.compression === 'gzip' &&
+      plaintext.length > candidateCompression.bytes.length * MAX_SNAPSHOT_COMPRESSION_RATIO;
+    const compressed = exceedsCompressionRatio
       ? ({ compression: 'none', bytes: plaintext.slice() } as const)
       : candidateCompression;
-  const causalFrontierHash = await computeSnapshotFrontierHash(snapshot.causalFrontier, runtime);
-  const aad = snapshotAadSchema.parse({
-    protocolVersion: SYNC_PROTOCOL_VERSION,
-    suite: SYNC_CRYPTO_SUITE,
-    vaultId: snapshot.vaultId,
-    keyEpoch: snapshot.keyEpoch,
-    objectType: 'snapshot',
-    objectId: snapshot.snapshotId,
-    snapshotSchemaVersion: SYNC_SNAPSHOT_SCHEMA_VERSION,
-    revision: snapshot.revision,
-    baseRevision: snapshot.baseRevision,
-    creatingDeviceId: snapshot.creatingDeviceId,
-    parentManifestHash: snapshot.parentManifestHash,
-    previousSnapshotHash: snapshot.previousSnapshotHash,
-    causalFrontierHash,
-    compression: compressed.compression,
-  });
-  const key = await deriveObjectEncryptionKey(
-    input.vaultMasterKey,
-    {
+    if (exceedsCompressionRatio) clearBytes(candidateCompression.bytes);
+    compressedBytes = compressed.bytes;
+    const causalFrontierHash = await computeSnapshotFrontierHash(snapshot.causalFrontier, runtime);
+    const aad = snapshotAadSchema.parse({
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      suite: SYNC_CRYPTO_SUITE,
       vaultId: snapshot.vaultId,
       keyEpoch: snapshot.keyEpoch,
       objectType: 'snapshot',
       objectId: snapshot.snapshotId,
-      purpose: 'snapshot',
-    },
-    runtime,
-  );
-  const nonce = randomBytes(SYNC_LIMITS.aesGcmNonceBytes, runtime);
-  const ciphertext = await encryptAesGcm(compressed.bytes, key, nonce, aad, runtime);
-  if (ciphertext.length > SYNC_LIMITS.maxSnapshotBytes) {
-    throw new Error('Šifrovani snimak prelazi staging ograničenje od 8 MiB.');
-  }
-  const unsignedEnvelope = unsignedEncryptedSnapshotEnvelopeSchema.parse({
-    type: SYNC_TRANSCRIPT_TYPES.snapshotEnvelope,
-    protocolVersion: SYNC_PROTOCOL_VERSION,
-    suite: SYNC_CRYPTO_SUITE,
-    vaultId: snapshot.vaultId,
-    snapshotId: snapshot.snapshotId,
-    revision: snapshot.revision,
-    baseRevision: snapshot.baseRevision,
-    keyEpoch: snapshot.keyEpoch,
-    creatingDeviceId: snapshot.creatingDeviceId,
-    parentManifestHash: snapshot.parentManifestHash,
-    previousSnapshotHash: snapshot.previousSnapshotHash,
-    causalFrontierHash,
-    compression: compressed.compression,
-    nonce: bytesToBase64Url(nonce),
-    aad,
-    ciphertextLength: ciphertext.length,
-    ciphertextHash: bytesToBase64Url(await sha256(ciphertext, runtime)),
-    ciphertext: bytesToBase64Url(ciphertext),
-  });
-  return encryptedSnapshotEnvelopeSchema.parse({
-    ...unsignedEnvelope,
-    signature: await signDomainSeparatedCanonical(
-      SNAPSHOT_SIGNATURE_DOMAIN,
-      unsignedEnvelope,
-      input.signingPrivateKey,
+      snapshotSchemaVersion: SYNC_SNAPSHOT_SCHEMA_VERSION,
+      revision: snapshot.revision,
+      baseRevision: snapshot.baseRevision,
+      creatingDeviceId: snapshot.creatingDeviceId,
+      parentManifestHash: snapshot.parentManifestHash,
+      previousSnapshotHash: snapshot.previousSnapshotHash,
+      causalFrontierHash,
+      compression: compressed.compression,
+    });
+    const key = await deriveObjectEncryptionKey(
+      input.vaultMasterKey,
+      {
+        vaultId: snapshot.vaultId,
+        keyEpoch: snapshot.keyEpoch,
+        objectType: 'snapshot',
+        objectId: snapshot.snapshotId,
+        purpose: 'snapshot',
+      },
       runtime,
-    ),
-  });
+    );
+    const nonce = randomBytes(SYNC_LIMITS.aesGcmNonceBytes, runtime);
+    const ciphertext = await encryptAesGcm(compressed.bytes, key, nonce, aad, runtime);
+    if (ciphertext.length > SYNC_LIMITS.maxSnapshotBytes) {
+      throw new Error('Šifrovani snimak prelazi staging ograničenje od 8 MiB.');
+    }
+    const unsignedEnvelope = unsignedEncryptedSnapshotEnvelopeSchema.parse({
+      type: SYNC_TRANSCRIPT_TYPES.snapshotEnvelope,
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      suite: SYNC_CRYPTO_SUITE,
+      vaultId: snapshot.vaultId,
+      snapshotId: snapshot.snapshotId,
+      revision: snapshot.revision,
+      baseRevision: snapshot.baseRevision,
+      keyEpoch: snapshot.keyEpoch,
+      creatingDeviceId: snapshot.creatingDeviceId,
+      parentManifestHash: snapshot.parentManifestHash,
+      previousSnapshotHash: snapshot.previousSnapshotHash,
+      causalFrontierHash,
+      compression: compressed.compression,
+      nonce: bytesToBase64Url(nonce),
+      aad,
+      ciphertextLength: ciphertext.length,
+      ciphertextHash: bytesToBase64Url(await sha256(ciphertext, runtime)),
+    });
+    const envelope = encryptedSnapshotEnvelopeSchema.parse({
+      ...unsignedEnvelope,
+      signature: await signDomainSeparatedCanonical(
+        SNAPSHOT_SIGNATURE_DOMAIN,
+        unsignedEnvelope,
+        input.signingPrivateKey,
+        runtime,
+      ),
+    });
+    return { envelope, ciphertext, snapshotContentHash: snapshot.contentIntegrityHash };
+  } finally {
+    clearBytes(plaintext);
+    if (compressedBytes) clearBytes(compressedBytes);
+  }
 };
 
 export interface SnapshotAcceptanceContext {
@@ -696,16 +719,12 @@ const assertAcceptanceContext = (
 };
 
 const parseEncryptedEnvelope = (value: unknown): EncryptedSnapshotEnvelopeV1 => {
-  const parsed = encryptedSnapshotEnvelopeSchema.parse(value);
-  const ciphertext = base64UrlToBytes(parsed.ciphertext);
-  if (ciphertext.length !== parsed.ciphertextLength) {
-    throw new Error('Dužina ciphertext-a snimka nije usaglašena.');
-  }
-  return parsed;
+  return encryptedSnapshotEnvelopeSchema.parse(value);
 };
 
 export interface OpenEncryptedSnapshotInput {
   envelope: unknown;
+  ciphertext: Uint8Array;
   vaultMasterKey: Uint8Array;
   signingPublicKey: CryptoKey;
   expected: SnapshotAcceptanceContext;
@@ -717,7 +736,10 @@ export const openEncryptedSnapshot = async (
 ): Promise<SyncSnapshotV1> => {
   const envelope = parseEncryptedEnvelope(input.envelope);
   assertAcceptanceContext(envelope, input.expected);
-  const ciphertext = base64UrlToBytes(envelope.ciphertext);
+  const ciphertext = copiedBytes(input.ciphertext);
+  if (ciphertext.length !== envelope.ciphertextLength) {
+    throw new Error('Dužina ciphertext-a snimka nije usaglašena.');
+  }
   const ciphertextHash = bytesToBase64Url(await sha256(ciphertext, runtime));
   if (ciphertextHash !== envelope.ciphertextHash) {
     throw new Error('Ciphertext snimka nema očekivani hash.');
@@ -745,36 +767,44 @@ export const openEncryptedSnapshot = async (
     },
     runtime,
   );
-  const compressed = await decryptAesGcm(
-    ciphertext,
-    key,
-    base64UrlToBytes(envelope.nonce),
-    envelope.aad,
-    runtime,
-  );
-  const plaintext = await decompressSnapshotBytes(compressed, envelope.compression);
-  let decoded: unknown;
+  let compressed: Uint8Array | undefined;
+  let plaintext: Uint8Array | undefined;
   try {
-    decoded = JSON.parse(decodeUtf8(copiedBytes(plaintext)));
-  } catch {
-    throw new Error('Dešifrovani snimak nije validan kanonski JSON.');
+    compressed = await decryptAesGcm(
+      ciphertext,
+      key,
+      base64UrlToBytes(envelope.nonce),
+      envelope.aad,
+      runtime,
+    );
+    plaintext = await decompressSnapshotBytes(compressed, envelope.compression);
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(decodeUtf8(copiedBytes(plaintext)));
+    } catch {
+      throw new Error('Dešifrovani snimak nije validan kanonski JSON.');
+    }
+    const snapshot = await parseSyncSnapshot(decoded, runtime);
+    const frontierHash = await computeSnapshotFrontierHash(snapshot.causalFrontier, runtime);
+    if (
+      snapshot.vaultId !== envelope.vaultId ||
+      snapshot.snapshotId !== envelope.snapshotId ||
+      snapshot.revision !== envelope.revision ||
+      snapshot.baseRevision !== envelope.baseRevision ||
+      snapshot.keyEpoch !== envelope.keyEpoch ||
+      snapshot.creatingDeviceId !== envelope.creatingDeviceId ||
+      snapshot.parentManifestHash !== envelope.parentManifestHash ||
+      snapshot.previousSnapshotHash !== envelope.previousSnapshotHash ||
+      frontierHash !== envelope.causalFrontierHash
+    ) {
+      throw new Error('Dešifrovani snimak nije vezan za svoj potpisani omot.');
+    }
+    return snapshot;
+  } finally {
+    clearBytes(ciphertext);
+    if (compressed) clearBytes(compressed);
+    if (plaintext) clearBytes(plaintext);
   }
-  const snapshot = await parseSyncSnapshot(decoded, runtime);
-  const frontierHash = await computeSnapshotFrontierHash(snapshot.causalFrontier, runtime);
-  if (
-    snapshot.vaultId !== envelope.vaultId ||
-    snapshot.snapshotId !== envelope.snapshotId ||
-    snapshot.revision !== envelope.revision ||
-    snapshot.baseRevision !== envelope.baseRevision ||
-    snapshot.keyEpoch !== envelope.keyEpoch ||
-    snapshot.creatingDeviceId !== envelope.creatingDeviceId ||
-    snapshot.parentManifestHash !== envelope.parentManifestHash ||
-    snapshot.previousSnapshotHash !== envelope.previousSnapshotHash ||
-    frontierHash !== envelope.causalFrontierHash
-  ) {
-    throw new Error('Dešifrovani snimak nije vezan za svoj potpisani omot.');
-  }
-  return snapshot;
 };
 
 export const hashEncryptedSnapshotEnvelope = (

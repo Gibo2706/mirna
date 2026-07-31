@@ -31,6 +31,9 @@ interface LocalSyncSecurityView {
   readonly agreementPrivateKeyExtractable: boolean;
   readonly localWrappingKeyExtractable: boolean;
   readonly encryptedVaultKey: string;
+  readonly lastSnapshotRevision: number;
+  readonly lastSnapshotId: string | null;
+  readonly firstUploadConsent: string;
 }
 
 type D1Row = Readonly<Record<string, unknown>>;
@@ -172,10 +175,16 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
         open.onerror = () => reject(new Error('Lokalna baza nije otvorena.'));
         open.onsuccess = () => {
           const database = open.result;
-          const transaction = database.transaction(['syncVault', 'syncDevice', 'syncKeys']);
+          const transaction = database.transaction([
+            'syncVault',
+            'syncDevice',
+            'syncKeys',
+            'syncMetadata',
+          ]);
           const vaultRequest = transaction.objectStore('syncVault').get(vaultRecordId);
           const deviceRequest = transaction.objectStore('syncDevice').get('local-sync-device');
           const keysRequest = transaction.objectStore('syncKeys').getAll();
+          const metadataRequest = transaction.objectStore('syncMetadata').get('sync-metadata');
           transaction.onerror = () => reject(new Error('Lokalni sync zapisi nisu pročitani.'));
           transaction.oncomplete = () => {
             database.close();
@@ -193,7 +202,12 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
             const key = (
               keysRequest.result as Array<{ encryptedKey: unknown; vaultId: string }>
             ).find((candidate) => candidate.vaultId === vault.vaultId);
-            if (!vault || !device || !key) {
+            const metadata = metadataRequest.result as {
+              lastSnapshotRevision: number;
+              lastSnapshotId: string | null;
+              firstUploadConsent: string;
+            };
+            if (!vault || !device || !key || !metadata) {
               reject(new Error('Lokalni sync setup nije potpun.'));
               return;
             }
@@ -207,11 +221,37 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
               agreementPrivateKeyExtractable: device.agreementPrivateKey.extractable,
               localWrappingKeyExtractable: device.localWrappingKey.extractable,
               encryptedVaultKey: JSON.stringify(key.encryptedKey),
+              lastSnapshotRevision: metadata.lastSnapshotRevision,
+              lastSnapshotId: metadata.lastSnapshotId,
+              firstUploadConsent: metadata.firstUploadConsent,
             });
           };
         };
       }),
     { databaseName: DATABASE_NAME, vaultRecordId: SYNC_VAULT_RECORD_ID },
+  );
+
+const hasAccountName = async (page: Page, name: string): Promise<boolean> =>
+  page.evaluate(
+    ({ databaseName, expectedName }) =>
+      new Promise<boolean>((resolvePromise, reject) => {
+        const open = indexedDB.open(databaseName);
+        open.onerror = () => reject(new Error('Lokalna baza nije otvorena.'));
+        open.onsuccess = () => {
+          const database = open.result;
+          const request = database.transaction('accounts').objectStore('accounts').getAll();
+          request.onerror = () => reject(new Error('Računi nisu pročitani.'));
+          request.onsuccess = () => {
+            database.close();
+            resolvePromise(
+              (request.result as Array<{ name?: string }>).some(
+                (account) => account.name === expectedName,
+              ),
+            );
+          };
+        };
+      }),
+    { databaseName: DATABASE_NAME, expectedName: name },
   );
 
 const alterChecksum = (code: string): string =>
@@ -265,7 +305,7 @@ test.beforeEach(() => {
   requestBodies.length = 0;
 });
 
-test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after total loss', async ({
+test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths, and recover', async ({
   browser,
 }) => {
   test.setTimeout(180_000);
@@ -306,6 +346,10 @@ test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after
   await expect(activateSync).toBeVisible();
   await activateSync.click();
   await expect(phone.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  await phone
+    .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
+    .click();
+  await expect(phone.getByText('Šifrovani snapshot je uspešno poslat.')).toBeVisible();
 
   const phoneLocal = await readLocalSyncSecurityView(phone);
   expect(phoneLocal.displayName).toBe(PHONE_DEVICE_NAME);
@@ -313,6 +357,9 @@ test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after
   expect(phoneLocal.agreementPrivateKeyExtractable).toBe(false);
   expect(phoneLocal.localWrappingKeyExtractable).toBe(false);
   expect(phoneLocal.encryptedVaultKey.includes('vaultMasterKey')).toBe(false);
+  expect(phoneLocal.lastSnapshotRevision).toBe(1);
+  expect(phoneLocal.lastSnapshotId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
+  expect(phoneLocal.firstUploadConsent).toBe('accepted');
 
   await phone.getByLabel('QR sadržaj ili ručni kod').fill(alterChecksum(pairingCode));
   await phone.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
@@ -325,6 +372,11 @@ test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after
   expect(newDeviceSas).toBe(existingSas);
   await desktop.getByRole('button', { name: 'Poklapaju se — poveži' }).click();
   await expect(desktop.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  await desktop.getByRole('button', { name: 'Sinhronizuj sada' }).click();
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(desktop)).lastSnapshotRevision)
+    .toBe(1);
+  await expect.poll(() => hasAccountName(desktop, PLAINTEXT_SENTINEL)).toBe(true);
 
   const desktopLocal = await readLocalSyncSecurityView(desktop);
   expect(desktopLocal.vaultId).toBe(phoneLocal.vaultId);
@@ -334,6 +386,9 @@ test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after
   expect(desktopLocal.signingPrivateKeyExtractable).toBe(false);
   expect(desktopLocal.agreementPrivateKeyExtractable).toBe(false);
   expect(desktopLocal.localWrappingKeyExtractable).toBe(false);
+  const desktopAfterDownload = await readLocalSyncSecurityView(desktop);
+  expect(desktopAfterDownload.lastSnapshotRevision).toBe(1);
+  expect(desktopAfterDownload.lastSnapshotId).toBe(phoneLocal.lastSnapshotId);
 
   await phone.getByLabel('QR sadržaj ili ručni kod').fill(pairingCode);
   await phone.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
@@ -394,6 +449,10 @@ test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after
     Number(pairedDeviceCounts.find((row) => row.status === 'active')?.count),
     'Tačno dva uređaja moraju biti aktivna pre recovery-ja.',
   ).toBe(2);
+  const committedSnapshots = localD1(
+    `SELECT COUNT(*) AS count FROM snapshots WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)} AND state = 'committed'`,
+  );
+  expect(Number(committedSnapshots[0]?.count)).toBe(1);
 
   await Promise.all([
     phoneContext.close(),
@@ -449,6 +508,9 @@ test('Phase 1: two isolated devices pair, reject unsafe paths, and recover after
     UNION ALL
     SELECT 'pairing-manifest', candidate_manifest
       FROM pairing_envelopes WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
+    UNION ALL
+    SELECT 'snapshot-envelope', canonical_envelope
+      FROM snapshots WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
   `);
   const serverText = `${requestBodies.join('\n')}\n${JSON.stringify(storedCiphertextRows)}`;
   expectPrivateMaterialAbsent(serverText, [

@@ -13,7 +13,7 @@ import {
   salaryScenarioSchema,
   transactionSchema,
   variableBudgetSchema,
-} from '@/domain/schemas';
+} from '../schemas';
 import { canonicalBytes, canonicalizeJson, type CanonicalJson } from './canonical';
 import {
   SYNC_CRYPTO_SUITE,

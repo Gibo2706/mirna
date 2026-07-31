@@ -90,20 +90,24 @@ const acceptanceContext: SnapshotAcceptanceContext = {
 describe('SyncSnapshotV1 client primitives', () => {
   let keys: DeviceKeyPairs;
   let envelope: EncryptedSnapshotEnvelopeV1;
+  let ciphertext: Uint8Array;
 
   beforeAll(async () => {
     keys = await generateDeviceKeyPairs();
-    envelope = await createEncryptedSnapshot({
+    const artifact = await createEncryptedSnapshot({
       ...snapshotInput(),
       vaultMasterKey,
       signingPrivateKey: keys.signing.privateKey,
       compression: 'gzip',
     });
+    envelope = artifact.envelope;
+    ciphertext = artifact.ciphertext;
   });
 
   it('round-trips a signed, compressed, object-key-encrypted snapshot', async () => {
     const snapshot = await openEncryptedSnapshot({
       envelope,
+      ciphertext,
       vaultMasterKey,
       signingPublicKey: keys.signing.publicKey,
       expected: acceptanceContext,
@@ -112,7 +116,7 @@ describe('SyncSnapshotV1 client primitives', () => {
     expect(snapshot.data).toEqual(createSyncFinanceData(financialData()));
     expect(snapshot.contentIntegrityHash).toHaveLength(43);
     expect(envelope.compression).toBe('gzip');
-    expect(envelope.ciphertextLength).toBe(base64UrlToBytes(envelope.ciphertext).length);
+    expect(envelope.ciphertextLength).toBe(ciphertext.length);
     expect(envelope.aad).toMatchObject({
       revision: 1,
       baseRevision: 0,
@@ -194,6 +198,7 @@ describe('SyncSnapshotV1 client primitives', () => {
     await expect(
       openEncryptedSnapshot({
         envelope: tampered,
+        ciphertext,
         vaultMasterKey,
         signingPublicKey: keys.signing.publicKey,
         expected: acceptanceContext,
@@ -202,14 +207,13 @@ describe('SyncSnapshotV1 client primitives', () => {
   });
 
   it('rejects ciphertext and ciphertext-hash tampering', async () => {
-    const tampered = structuredClone(envelope);
-    const ciphertext = base64UrlToBytes(tampered.ciphertext);
-    ciphertext[0] ^= 1;
-    tampered.ciphertext = bytesToBase64Url(ciphertext);
+    const tamperedCiphertext = ciphertext.slice();
+    tamperedCiphertext[0] ^= 1;
 
     await expect(
       openEncryptedSnapshot({
-        envelope: tampered,
+        envelope,
+        ciphertext: tamperedCiphertext,
         vaultMasterKey,
         signingPublicKey: keys.signing.publicKey,
         expected: acceptanceContext,
@@ -226,6 +230,7 @@ describe('SyncSnapshotV1 client primitives', () => {
     await expect(
       openEncryptedSnapshot({
         envelope: tampered,
+        ciphertext,
         vaultMasterKey,
         signingPublicKey: keys.signing.publicKey,
         expected: acceptanceContext,
@@ -237,6 +242,7 @@ describe('SyncSnapshotV1 client primitives', () => {
     await expect(
       openEncryptedSnapshot({
         envelope: { ...envelope, protocolVersion: 2 },
+        ciphertext,
         vaultMasterKey,
         signingPublicKey: keys.signing.publicKey,
         expected: acceptanceContext,
@@ -275,6 +281,7 @@ describe('SyncSnapshotV1 client primitives', () => {
 
     const opened = await openEncryptedSnapshot({
       envelope,
+      ciphertext,
       vaultMasterKey,
       signingPublicKey: keys.signing.publicKey,
       expected: acceptanceContext,

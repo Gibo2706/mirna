@@ -8,12 +8,13 @@ import {
   errorResponse,
   getAllowedOrigin,
   hasDisallowedOrigin,
+  isBinaryContentType,
   isJsonContentType,
   noContentResponse,
   requiresJsonContentType,
   validatePreflightHeaders,
 } from './http';
-import { allowedMethodsForPath, routeRequest } from './router';
+import { allowedMethodsForPath, isSnapshotUploadPath, routeRequest } from './router';
 
 const HEALTH_PATH = '/v1/health';
 
@@ -77,7 +78,17 @@ const fetchHandler = async (
     );
   }
 
-  if (requiresJsonContentType(request) && !isJsonContentType(request)) {
+  const snapshotUpload = request.method === 'PUT' && isSnapshotUploadPath(pathname);
+  if (snapshotUpload && !isBinaryContentType(request)) {
+    return errorResponse(
+      'UNSUPPORTED_CONTENT_TYPE',
+      'Content-Type must be application/octet-stream.',
+      415,
+      { requestId, allowedOrigin },
+    );
+  }
+
+  if (!snapshotUpload && requiresJsonContentType(request) && !isJsonContentType(request)) {
     return errorResponse(
       'UNSUPPORTED_CONTENT_TYPE',
       'Content-Type must be application/json.',

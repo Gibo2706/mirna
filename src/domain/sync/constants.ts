@@ -78,6 +78,7 @@ export const SYNC_DOMAIN_LABELS = Object.freeze({
   recoveryProof: 'MIRNA-E2EE-V1/recovery-proof',
   recoveryCompleteRequest: 'MIRNA-E2EE-V1/recovery-complete-request',
   recoveryIdempotencyHash: 'MIRNA-E2EE-V1/recovery-idempotency-hash',
+  snapshotIdempotencyHash: 'MIRNA-E2EE-V1/snapshot-idempotency-hash',
   recoveryCode: 'MIRNA-RECOVERY-CODE-V1',
 });
 

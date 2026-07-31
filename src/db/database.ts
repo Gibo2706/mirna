@@ -15,8 +15,10 @@ import type {
   VariableBudget,
 } from '@/domain/types';
 import { inferLegacyGoalType, isGoalCompletionEvent } from '@/domain/goals';
+import { manifestBodyHash } from '@/domain/sync/manifest';
 import type {
   SyncConflictRecord,
+  SyncCheckpointRecord,
   SyncDeviceRecord,
   SyncFrontierRecord,
   SyncInboxRecord,
@@ -48,6 +50,7 @@ export class FinanceDatabase extends Dexie {
   syncConflicts!: EntityTable<SyncConflictRecord, 'id'>;
   syncFrontier!: EntityTable<SyncFrontierRecord, 'id'>;
   syncMetadata!: EntityTable<SyncMetadataRecord, 'id'>;
+  syncCheckpoints!: EntityTable<SyncCheckpointRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -267,23 +270,48 @@ export class FinanceDatabase extends Dexie {
       syncFrontier: 'id, vaultId, &deviceId, [vaultId+deviceId], acknowledgedServerCursor',
       syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
     });
+
+    this.version(7)
+      .stores({
+        syncCheckpoints: 'id, &vaultId, createdAt',
+      })
+      .upgrade(async (transaction) => {
+        const manifestHashes = new Map(
+          await Promise.all(
+            (await transaction.table<SyncVaultRecord>('syncVault').toArray()).map(
+              async (vault) => [vault.vaultId, await manifestBodyHash(vault.manifest)] as const,
+            ),
+          ),
+        );
+        await transaction
+          .table<SyncMetadataRecord>('syncMetadata')
+          .toCollection()
+          .modify((metadata) => {
+            metadata.lastSnapshotRevision ??= 0;
+            metadata.lastSnapshotId ??= null;
+            metadata.lastSnapshotHash ??= null;
+            metadata.lastSnapshotContentHash ??= null;
+            metadata.lastManifestHash ??= manifestHashes.get(metadata.vaultId) ?? '';
+            metadata.lastLocalDataHash ??= null;
+          });
+      });
   }
 }
 
 export const db = new FinanceDatabase();
 
-export const financeTables = () => [
-  db.transactions,
-  db.debtPayments,
-  db.accounts,
-  db.categories,
-  db.plannedIncomes,
-  db.commitments,
-  db.variableBudgets,
-  db.goals,
-  db.debts,
-  db.plannedEvents,
-  db.presets,
-  db.salaryScenarios,
-  db.settings,
+export const financeTables = (database: FinanceDatabase = db) => [
+  database.transactions,
+  database.debtPayments,
+  database.accounts,
+  database.categories,
+  database.plannedIncomes,
+  database.commitments,
+  database.variableBudgets,
+  database.goals,
+  database.debts,
+  database.plannedEvents,
+  database.presets,
+  database.salaryScenarios,
+  database.settings,
 ];

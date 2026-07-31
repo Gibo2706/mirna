@@ -97,6 +97,12 @@ const localSetup = (): LocalSyncSetup => {
       localSchemaVersion: 1,
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
+      lastSnapshotRevision: 0,
+      lastSnapshotId: null,
+      lastSnapshotHash: null,
+      lastSnapshotContentHash: null,
+      lastManifestHash: 'M'.repeat(43),
+      lastLocalDataHash: null,
       enabledAt: now,
     },
   };
@@ -114,6 +120,7 @@ const baseServices = (
   loadLocalStatus: vi.fn(() => Promise.resolve(initialStatus)),
   disableLocalDevice: vi.fn(() => Promise.resolve()),
   clearSession: vi.fn(),
+  synchronize: vi.fn(() => Promise.resolve({ kind: 'up-to-date' as const, revision: 1 })),
   createEnableLifecycle: unexpected,
   createNewDevicePairingLifecycle: unexpected,
   createExistingDevicePairingLifecycle: unexpected,
@@ -227,6 +234,29 @@ describe('Phase 1 sync UI', () => {
     await waitFor(() => expect(cancel).toHaveBeenCalledOnce());
     expect(screen.queryByTestId('sync-new-device-sas')).not.toBeInTheDocument();
     expect(screen.queryByTestId('sync-pairing-code')).not.toBeInTheDocument();
+  });
+
+  it('requires an explicit action before the first encrypted snapshot upload', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    const synchronize = vi.fn((allowInitialUpload?: boolean) =>
+      Promise.resolve(
+        allowInitialUpload
+          ? { kind: 'uploaded' as const, revision: 1 }
+          : { kind: 'awaiting-upload-consent' as const, revision: 0 as const },
+      ),
+    );
+    const services = baseServices({ synchronize }, { setup, pendingConflictCount: 0 });
+
+    renderManager(services);
+    const consentButton = await screen.findByRole('button', {
+      name: /Saglasan sam — pošalji prvi šifrovani snapshot/i,
+    });
+    expect(consentButton.closest('div')).toHaveTextContent(
+      /server ne dobija čitljive finansijske podatke/i,
+    );
+    await user.click(consentButton);
+    await waitFor(() => expect(synchronize).toHaveBeenCalledWith(true));
   });
 
   it('does not expose a sync row or construct sync services while the flag is off', () => {

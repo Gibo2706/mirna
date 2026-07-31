@@ -12,7 +12,8 @@ type RateLimitBindingName =
   | 'MIRNA_AUTH_SESSION_RATE_LIMITER'
   | 'MIRNA_RECOVERY_INIT_RATE_LIMITER'
   | 'MIRNA_RECOVERY_ACTION_RATE_LIMITER'
-  | 'MIRNA_SYNC_READ_RATE_LIMITER';
+  | 'MIRNA_SYNC_READ_RATE_LIMITER'
+  | 'MIRNA_SNAPSHOT_UPLOAD_RATE_LIMITER';
 
 const bindingForPath = (pathname: string): RateLimitBindingName | null => {
   if (pathname === '/v1/health') return 'MIRNA_HEALTH_RATE_LIMITER';
@@ -22,10 +23,19 @@ const bindingForPath = (pathname: string): RateLimitBindingName | null => {
   if (pathname === '/v1/auth/challenge') return 'MIRNA_AUTH_CHALLENGE_RATE_LIMITER';
   if (pathname === '/v1/auth/session') return 'MIRNA_AUTH_SESSION_RATE_LIMITER';
   if (pathname === '/v1/recovery/challenge') return 'MIRNA_RECOVERY_INIT_RATE_LIMITER';
-  if (pathname === '/v1/recovery/bundle' || /^\/v1\/vaults\/[^/]+\/recover$/u.test(pathname)) {
+  if (
+    pathname === '/v1/recovery/bundle' ||
+    pathname === '/v1/recovery/snapshot' ||
+    /^\/v1\/vaults\/[^/]+\/recover$/u.test(pathname)
+  ) {
     return 'MIRNA_RECOVERY_ACTION_RATE_LIMITER';
   }
-  if (pathname === '/v1/vault/manifest') return 'MIRNA_SYNC_READ_RATE_LIMITER';
+  if (pathname === '/v1/vault/manifest' || pathname === '/v1/snapshots/current') {
+    return 'MIRNA_SYNC_READ_RATE_LIMITER';
+  }
+  if (/^\/v1\/snapshots\/[^/]+$/u.test(pathname)) {
+    return 'MIRNA_SNAPSHOT_UPLOAD_RATE_LIMITER';
+  }
   return null;
 };
 

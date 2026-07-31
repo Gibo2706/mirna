@@ -123,6 +123,12 @@ const createSetup = async (vaultId = 'A'.repeat(22)): Promise<LocalSyncSetup> =>
       localSchemaVersion: 1,
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
+      lastSnapshotRevision: 0,
+      lastSnapshotId: null,
+      lastSnapshotHash: null,
+      lastSnapshotContentHash: null,
+      lastManifestHash: manifestHash,
+      lastLocalDataHash: null,
       enabledAt: createdAt,
     },
   };

@@ -22,6 +22,9 @@ export interface WorkerLimits {
   maxTotalPairingRequests: number;
   maxActiveAuthChallengesPerDevice: number;
   maxActiveSessionsPerDevice: number;
+  maxSnapshotBytes: number;
+  maxRetainedSnapshots: number;
+  orphanLifetimeMs: number;
 }
 
 export const readWorkerLimits = (env: Env): WorkerLimits => ({
@@ -59,4 +62,13 @@ export const readWorkerLimits = (env: Env): WorkerLimits => ({
     1,
     10,
   ),
+  maxSnapshotBytes: parseBoundedInteger(
+    env.MIRNA_MAX_SNAPSHOT_BYTES,
+    8 * 1_024 * 1_024,
+    1_024,
+    8 * 1_024 * 1_024,
+  ),
+  maxRetainedSnapshots: parseBoundedInteger(env.MIRNA_MAX_RETAINED_SNAPSHOTS, 3, 1, 10),
+  orphanLifetimeMs:
+    parseBoundedInteger(env.MIRNA_ORPHAN_LIFETIME_SECONDS, 3_600, 60, 86_400) * 1_000,
 });

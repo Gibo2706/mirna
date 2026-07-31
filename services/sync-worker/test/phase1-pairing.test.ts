@@ -189,6 +189,7 @@ const createCandidateManifest = async (
 const buildPairingApproval = async (
   vault: InitialVaultFixture,
   pairing: PendingPairing,
+  options: { snapshotCommitId?: string | null } = {},
 ): Promise<ApprovedPairing> => {
   const { accessToken } = await createAccessSession(vault);
   const candidateManifest = await createCandidateManifest(vault, pairing);
@@ -205,7 +206,7 @@ const buildPairingApproval = async (
     pairingExpiresAt: pairing.expiresAt,
     currentManifestVersion: vault.manifest.manifestVersion,
     currentManifestHash,
-    snapshotCommitId: null,
+    snapshotCommitId: options.snapshotCommitId ?? null,
     operationFrontierHash: null,
     newDeviceId: pairing.newDeviceId,
     newDevicePublicKeys: pairing.newDevicePublicKeys,
@@ -569,6 +570,29 @@ describe('Phase 1 pairing request lifecycle', () => {
 });
 
 describe('Phase 1 pairing approval and finalization', () => {
+  it('binds approval to the exact current committed snapshot when one exists', async () => {
+    const vault = await createInitialVaultFixture();
+    expect((await registerInitialVault(vault)).status).toBe(201);
+    const snapshotCommitId = createOpaqueId();
+    await env.MIRNA_SYNC_DB.prepare(
+      `UPDATE vaults
+          SET current_snapshot_id = ?2, current_snapshot_revision = 1
+        WHERE vault_id = ?1`,
+    )
+      .bind(vault.vaultId, snapshotCommitId)
+      .run();
+    const pairing = await createPendingPairing();
+    const approval = await buildPairingApproval(vault, pairing, { snapshotCommitId });
+
+    const response = await postCanonical(
+      `/v1/pairings/${pairing.requestId}/approve`,
+      approval.approvalBody,
+      { accessToken: approval.accessToken },
+    );
+    expect(response.status).toBe(200);
+    expect(approval.envelope.context.snapshotCommitId).toBe(snapshotCommitId);
+  });
+
   it.each([
     ['signing', 'new_signing_public_key_raw', 'signing'],
     ['agreement', 'new_agreement_public_key_raw', 'agreement'],

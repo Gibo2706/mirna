@@ -31,6 +31,7 @@ import { conflict, forbidden, HttpError, notFound } from './errors';
 import { jsonResponse } from './http';
 import { readWorkerLimits } from './limits';
 import { assertValidDevicePublicKeys, assertValidSigningPublicKey } from './public-keys';
+import { handleGetCurrentSnapshotForVault } from './snapshots';
 import {
   canonicalText,
   domainHashBytes,
@@ -352,20 +353,7 @@ const assertFetchChallenge = (
 
 export const handleFetchRecoveryBundle = async (context: RequestContext): Promise<Response> => {
   const input = await readCanonicalJson(context.request, recoveryBundleFetchRequestSchema);
-  const row = await storedRecoveryChallenge(
-    context.env.MIRNA_SYNC_DB,
-    input.transcript.challenge.challengeId,
-  );
-  if (!row) throw notFound();
-  assertFetchChallenge(context, row, input.transcript.challenge);
-  const expectedChallengeHash = await domainHashBytes(
-    SYNC_DOMAIN_LABELS.recoveryChallengeHash,
-    base64UrlToBytes(input.transcript.challenge.challenge),
-  );
-  if (!timingSafeEqual(expectedChallengeHash, new Uint8Array(row.challenge_hash))) {
-    throw forbidden('RECOVERY_CHALLENGE_MISMATCH', 'Recovery challenge is invalid.');
-  }
-  await verifyGate(context, row, input.gateKey, input.transcript, input.gateProof);
+  const row = await authorizeRecoveryRead(context, input);
   const afterManifestVersion = input.transcript.afterManifestVersion;
   if (
     afterManifestVersion !== null &&
@@ -406,6 +394,33 @@ export const handleFetchRecoveryBundle = async (context: RequestContext): Promis
     }),
     { requestId: context.requestId, allowedOrigin: context.allowedOrigin },
   );
+};
+
+const authorizeRecoveryRead = async (
+  context: RequestContext,
+  input: ReturnType<typeof recoveryBundleFetchRequestSchema.parse>,
+): Promise<StoredRecoveryChallengeRow> => {
+  const row = await storedRecoveryChallenge(
+    context.env.MIRNA_SYNC_DB,
+    input.transcript.challenge.challengeId,
+  );
+  if (!row) throw notFound();
+  assertFetchChallenge(context, row, input.transcript.challenge);
+  const expectedChallengeHash = await domainHashBytes(
+    SYNC_DOMAIN_LABELS.recoveryChallengeHash,
+    base64UrlToBytes(input.transcript.challenge.challenge),
+  );
+  if (!timingSafeEqual(expectedChallengeHash, new Uint8Array(row.challenge_hash))) {
+    throw forbidden('RECOVERY_CHALLENGE_MISMATCH', 'Recovery challenge is invalid.');
+  }
+  await verifyGate(context, row, input.gateKey, input.transcript, input.gateProof);
+  return row;
+};
+
+export const handleFetchRecoverySnapshot = async (context: RequestContext): Promise<Response> => {
+  const input = await readCanonicalJson(context.request, recoveryBundleFetchRequestSchema);
+  const row = await authorizeRecoveryRead(context, input);
+  return handleGetCurrentSnapshotForVault(context, row.vault_id);
 };
 
 const assertNewRecoveryBinding = (
@@ -485,7 +500,6 @@ export const handleCompleteRecovery = async (
     row.expires_at <= Date.now() ||
     row.failed_attempts >= readWorkerLimits(context.env).maxRecoveryAttempts ||
     (row.locked_until !== null && row.locked_until > Date.now()) ||
-    row.current_snapshot_revision !== 0 ||
     routeVaultId !== row.vault_id ||
     input.transcript.recoveryLookupId !== row.recovery_lookup_id ||
     input.transcript.vaultId !== row.vault_id ||
@@ -661,9 +675,17 @@ export const handleCompleteRecovery = async (
         now,
       ),
       context.env.MIRNA_SYNC_DB.prepare(
+        `UPDATE snapshots
+          SET state = 'superseded', cleanup_after = ?2
+        WHERE vault_id = ?1
+          AND state = 'committed'`,
+      ).bind(row.vault_id, now + 24 * 60 * 60 * 1_000),
+      context.env.MIRNA_SYNC_DB.prepare(
         `UPDATE vaults
           SET current_manifest_version = ?2,
               current_key_epoch = ?3,
+              current_snapshot_id = NULL,
+              current_snapshot_revision = 0,
               updated_at = ?4
         WHERE vault_id = ?1
           AND current_manifest_version = ?5`,
@@ -709,8 +731,8 @@ export const handleCompleteRecovery = async (
     results[1]?.meta.changes !== 1 ||
     results[7]?.meta.changes !== 1 ||
     results[8]?.meta.changes !== 1 ||
-    results[9]?.meta.changes !== 1 ||
-    results[10]?.meta.changes !== 1
+    results[10]?.meta.changes !== 1 ||
+    results[11]?.meta.changes !== 1
   ) {
     const raced = await completedRecoveryRetry(
       context,

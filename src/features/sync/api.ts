@@ -1,5 +1,6 @@
 import { canonicalizeJson } from '@/domain/sync/canonical';
-import { SYNC_PROTOCOL_VERSION } from '@/domain/sync/constants';
+import { SYNC_LIMITS, SYNC_PROTOCOL_VERSION } from '@/domain/sync/constants';
+import { base64UrlToBytes, bytesToBase64Url, decodeUtf8, utf8 } from '@/domain/sync/encoding';
 import {
   authChallengeRequestSchema,
   authChallengeSchema,
@@ -25,6 +26,11 @@ import {
   vaultCreateResponseSchema,
   vaultManifestSchema,
 } from '@/domain/sync/schemas';
+import {
+  encryptedSnapshotEnvelopeSchema,
+  type EncryptedSnapshotArtifactV1,
+  type EncryptedSnapshotEnvelopeV1,
+} from '@/domain/sync/snapshot';
 import { z, type ZodType } from 'zod';
 import { parseSyncApiOrigin, type SyncClientConfig } from './config';
 
@@ -37,6 +43,7 @@ const DEFAULT_RESPONSE_LIMIT_BYTES = 256 * 1_024;
 const RECOVERY_RESPONSE_LIMIT_BYTES = 2 * 1_024 * 1_024;
 const ERROR_RESPONSE_LIMIT_BYTES = 32 * 1_024;
 const ACCESS_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const SNAPSHOT_ENVELOPE_HEADER = 'X-Mirna-Snapshot-Envelope';
 
 const publicErrorSchema = z.strictObject({
   protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
@@ -67,6 +74,14 @@ const pairingCancelledResponseSchema = z.strictObject({
   protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
   status: z.literal('cancelled'),
   expiresAt: z.string().datetime(),
+});
+
+const snapshotCommitResponseSchema = z.strictObject({
+  protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
+  snapshotId: opaqueIdSchema,
+  revision: z.number().int().positive(),
+  snapshotHash: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+  committed: z.literal(true),
 });
 
 const REMOTE_ERROR_CODES = new Set([
@@ -124,6 +139,18 @@ const REMOTE_ERROR_CODES = new Set([
   'SIGNATURE_INVALID',
   'STALE_JOB_RETRY_REQUIRED',
   'STORAGE_QUOTA_REACHED',
+  'SNAPSHOT_BODY_REQUIRED',
+  'SNAPSHOT_CIPHERTEXT_INVALID',
+  'SNAPSHOT_COMMIT_UNAVAILABLE',
+  'SNAPSHOT_ID_REUSED',
+  'SNAPSHOT_LENGTH_MISMATCH',
+  'SNAPSHOT_NOT_FOUND',
+  'SNAPSHOT_REVISION_CONFLICT',
+  'SNAPSHOT_SIGNATURE_INVALID',
+  'SNAPSHOT_STATE_CHANGED',
+  'SNAPSHOT_STATE_UNAVAILABLE',
+  'SNAPSHOT_STORAGE_UNAVAILABLE',
+  'SNAPSHOT_TOO_LARGE',
   'UNSUPPORTED_CONTENT_TYPE',
   'VAULT_ALREADY_EXISTS',
 ]);
@@ -203,6 +230,19 @@ const readBoundedResponseText = async (
   limit: number,
   signal: AbortSignal,
 ): Promise<string> => {
+  const bytes = await readBoundedResponseBytes(response, limit, signal);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new SyncApiError('INVALID_RESPONSE');
+  }
+};
+
+const readBoundedResponseBytes = async (
+  response: Response,
+  limit: number,
+  signal: AbortSignal,
+): Promise<Uint8Array<ArrayBuffer>> => {
   parseDeclaredLength(response, limit);
   if (response.body === null) throw new SyncApiError('INVALID_RESPONSE');
 
@@ -228,17 +268,13 @@ const readBoundedResponseText = async (
     signal.removeEventListener('abort', cancel);
     reader.releaseLock();
   }
-  const bytes = new Uint8Array(received);
+  const bytes = new Uint8Array(new ArrayBuffer(received));
   let offset = 0;
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    throw new SyncApiError('INVALID_RESPONSE');
-  }
+  return bytes;
 };
 
 const parseJson = (text: string): unknown => {
@@ -296,19 +332,26 @@ export interface SyncApiClientOptions {
 }
 
 interface RequestSpec<T> {
-  readonly method: 'GET' | 'POST';
+  readonly method: 'GET' | 'POST' | 'PUT';
   readonly path: string;
   readonly responseSchema: ZodType<T>;
   readonly expectedStatuses: readonly number[];
-  readonly body?: string;
+  readonly body?: BodyInit;
   readonly authenticated?: boolean;
   readonly responseLimitBytes?: number;
+  readonly contentType?: string;
+  readonly headers?: HeadersInit;
 }
 
 export type SyncSession = Readonly<{
   expiresAt: string;
   authorizationExpiresAt: string;
 }>;
+
+export interface DownloadedSnapshotV1 {
+  readonly envelope: EncryptedSnapshotEnvelopeV1;
+  readonly ciphertext: Uint8Array<ArrayBuffer>;
+}
 
 export const SYNC_PHASE_ONE_ROUTES = Object.freeze({
   health: '/v1/health',
@@ -319,6 +362,8 @@ export const SYNC_PHASE_ONE_ROUTES = Object.freeze({
   currentManifest: '/v1/vault/manifest',
   recoveryChallenge: '/v1/recovery/challenge',
   recoveryBundle: '/v1/recovery/bundle',
+  recoverySnapshot: '/v1/recovery/snapshot',
+  currentSnapshot: '/v1/snapshots/current',
 });
 
 export class MirnaSyncApi {
@@ -562,6 +607,154 @@ export class MirnaSyncApi {
     );
   }
 
+  async uploadSnapshot(
+    artifact: EncryptedSnapshotArtifactV1,
+    idempotencyKey: string,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof snapshotCommitResponseSchema>> {
+    const parsedEnvelope = encryptedSnapshotEnvelopeSchema.safeParse(artifact.envelope);
+    if (
+      !parsedEnvelope.success ||
+      !ACCESS_TOKEN.test(idempotencyKey) ||
+      artifact.ciphertext.byteLength !== parsedEnvelope.data.ciphertextLength
+    ) {
+      throw new SyncApiError('INVALID_CLIENT_REQUEST');
+    }
+    const body = new Uint8Array(new ArrayBuffer(artifact.ciphertext.byteLength));
+    body.set(artifact.ciphertext);
+    return this.#request(
+      {
+        method: 'PUT',
+        path: `/v1/snapshots/${exactOpaqueId(parsedEnvelope.data.snapshotId)}`,
+        responseSchema: snapshotCommitResponseSchema,
+        expectedStatuses: [200, 201],
+        body: body.buffer,
+        authenticated: true,
+        contentType: 'application/octet-stream',
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          [SNAPSHOT_ENVELOPE_HEADER]: bytesToBase64Url(utf8(canonicalizeJson(parsedEnvelope.data))),
+        },
+      },
+      options,
+    );
+  }
+
+  async downloadCurrentSnapshot(options?: SyncRequestOptions): Promise<DownloadedSnapshotV1> {
+    return this.#downloadSnapshot(
+      {
+        method: 'GET',
+        path: SYNC_PHASE_ONE_ROUTES.currentSnapshot,
+        authenticated: true,
+      },
+      options,
+    );
+  }
+
+  async fetchRecoverySnapshot(
+    input: z.input<typeof recoveryBundleFetchRequestSchema>,
+    options?: SyncRequestOptions,
+  ): Promise<DownloadedSnapshotV1 | undefined> {
+    try {
+      return await this.#downloadSnapshot(
+        {
+          method: 'POST',
+          path: SYNC_PHASE_ONE_ROUTES.recoverySnapshot,
+          authenticated: false,
+          body: serializeRequest(recoveryBundleFetchRequestSchema, input),
+        },
+        options,
+      );
+    } catch (error) {
+      if (
+        error instanceof SyncApiError &&
+        error.status === 404 &&
+        error.code === 'SNAPSHOT_NOT_FOUND'
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  async #downloadSnapshot(
+    spec: {
+      readonly method: 'GET' | 'POST';
+      readonly path: string;
+      readonly authenticated: boolean;
+      readonly body?: string;
+    },
+    options?: SyncRequestOptions,
+  ): Promise<DownloadedSnapshotV1> {
+    this.#assertEnabled();
+    if (!this.#config.enabled) throw new SyncApiError('SYNC_DISABLED');
+    const timeoutMs = parseTimeout(options?.timeoutMs, this.#defaultTimeoutMs);
+    if (options?.signal?.aborted === true) throw new SyncApiError('REQUEST_ABORTED');
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const abortFromCaller = (): void => controller.abort();
+    options?.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const headers = new Headers({
+        Accept: 'application/octet-stream',
+        'X-Mirna-Protocol-Version': String(SYNC_PROTOCOL_VERSION),
+      });
+      if (spec.authenticated) headers.set('Authorization', this.#session.authorization());
+      if (spec.body !== undefined) headers.set('Content-Type', REQUEST_CONTENT_TYPE);
+      const response = await waitForAbortable(
+        this.#fetch(`${this.#config.apiOrigin}${spec.path}`, {
+          method: spec.method,
+          headers,
+          body: spec.body,
+          cache: 'no-store',
+          credentials: 'omit',
+          mode: 'cors',
+          redirect: 'error',
+          referrerPolicy: 'no-referrer',
+          signal: controller.signal,
+        }),
+        controller.signal,
+      );
+      if (response.status !== 200) {
+        await this.#parseResponse(response, z.never(), [], 0, controller.signal);
+        throw new SyncApiError('INVALID_RESPONSE', response.status);
+      }
+      if (response.headers.get('X-Mirna-Protocol-Version') !== String(SYNC_PROTOCOL_VERSION)) {
+        throw new SyncApiError('PROTOCOL_MISMATCH', response.status);
+      }
+      if (response.headers.get('Content-Type') !== 'application/octet-stream') {
+        throw new SyncApiError('INVALID_RESPONSE_CONTENT_TYPE', response.status);
+      }
+      const envelope = this.#parseSnapshotEnvelopeHeader(response);
+      const ciphertext = await readBoundedResponseBytes(
+        response,
+        SYNC_LIMITS.maxSnapshotBytes,
+        controller.signal,
+      );
+      if (ciphertext.byteLength !== envelope.ciphertextLength) {
+        throw new SyncApiError('INVALID_RESPONSE');
+      }
+      return { envelope, ciphertext };
+    } catch (error) {
+      if (timedOut) throw new SyncApiError('REQUEST_TIMEOUT');
+      if (controller.signal.aborted) throw new SyncApiError('REQUEST_ABORTED');
+      if (error instanceof SyncApiError) {
+        if (spec.authenticated && error.status === 401) this.#session.clear();
+        throw error;
+      }
+      throw new SyncApiError('NETWORK_FAILURE');
+    } finally {
+      clearTimeout(timer);
+      options?.signal?.removeEventListener('abort', abortFromCaller);
+    }
+  }
+
   #pairingPath(
     pairingRequestId: string,
     action: 'inspect' | 'approve' | 'poll' | 'cancel' | 'finalize',
@@ -601,11 +794,12 @@ export class MirnaSyncApi {
     const timeoutMs = parseTimeout(options?.timeoutMs, this.#defaultTimeoutMs);
     if (options?.signal?.aborted === true) throw new SyncApiError('REQUEST_ABORTED');
 
-    const headers = new Headers({
-      Accept: 'application/json',
-      'X-Mirna-Protocol-Version': String(SYNC_PROTOCOL_VERSION),
-    });
-    if (spec.body !== undefined) headers.set('Content-Type', REQUEST_CONTENT_TYPE);
+    const headers = new Headers(spec.headers);
+    headers.set('Accept', 'application/json');
+    headers.set('X-Mirna-Protocol-Version', String(SYNC_PROTOCOL_VERSION));
+    if (spec.body !== undefined) {
+      headers.set('Content-Type', spec.contentType ?? REQUEST_CONTENT_TYPE);
+    }
     if (spec.authenticated === true) {
       headers.set('Authorization', this.#session.authorization());
     }
@@ -684,6 +878,26 @@ export class MirnaSyncApi {
     const remote = parseSchema(publicErrorSchema, decoded);
     const safeCode = REMOTE_ERROR_CODES.has(remote.error.code) ? remote.error.code : 'REMOTE_ERROR';
     throw new SyncApiError(safeCode, response.status, remote.error.requestId);
+  }
+
+  #parseSnapshotEnvelopeHeader(response: Response): EncryptedSnapshotEnvelopeV1 {
+    const encoded = response.headers.get(SNAPSHOT_ENVELOPE_HEADER);
+    if (!encoded || encoded.length > 24_000) throw new SyncApiError('INVALID_RESPONSE');
+    try {
+      const decoded = base64UrlToBytes(encoded);
+      const copy = new Uint8Array(new ArrayBuffer(decoded.byteLength));
+      copy.set(decoded);
+      const canonicalEnvelope = decodeUtf8(copy);
+      const envelope = encryptedSnapshotEnvelopeSchema.parse(
+        JSON.parse(canonicalEnvelope) as unknown,
+      );
+      if (canonicalizeJson(envelope) !== canonicalEnvelope) {
+        throw new Error('Snapshot envelope is not canonical.');
+      }
+      return envelope;
+    } catch {
+      throw new SyncApiError('INVALID_RESPONSE');
+    }
   }
 
   #assertEnabled(): void {

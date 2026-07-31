@@ -47,7 +47,27 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(1);
+    expect(migrationCount).toBe(2);
+
+    const snapshotColumns = await env.MIRNA_SYNC_DB.prepare("PRAGMA table_info('snapshots')").all<{
+      name: string;
+    }>();
+    expect(snapshotColumns.results.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'canonical_envelope',
+        'envelope_hash',
+        'canonical_commit_response',
+        'r2_etag',
+      ]),
+    );
+
+    const snapshotCommitTrigger = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT name
+         FROM sqlite_schema
+        WHERE type = 'trigger'
+          AND name = 'require_current_vault_pointer_before_snapshot_commit'`,
+    ).first<string>('name');
+    expect(snapshotCommitTrigger).toBe('require_current_vault_pointer_before_snapshot_commit');
   });
 
   it('contains no plaintext financial-content columns and enforces foreign keys', async () => {

@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react';
 import { SyncApiError } from '../api';
 import { SyncLifecycleError } from '../lifecycle';
+import { SnapshotSyncError } from '../snapshot-service';
 import type { SyncUiServices } from '../ui-services';
 
 export const safeErrorMessage = (error: unknown): string => {
-  if (error instanceof SyncLifecycleError || error instanceof SyncApiError) return error.message;
+  if (
+    error instanceof SyncLifecycleError ||
+    error instanceof SyncApiError ||
+    error instanceof SnapshotSyncError
+  )
+    return error.message;
   return 'Radnja nije uspela. Proverite vezu i pokušajte ponovo.';
 };
 

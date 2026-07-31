@@ -96,7 +96,18 @@ import {
   type UnsignedVaultManifestV1,
   type VaultManifestV1,
 } from '@/domain/sync/schemas';
-import { readLocalSyncSetup, writeLocalSyncSetup } from '@/db/sync/repository';
+import {
+  computeSyncFinanceDataHash,
+  encryptedSnapshotEnvelopeSchema,
+  openEncryptedSnapshot,
+  prepareFinanceDataForSnapshotApply,
+} from '@/domain/sync/snapshot';
+import type { FinanceData } from '@/domain/types';
+import {
+  readLocalSyncSetup,
+  writeLocalSyncSetup,
+  writeRecoveredLocalSyncSetup,
+} from '@/db/sync/repository';
 import {
   ACTIVE_SYNC_VAULT_RECORD_ID,
   LOCAL_SYNC_DEVICE_RECORD_ID,
@@ -146,17 +157,24 @@ export interface SyncPhase1ApiPort {
   finalizePairing(pairingRequestId: string, request: PairingFinalizeRequestV1): Promise<unknown>;
   requestRecoveryChallenge(request: RecoveryChallengeRequestV1): Promise<unknown>;
   fetchRecoveryBundle(request: RecoveryBundleFetchRequestV1): Promise<unknown>;
+  fetchRecoverySnapshot?(
+    request: RecoveryBundleFetchRequestV1,
+  ): Promise<
+    { readonly envelope: unknown; readonly ciphertext: Uint8Array<ArrayBuffer> } | undefined
+  >;
   completeRecovery(vaultId: string, request: RecoveryCompleteRequestV1): Promise<unknown>;
 }
 
 export interface SyncLifecycleRepositoryPort {
   read(): Promise<LocalSyncSetup | undefined>;
   write(setup: LocalSyncSetup): Promise<void>;
+  writeRecovered?(setup: LocalSyncSetup, data: FinanceData): Promise<void>;
 }
 
 const defaultRepository: SyncLifecycleRepositoryPort = {
   read: () => readLocalSyncSetup(),
   write: (setup) => writeLocalSyncSetup(setup),
+  writeRecovered: (setup, data) => writeRecoveredLocalSyncSetup(setup, data),
 };
 
 export type SyncLifecycleErrorCode =
@@ -351,6 +369,7 @@ const createLocalSetup = async (input: {
   localWrappingKey: CryptoKey;
   vaultMasterKey: Uint8Array;
   enabledAt: string;
+  snapshotCommitId?: string | null;
   runtime: CryptoRuntime;
 }): Promise<LocalSyncSetup> => {
   const localObjectId = createOpaqueId(input.runtime);
@@ -410,6 +429,12 @@ const createLocalSetup = async (input: {
       localSchemaVersion: 1,
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
+      lastSnapshotRevision: 0,
+      lastSnapshotId: input.snapshotCommitId ?? null,
+      lastSnapshotHash: null,
+      lastSnapshotContentHash: null,
+      lastManifestHash: input.manifestHash,
+      lastLocalDataHash: null,
       enabledAt: input.enabledAt,
     },
   };
@@ -1073,6 +1098,7 @@ export class NewDevicePairingLifecycle {
       localWrappingKey: material.localWrappingKey,
       vaultMasterKey: material.vaultMasterKey,
       enabledAt: material.finalizedAt,
+      snapshotCommitId: material.envelope.context.snapshotCommitId,
       runtime,
     });
     await this.#dependencies.repository.write(setup);
@@ -1147,7 +1173,6 @@ export class NewDevicePairingLifecycle {
         envelope.context.currentManifestVersion + 1 !== manifest.manifestVersion ||
         envelope.context.currentManifestHash !== manifest.previousManifestHash ||
         envelope.context.keyEpoch !== manifest.keyEpoch ||
-        envelope.context.snapshotCommitId !== null ||
         envelope.context.operationFrontierHash !== null ||
         envelope.context.pairingExpiresAt !== response.expiresAt ||
         envelope.candidateManifestHash !== candidateHash ||
@@ -1528,7 +1553,7 @@ export class ExistingDevicePairingLifecycle {
       pairingExpiresAt: candidate.expiresAt,
       currentManifestVersion: currentManifest.manifestVersion,
       currentManifestHash,
-      snapshotCommitId: null,
+      snapshotCommitId: setup.metadata.lastSnapshotId,
       operationFrontierHash: null,
       newDeviceId: candidate.deviceId,
       newDevicePublicKeys: candidate.publicKeys,
@@ -1643,6 +1668,7 @@ interface PreparedRecovery {
   readonly confirmationGroupNumbers: readonly number[];
   readonly request: RecoveryCompleteRequestV1;
   readonly setup: LocalSyncSetup;
+  readonly recoveredFinanceData?: FinanceData;
   completionAttempted: boolean;
 }
 
@@ -1739,6 +1765,12 @@ export class RecoverDeviceLifecycle {
         runtime,
       );
       const currentManifest = await this.#validateRecoveryChain(bundle, manifestChain, challenge);
+      const recoveredFinanceData = await this.#recoverCurrentSnapshot(
+        challenge,
+        recoveryKeys.gateKey,
+        bundle,
+        manifestChain,
+      );
       const recovery = await this.#prepareRecovery({
         displayName: normalizedDisplayName,
         challenge,
@@ -1748,6 +1780,7 @@ export class RecoverDeviceLifecycle {
         deviceId,
         deviceKeys,
         localWrappingKey,
+        recoveredFinanceData,
       });
       const newCode = await createRecoveryCode(
         recovery.request.newRecovery.recoveryLookupId,
@@ -1815,7 +1848,20 @@ export class RecoverDeviceLifecycle {
         'Server nije potvrdio tačan recovery manifest.',
       );
     }
-    await this.#dependencies.repository.write(recovery.setup);
+    if (recovery.recoveredFinanceData) {
+      if (!this.#dependencies.repository.writeRecovered) {
+        throw new SyncLifecycleError(
+          'invalid-state',
+          'Lokalno spremište ne podržava bezbedan upis oporavljenih podataka.',
+        );
+      }
+      await this.#dependencies.repository.writeRecovered(
+        recovery.setup,
+        recovery.recoveredFinanceData,
+      );
+    } else {
+      await this.#dependencies.repository.write(recovery.setup);
+    }
     clearBytes(recovery.oldGateKey, recovery.newRecoveryRoot);
     this.#state = { kind: 'active', setup: recovery.setup };
     return recovery.setup;
@@ -1943,6 +1989,86 @@ export class RecoverDeviceLifecycle {
     return current;
   }
 
+  async #recoverCurrentSnapshot(
+    challenge: Parsed<typeof recoveryChallengeSchema>,
+    gateKey: Uint8Array,
+    bundle: RecoveryBundleV1,
+    manifests: readonly VaultManifestV1[],
+  ): Promise<FinanceData | undefined> {
+    if (!this.#dependencies.api.fetchRecoverySnapshot) return undefined;
+    const transcript = {
+      type: 'mirna-recovery-bundle-fetch-v1' as const,
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      suite: SYNC_CRYPTO_SUITE,
+      challenge,
+      afterManifestVersion: null,
+    };
+    const request = recoveryBundleFetchRequestSchema.parse({
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      gateKey: bytesToBase64Url(gateKey),
+      transcript,
+      gateProof: await createRecoveryProof(transcript, gateKey, this.#dependencies.runtime),
+    });
+    const remote = await this.#dependencies.api.fetchRecoverySnapshot(request);
+    if (!remote) return undefined;
+    const envelope = encryptedSnapshotEnvelopeSchema.parse(remote.envelope);
+    let parentManifest: VaultManifestV1 | undefined;
+    for (const manifest of manifests) {
+      if (
+        (await manifestBodyHash(manifest, this.#dependencies.runtime)) ===
+        envelope.parentManifestHash
+      ) {
+        parentManifest = manifest;
+        break;
+      }
+    }
+    const creatingDevice = parentManifest
+      ? [...parentManifest.devices, ...parentManifest.revokedDevices].find(
+          (device) => device.deviceId === envelope.creatingDeviceId,
+        )
+      : undefined;
+    if (
+      envelope.vaultId !== challenge.vaultId ||
+      envelope.keyEpoch !== bundle.keyEpoch ||
+      !creatingDevice
+    ) {
+      clearBytes(remote.ciphertext);
+      throw new SyncLifecycleError(
+        'recovery-chain-invalid',
+        'Cloud snapshot nije vezan za provereni recovery lanac.',
+      );
+    }
+    const oldVaultMasterKey = base64UrlToBytes(bundle.vaultMasterKey);
+    try {
+      const snapshot = await openEncryptedSnapshot({
+        envelope,
+        ciphertext: remote.ciphertext,
+        vaultMasterKey: oldVaultMasterKey,
+        signingPublicKey: await importSigningPublicKey(creatingDevice.publicKeys.signing),
+        expected: {
+          vaultId: challenge.vaultId,
+          keyEpoch: bundle.keyEpoch,
+          currentRevision: envelope.baseRevision,
+          currentSnapshotHash: envelope.previousSnapshotHash,
+          parentManifestHash: envelope.parentManifestHash,
+          creatingDeviceId: envelope.creatingDeviceId,
+        },
+      });
+      return prepareFinanceDataForSnapshotApply(snapshot, {
+        appearance: 'system',
+        installHintDismissed: false,
+      });
+    } catch (error) {
+      if (error instanceof SyncLifecycleError) throw error;
+      throw new SyncLifecycleError(
+        'recovery-chain-invalid',
+        'Cloud snapshot nije prošao lokalnu recovery proveru.',
+      );
+    } finally {
+      clearBytes(oldVaultMasterKey, remote.ciphertext);
+    }
+  }
+
   async #prepareRecovery(input: {
     displayName: string;
     challenge: Parsed<typeof recoveryChallengeSchema>;
@@ -1952,6 +2078,7 @@ export class RecoverDeviceLifecycle {
     deviceId: string;
     deviceKeys: DeviceKeyPairs;
     localWrappingKey: CryptoKey;
+    recoveredFinanceData?: FinanceData;
   }): Promise<PreparedRecovery> {
     const runtime = this.#dependencies.runtime;
     const oldVaultMasterKey = base64UrlToBytes(input.oldBundle.vaultMasterKey);
@@ -2115,7 +2242,7 @@ export class RecoverDeviceLifecycle {
           newManifest,
           newRecovery,
         });
-        const setup = await createLocalSetup({
+        let setup = await createLocalSetup({
           manifest: newManifest,
           manifestHash: newManifestHash,
           device: newDevice,
@@ -2126,6 +2253,19 @@ export class RecoverDeviceLifecycle {
           enabledAt: occurredAt.toISOString(),
           runtime,
         });
+        if (input.recoveredFinanceData) {
+          setup = {
+            ...setup,
+            metadata: {
+              ...setup.metadata,
+              firstUploadConsent: 'accepted',
+              lastLocalDataHash: await computeSyncFinanceDataHash(
+                input.recoveredFinanceData,
+                runtime,
+              ),
+            },
+          };
+        }
         const newCode = await createRecoveryCode(newRecoveryLookupId, newRecoveryRoot, runtime);
         const groupCount = recoveryGroups(newCode).length;
         const confirmationGroupNumbers = assertConfirmationSelection(
@@ -2139,6 +2279,7 @@ export class RecoverDeviceLifecycle {
           confirmationGroupNumbers,
           request,
           setup,
+          recoveredFinanceData: input.recoveredFinanceData,
           completionAttempted: false,
         };
       } catch (error) {

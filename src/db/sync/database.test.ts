@@ -8,7 +8,7 @@ afterEach(async () => {
   await Promise.all(databaseNames.splice(0).map((name) => Dexie.delete(name)));
 });
 
-describe('Dexie v6 sync schema', () => {
+describe('Dexie v7 sync schema', () => {
   it('adds dedicated sync stores while ordinary finance tables stay unchanged', async () => {
     const name = `mirna-v6-schema-${crypto.randomUUID()}`;
     databaseNames.push(name);
@@ -29,6 +29,7 @@ describe('Dexie v6 sync schema', () => {
         'salaryScenarios',
         'settings',
         'syncConflicts',
+        'syncCheckpoints',
         'syncDevice',
         'syncFrontier',
         'syncInbox',

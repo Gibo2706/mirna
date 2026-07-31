@@ -13,16 +13,29 @@ import {
 import {
   handleCompleteRecovery,
   handleFetchRecoveryBundle,
+  handleFetchRecoverySnapshot,
   handleRecoveryChallenge,
 } from './recovery';
+import { handleGetCurrentSnapshot, handleUploadSnapshot } from './snapshots';
 import { handleCreateVault, handleGetCurrentManifest } from './vaults';
 
 const PAIRING_ROUTE =
   /^\/v1\/pairings\/([A-Za-z0-9_-]{22})\/(inspect|approve|poll|cancel|finalize)$/u;
 const RECOVERY_COMPLETE_ROUTE = /^\/v1\/vaults\/([A-Za-z0-9_-]{22})\/recover$/u;
+const SNAPSHOT_UPLOAD_ROUTE = /^\/v1\/snapshots\/([A-Za-z0-9_-]{22})$/u;
+
+export const isSnapshotUploadPath = (pathname: string): boolean =>
+  SNAPSHOT_UPLOAD_ROUTE.test(pathname);
 
 export const allowedMethodsForPath = (pathname: string): readonly string[] | null => {
-  if (pathname === '/v1/health' || pathname === '/v1/vault/manifest') return ['GET'];
+  if (
+    pathname === '/v1/health' ||
+    pathname === '/v1/vault/manifest' ||
+    pathname === '/v1/snapshots/current'
+  ) {
+    return ['GET'];
+  }
+  if (SNAPSHOT_UPLOAD_ROUTE.test(pathname)) return ['PUT'];
   if (
     pathname === '/v1/vaults' ||
     pathname === '/v1/auth/challenge' ||
@@ -30,6 +43,7 @@ export const allowedMethodsForPath = (pathname: string): readonly string[] | nul
     pathname === '/v1/pairings' ||
     pathname === '/v1/recovery/challenge' ||
     pathname === '/v1/recovery/bundle' ||
+    pathname === '/v1/recovery/snapshot' ||
     PAIRING_ROUTE.test(pathname) ||
     RECOVERY_COMPLETE_ROUTE.test(pathname)
   ) {
@@ -55,9 +69,14 @@ export const routeRequest = async (context: RequestContext): Promise<Response> =
   if (pathname === '/v1/pairings') return handleCreatePairing(context);
   if (pathname === '/v1/recovery/challenge') return handleRecoveryChallenge(context);
   if (pathname === '/v1/recovery/bundle') return handleFetchRecoveryBundle(context);
+  if (pathname === '/v1/recovery/snapshot') return handleFetchRecoverySnapshot(context);
   if (pathname === '/v1/vault/manifest') {
     return handleGetCurrentManifest(context, await authenticateRequest(context));
   }
+  if (pathname === '/v1/snapshots/current') return handleGetCurrentSnapshot(context);
+
+  const snapshot = SNAPSHOT_UPLOAD_ROUTE.exec(pathname);
+  if (snapshot?.[1]) return handleUploadSnapshot(context, snapshot[1]);
 
   const pairing = PAIRING_ROUTE.exec(pathname);
   if (!pairing?.[1] || !pairing[2]) {

@@ -16,7 +16,9 @@ import {
   timestampSchema,
   vaultManifestSchema,
 } from '@/domain/sync/schemas';
-import { db, type FinanceDatabase } from '../database';
+import type { FinanceData } from '@/domain/types';
+import { db, financeTables, type FinanceDatabase } from '../database';
+import { replaceFinanceDataInTransaction, validateFinanceData } from '../finance-data';
 import {
   ACTIVE_SYNC_VAULT_RECORD_ID,
   LOCAL_SYNC_DEVICE_RECORD_ID,
@@ -102,10 +104,28 @@ const syncMetadataRecordSchema = z.strictObject({
   localSchemaVersion: z.literal(1),
   firstUploadConsent: z.enum(['pending', 'accepted', 'declined']),
   lastServerCursor: z.number().int().nonnegative(),
+  lastSnapshotRevision: z.number().int().nonnegative(),
+  lastSnapshotId: opaqueIdSchema.nullable(),
+  lastSnapshotHash: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{43}$/u)
+    .nullable(),
+  lastSnapshotContentHash: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{43}$/u)
+    .nullable(),
+  lastManifestHash: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+  lastLocalDataHash: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{43}$/u)
+    .nullable(),
   enabledAt: timestampSchema,
   lastSyncAt: timestampSchema.optional(),
   lastSuccessfulSyncAt: timestampSchema.optional(),
   lastErrorCode: z.string().min(1).max(128).optional(),
+  syncBlockReason: z
+    .enum(['local-remote-conflict', 'rollback-detected', 'fork-detected', 'integrity-failure'])
+    .optional(),
 });
 
 const localSyncSetupSchema = z.strictObject({
@@ -311,10 +331,23 @@ const validateSetup = async (input: unknown): Promise<LocalSyncSetup> => {
 
     await validateStoredKeyPairs(device);
     const currentManifestHash = await manifestBodyHash(vault.manifest);
-    if (vaultKey.encryptedKey.aad.parentManifestHash !== currentManifestHash) {
+    if (
+      vaultKey.encryptedKey.aad.parentManifestHash !== currentManifestHash ||
+      metadata.lastManifestHash !== currentManifestHash
+    ) {
       throw new InvalidLocalSyncSetupError(
-        'The local vault-key envelope is not pinned to the current manifest.',
+        'The local vault-key envelope and metadata are not pinned to the current manifest.',
       );
+    }
+    if (
+      (metadata.lastSnapshotRevision === 0 &&
+        (metadata.lastSnapshotHash !== null || metadata.lastSnapshotContentHash !== null)) ||
+      (metadata.lastSnapshotRevision > 0 &&
+        (metadata.lastSnapshotId === null ||
+          metadata.lastSnapshotHash === null ||
+          metadata.lastSnapshotContentHash === null))
+    ) {
+      throw new InvalidLocalSyncSetupError('Local snapshot pins are inconsistent.');
     }
     const openedVaultMasterKey = await openEncryptedKeyEnvelope(
       vaultKey.encryptedKey,
@@ -341,7 +374,34 @@ const syncTables = (database: FinanceDatabase) => [
   database.syncConflicts,
   database.syncFrontier,
   database.syncMetadata,
+  database.syncCheckpoints,
 ];
+
+const assertCompatibleExistingVault = async (
+  database: FinanceDatabase,
+  setup: LocalSyncSetup,
+): Promise<void> => {
+  const currentVault = await database.syncVault.get(ACTIVE_SYNC_VAULT_RECORD_ID);
+  if (!currentVault) return;
+  let parsedCurrentVault: SyncVaultRecord;
+  try {
+    parsedCurrentVault = syncVaultRecordSchema.parse(currentVault);
+  } catch {
+    throw new InvalidLocalSyncSetupError('Existing local vault record is corrupt.');
+  }
+  if (parsedCurrentVault.vaultId !== setup.vault.vaultId) {
+    throw new InvalidLocalSyncSetupError('A different vault is already enabled on this device.');
+  }
+};
+
+const putSetupRecords = async (database: FinanceDatabase, setup: LocalSyncSetup): Promise<void> => {
+  await Promise.all([
+    database.syncVault.put(setup.vault),
+    database.syncDevice.put(setup.device),
+    database.syncKeys.put(setup.vaultKey),
+    database.syncMetadata.put(setup.metadata),
+  ]);
+};
 
 export const writeLocalSyncSetup = async (
   setup: LocalSyncSetup,
@@ -352,26 +412,34 @@ export const writeLocalSyncSetup = async (
     'rw',
     [database.syncVault, database.syncDevice, database.syncKeys, database.syncMetadata],
     async () => {
-      const currentVault = await database.syncVault.get(ACTIVE_SYNC_VAULT_RECORD_ID);
-      if (currentVault) {
-        let parsedCurrentVault: SyncVaultRecord;
-        try {
-          parsedCurrentVault = syncVaultRecordSchema.parse(currentVault);
-        } catch {
-          throw new InvalidLocalSyncSetupError('Existing local vault record is corrupt.');
-        }
-        if (parsedCurrentVault.vaultId !== validatedSetup.vault.vaultId) {
-          throw new InvalidLocalSyncSetupError(
-            'A different vault is already enabled on this device.',
-          );
-        }
-      }
-      await Promise.all([
-        database.syncVault.put(validatedSetup.vault),
-        database.syncDevice.put(validatedSetup.device),
-        database.syncKeys.put(validatedSetup.vaultKey),
-        database.syncMetadata.put(validatedSetup.metadata),
-      ]);
+      await assertCompatibleExistingVault(database, validatedSetup);
+      await putSetupRecords(database, validatedSetup);
+    },
+  );
+};
+
+export const writeRecoveredLocalSyncSetup = async (
+  setup: LocalSyncSetup,
+  data: FinanceData,
+  database: FinanceDatabase = db,
+): Promise<void> => {
+  const [validatedSetup, validatedData] = await Promise.all([
+    validateSetup(setup),
+    Promise.resolve(validateFinanceData(data)),
+  ]);
+  await database.transaction(
+    'rw',
+    [
+      ...financeTables(database),
+      database.syncVault,
+      database.syncDevice,
+      database.syncKeys,
+      database.syncMetadata,
+    ],
+    async () => {
+      await assertCompatibleExistingVault(database, validatedSetup);
+      await replaceFinanceDataInTransaction(database, validatedData);
+      await putSetupRecords(database, validatedSetup);
     },
   );
 };

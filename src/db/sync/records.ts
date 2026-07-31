@@ -1,8 +1,10 @@
 import type { EncryptedKeyEnvelopeV1, VaultManifestV1 } from '@/domain/sync/schemas';
+import type { FinanceData } from '@/domain/types';
 
 export const ACTIVE_SYNC_VAULT_RECORD_ID = 'active-sync-vault' as const;
 export const LOCAL_SYNC_DEVICE_RECORD_ID = 'local-sync-device' as const;
 export const SYNC_METADATA_RECORD_ID = 'sync-metadata' as const;
+export const SYNC_CHECKPOINT_RECORD_ID = 'sync-safety-checkpoint' as const;
 
 export const localVaultKeyRecordId = (vaultId: string, keyEpoch: number): string =>
   `${vaultId}:epoch:${keyEpoch}:vault-master-key`;
@@ -113,10 +115,26 @@ export interface SyncMetadataRecord {
   localSchemaVersion: 1;
   firstUploadConsent: 'pending' | 'accepted' | 'declined';
   lastServerCursor: number;
+  lastSnapshotRevision: number;
+  lastSnapshotId: string | null;
+  lastSnapshotHash: string | null;
+  lastSnapshotContentHash: string | null;
+  lastManifestHash: string;
+  lastLocalDataHash: string | null;
   enabledAt: string;
   lastSyncAt?: string;
   lastSuccessfulSyncAt?: string;
   lastErrorCode?: string;
+  syncBlockReason?:
+    'local-remote-conflict' | 'rollback-detected' | 'fork-detected' | 'integrity-failure';
+}
+
+export interface SyncCheckpointRecord {
+  id: typeof SYNC_CHECKPOINT_RECORD_ID;
+  vaultId: string;
+  replacedSnapshotRevision: number;
+  data: FinanceData;
+  createdAt: string;
 }
 
 export interface LocalSyncSetup {

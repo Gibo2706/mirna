@@ -17,6 +17,7 @@ import {
   type RecoveryConfirmationValue,
   type RecoveryStartResult,
 } from './lifecycle';
+import { SnapshotSyncService, type SnapshotSyncResult } from './snapshot-service';
 
 type CryptoCapability = Awaited<ReturnType<typeof probeIndexedDbCryptoKeyPersistence>>;
 
@@ -55,6 +56,7 @@ export interface SyncUiServices {
   readonly loadLocalStatus: () => Promise<SyncUiLocalStatus>;
   readonly disableLocalDevice: () => Promise<void>;
   readonly clearSession: () => void;
+  readonly synchronize: (allowInitialUpload?: boolean) => Promise<SnapshotSyncResult>;
   readonly createEnableLifecycle: () => EnableLifecyclePort;
   readonly createNewDevicePairingLifecycle: () => NewDevicePairingLifecyclePort;
   readonly createExistingDevicePairingLifecycle: () => ExistingDevicePairingLifecyclePort;
@@ -94,7 +96,12 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
   if (!config.enabled) throw new Error('Beta sinhronizacija nije uključena.');
 
   const api = new MirnaSyncApi(config);
+  const snapshotApi = new MirnaSyncApi(config);
   const dependencies = { api, origin: window.location.origin } as const;
+  const snapshotService = new SnapshotSyncService({
+    api: snapshotApi,
+    origin: window.location.origin,
+  });
 
   return {
     probeCapability: probeIndexedDbCryptoKeyPersistence,
@@ -110,7 +117,12 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
       return { setup, pendingConflictCount };
     },
     disableLocalDevice: disableSyncOnThisDevice,
-    clearSession: () => api.clearSession(),
+    clearSession: () => {
+      api.clearSession();
+      snapshotApi.clearSession();
+    },
+    synchronize: (allowInitialUpload = false) =>
+      snapshotService.synchronize({ allowInitialUpload }),
     createEnableLifecycle: () => new EnableSyncLifecycle(dependencies),
     createNewDevicePairingLifecycle: () => new NewDevicePairingLifecycle(dependencies),
     createExistingDevicePairingLifecycle: () => new ExistingDevicePairingLifecycle(dependencies),

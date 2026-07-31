@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   CloudCog,
+  CloudUpload,
   KeyRound,
   QrCode,
   RefreshCw,
@@ -36,6 +37,7 @@ import {
 } from './ui-services';
 import { formatDateTime, safeErrorMessage, truncateOpaqueId, useLocalQr } from './ui/helpers';
 import { BackToChoices, BusyIcon, InlineError, RecoveryCodeStep, SectionTitle } from './ui/shared';
+import { useSnapshotSyncScheduler } from './scheduler';
 
 type EmptyMode = 'choose' | 'enable' | 'pair-new' | 'recover';
 
@@ -58,7 +60,7 @@ const EmptyModeChooser = ({
           uređaju
         </span>
         <span className="mt-1 block text-sm leading-6 text-muted">
-          Napravite novi šifrovani trezor i recovery kod. Finansijski podaci se još ne šalju.
+          Napravite novi šifrovani trezor i recovery kod. Prvi prenos zahteva posebnu saglasnost.
         </span>
       </button>
     ) : null}
@@ -88,8 +90,7 @@ const EmptyModeChooser = ({
     </button>
     {preOnboarding ? (
       <p className="rounded-xl bg-warning-soft p-3 text-xs leading-5 text-warning">
-        Ova beta faza bezbedno postavlja uređaj i ključeve. Preuzimanje finansijskih podataka još
-        nije dostupno, pa se onboarding ne preskače automatski.
+        Posle uparivanja Mirna preuzima samo E2EE snapshot i proverava ga pre lokalne primene.
       </p>
     ) : null}
   </div>
@@ -794,11 +795,13 @@ const ActivePanel = ({
   services,
   preOnboarding,
   onDisabled,
+  onChanged,
 }: {
   status: SyncUiLocalStatus & { readonly setup: LocalSyncSetup };
   services: SyncUiServices;
   preOnboarding: boolean;
   onDisabled: () => Promise<void>;
+  onChanged: () => Promise<void>;
 }) => {
   const { success } = useToast();
   const [showDisable, setShowDisable] = useState(false);
@@ -808,6 +811,38 @@ const ActivePanel = ({
   const { setup } = status;
   const authorizationExpired = Date.parse(setup.device.authorizationExpiresAt) <= Date.now();
   const disablePhrase = 'ISKLJUČI OVAJ UREĐAJ';
+
+  const synchronize = async (allowInitialUpload = false) => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await services.synchronize(allowInitialUpload);
+      if (result.kind === 'blocked') {
+        setError(
+          'Sinhronizacija je bezbedno zaustavljena zbog konflikta ili neočekivanog remote stanja.',
+        );
+      } else if (result.kind === 'awaiting-upload-consent') {
+        setError('Prvi upload čeka vašu eksplicitnu saglasnost.');
+      } else if (result.kind === 'consent-declined') {
+        setError('Prvi upload je odbijen na ovom uređaju.');
+      } else {
+        success(
+          result.kind === 'uploaded'
+            ? 'Šifrovani snapshot je uspešno poslat.'
+            : result.kind === 'downloaded'
+              ? 'Šifrovani snapshot je proveren i primenjen.'
+              : 'Podaci su već sinhronizovani.',
+        );
+      }
+      await onChanged();
+    } catch (caught) {
+      setError(safeErrorMessage(caught));
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const disable = async () => {
     if (confirmation !== disablePhrase || busy) return;
@@ -862,11 +897,31 @@ const ActivePanel = ({
           </div>
         </dl>
         {setup.metadata.firstUploadConsent === 'pending' ? (
-          <p className="rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
-            Prvi prenos finansijskih podataka čeka vašu posebnu saglasnost. U Phase 1 beta verziji
-            nema upload-a, pa lokalni finansijski podaci nisu poslati.
+          <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
+            <p>
+              Prvi upload čeka posebnu saglasnost. Mirna će lokalno napraviti snapshot, kompresovati
+              ga i šifrovati pre slanja; server ne dobija čitljive finansijske podatke.
+            </p>
+            <Button disabled={busy} onClick={() => void synchronize(true)}>
+              {busy ? <BusyIcon /> : <CloudUpload size={17} aria-hidden="true" />}
+              Saglasan sam — pošalji prvi šifrovani snapshot
+            </Button>
+          </div>
+        ) : null}
+        {setup.metadata.syncBlockReason ? (
+          <p role="alert" className="rounded-xl bg-danger-soft p-3 text-sm leading-6 text-danger">
+            Automatska sinhronizacija je zaustavljena: {setup.metadata.syncBlockReason}. Lokalni
+            podaci nisu prepisani.
           </p>
         ) : null}
+        <Button
+          variant="secondary"
+          disabled={busy || Boolean(setup.metadata.syncBlockReason)}
+          onClick={() => void synchronize(false)}
+        >
+          {busy ? <BusyIcon /> : <RefreshCw size={17} aria-hidden="true" />}
+          Sinhronizuj sada
+        </Button>
       </Card>
 
       <Card className="p-0">
@@ -895,10 +950,6 @@ const ActivePanel = ({
 
       <Card className="divide-y p-0">
         <UnavailableBetaStep
-          title="Pošalji prvi šifrovani snapshot"
-          description="Biće dostupan tek uz eksplicitnu saglasnost u narednoj fazi."
-        />
-        <UnavailableBetaStep
           title="Obnovi ili opozovi udaljeni uređaj"
           description="Manifest radnje postoje u protokolu, ali ovaj Phase 1 ekran ih još ne izvršava."
         />
@@ -911,7 +962,8 @@ const ActivePanel = ({
       {preOnboarding ? (
         <Card className="grid gap-3">
           <p className="text-sm leading-6 text-muted">
-            Uređaj i ključevi su postavljeni. Phase 1 još ne preuzima finansijske podatke.
+            Uređaj i ključevi su postavljeni. Sačekajte uspešno preuzimanje pre nastavka ako ovaj
+            uređaj povezujete sa postojećim trezorom.
           </p>
           <Link to="/" className="inline-flex min-h-11 items-center font-bold text-accent">
             Nastavi na lokalni onboarding
@@ -994,6 +1046,14 @@ const SyncContent = ({
     }
   }, [services]);
 
+  const synchronizeInBackground = useCallback(() => services.synchronize(false), [services]);
+  useSnapshotSyncScheduler({
+    enabled: Boolean(localStatus?.setup),
+    vaultId: localStatus?.setup?.vault.vaultId,
+    synchronize: synchronizeInBackground,
+    onSettled: refresh,
+  });
+
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -1020,6 +1080,7 @@ const SyncContent = ({
           setMode('choose');
           await refresh();
         }}
+        onChanged={refresh}
       />
     );
   }

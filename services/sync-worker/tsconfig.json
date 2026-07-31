@@ -10,6 +10,10 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
+    "baseUrl": "../..",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
     "types": [
       "@cloudflare/workers-types",
       "@cloudflare/vitest-pool-workers/types",

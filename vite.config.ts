@@ -82,7 +82,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/tests/setup.ts'],
-    exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
+    exclude: ['e2e/**', 'services/sync-worker/test/**', 'node_modules/**', 'dist/**'],
     css: true,
     coverage: {
       provider: 'v8',
