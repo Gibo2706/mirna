@@ -52,6 +52,7 @@ import {
 import { z, type ZodType } from 'zod';
 import { parseSyncApiOrigin, type SyncClientConfig } from './config';
 import type { TurnstileAction, TurnstileTokenProvider } from './turnstile-client';
+import type { BetaDiagnosticEventInput } from './diagnostics';
 
 const REQUEST_CONTENT_TYPE = 'application/json; charset=utf-8';
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;\s*charset=utf-8)?$/iu;
@@ -63,6 +64,8 @@ const RECOVERY_RESPONSE_LIMIT_BYTES = 2 * 1_024 * 1_024;
 const OPERATION_RESPONSE_LIMIT_BYTES = 2 * 1_024 * 1_024;
 const ERROR_RESPONSE_LIMIT_BYTES = 32 * 1_024;
 const ACCESS_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
+const SUPPORT_ID = /^MIRNA-(?:[0-9A-HJKMNP-TV-Z]{4}-){6}[0-9A-HJKMNP-TV-Z]{2}$/u;
+const SUPPORT_ID_WAIT_MS = 500;
 const SNAPSHOT_ENVELOPE_HEADER = 'X-Mirna-Snapshot-Envelope';
 
 const publicErrorSchema = z.strictObject({
@@ -125,6 +128,10 @@ const REMOTE_ERROR_CODES = new Set([
   'DELETION_SIGNATURE_INVALID',
   'DELETION_STATE_CHANGED',
   'HUMAN_VERIFICATION_REQUIRED',
+  'HUMAN_VERIFICATION_CONFIGURATION',
+  'HUMAN_VERIFICATION_EXPIRED',
+  'HUMAN_VERIFICATION_REJECTED',
+  'HUMAN_VERIFICATION_UNAVAILABLE',
   'INTERNAL_ERROR',
   'INVALID_JSON',
   'INVALID_PUBLIC_KEY',
@@ -220,7 +227,21 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
     'Ovlašćenje ovog uređaja je isteklo ili je opozvano. Obnovite ga sa drugog aktivnog uređaja.',
   AUTHENTICATION_REQUIRED: 'Sync sesija je istekla. Uređaj će ponovo potvrditi svoj potpis.',
   HUMAN_VERIFICATION_REQUIRED: 'Potrebna je kratka provera pre nastavka.',
+  HUMAN_VERIFICATION_CONFIGURATION:
+    'Bezbednosna provera na beta serveru nije pravilno podešena. Kopirajte dijagnostiku za podršku.',
+  HUMAN_VERIFICATION_EXPIRED: 'Bezbednosna provera je istekla ili je već iskorišćena.',
+  HUMAN_VERIFICATION_REJECTED: 'Cloudflare nije prihvatio bezbednosnu proveru.',
+  HUMAN_VERIFICATION_UNAVAILABLE:
+    'Cloudflare bezbednosna provera trenutno nije dostupna. Pokušajte ponovo.',
   TURNSTILE_REQUIRED: 'Provera protiv zloupotrebe trenutno nije dostupna.',
+  TURNSTILE_SCRIPT_BLOCKED:
+    'Bezbednosna provera nije učitana. Proverite mrežu ili blokiranje sadržaja i pokušajte ponovo.',
+  TURNSTILE_CONFIG:
+    'Bezbednosna provera nije pravilno podešena. Kopirajte dijagnostiku za podršku.',
+  TURNSTILE_EXPIRED: 'Bezbednosna provera je istekla. Pokušajte ponovo.',
+  TURNSTILE_TIMEOUT: 'Bezbednosna provera je predugo čekala. Pokušajte ponovo.',
+  TURNSTILE_REJECTED:
+    'Cloudflare nije prihvatio proveru. Pokušajte ponovo ili kopirajte dijagnostiku.',
   SERVICE_BUDGET_EXHAUSTED:
     'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.',
   VAULT_QUOTA_EXCEEDED:
@@ -389,6 +410,8 @@ const parseTimeout = (value: number | undefined, fallback: number): number => {
   return timeout;
 };
 
+const signalIsAborted = (signal: AbortSignal | undefined): boolean => signal?.aborted === true;
+
 export interface SyncRequestOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
@@ -398,6 +421,10 @@ export interface SyncApiClientOptions {
   readonly fetch?: typeof fetch;
   readonly defaultTimeoutMs?: number;
   readonly turnstile?: TurnstileTokenProvider;
+  readonly diagnostics?: {
+    supportId(): Promise<string>;
+    record(input: BetaDiagnosticEventInput): Promise<void>;
+  };
 }
 
 interface RequestSpec<T> {
@@ -411,6 +438,35 @@ interface RequestSpec<T> {
   readonly contentType?: string;
   readonly headers?: HeadersInit;
 }
+
+const boundedSupportId = async (
+  diagnostics: SyncApiClientOptions['diagnostics'],
+  signal?: AbortSignal,
+): Promise<string | undefined> => {
+  if (signalIsAborted(signal)) throw new SyncApiError('REQUEST_ABORTED');
+  if (!diagnostics) return undefined;
+  let timer: number | undefined;
+  let abort: (() => void) | undefined;
+  try {
+    const supportId = await Promise.race([
+      diagnostics.supportId(),
+      new Promise<undefined>((resolve) => {
+        timer = window.setTimeout(resolve, SUPPORT_ID_WAIT_MS);
+      }),
+      new Promise<never>((_resolve, reject) => {
+        abort = () => reject(new SyncApiError('REQUEST_ABORTED'));
+        signal?.addEventListener('abort', abort, { once: true });
+      }),
+    ]);
+    return supportId && SUPPORT_ID.test(supportId) ? supportId : undefined;
+  } catch (error) {
+    if (error instanceof SyncApiError && error.code === 'REQUEST_ABORTED') throw error;
+    return undefined;
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+    if (abort) signal?.removeEventListener('abort', abort);
+  }
+};
 
 export type SyncSession = Readonly<{
   expiresAt: string;
@@ -446,6 +502,7 @@ export class MirnaSyncApi {
   readonly #defaultTimeoutMs: number;
   readonly #session = new MemoryAccessSession();
   readonly #turnstile?: TurnstileTokenProvider;
+  readonly #diagnostics?: SyncApiClientOptions['diagnostics'];
 
   constructor(config: SyncClientConfig, options: SyncApiClientOptions = {}) {
     this.#config = config.enabled
@@ -460,6 +517,7 @@ export class MirnaSyncApi {
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#defaultTimeoutMs = parseTimeout(options.defaultTimeoutMs, DEFAULT_TIMEOUT_MS);
     this.#turnstile = options.turnstile;
+    this.#diagnostics = options.diagnostics;
   }
 
   get hasActiveSession(): boolean {
@@ -934,7 +992,7 @@ export class MirnaSyncApi {
     this.#assertEnabled();
     if (!this.#config.enabled) throw new SyncApiError('SYNC_DISABLED');
     const timeoutMs = parseTimeout(options?.timeoutMs, this.#defaultTimeoutMs);
-    if (options?.signal?.aborted === true) throw new SyncApiError('REQUEST_ABORTED');
+    if (signalIsAborted(options?.signal)) throw new SyncApiError('REQUEST_ABORTED');
 
     const controller = new AbortController();
     let timedOut = false;
@@ -1047,25 +1105,33 @@ export class MirnaSyncApi {
     if (!this.#turnstile) throw new SyncApiError('TURNSTILE_REQUIRED');
     const token = await this.#turnstile.token(action);
     if (!token || token.length > 2_048) throw new SyncApiError('TURNSTILE_REQUIRED');
-    return this.#request(
-      {
-        method: 'POST',
-        path,
-        responseSchema,
-        expectedStatuses,
-        body: serializeRequest(requestSchema, input),
-        authenticated,
-        headers: { 'X-Mirna-Turnstile-Token': token },
-      },
-      options,
-    );
+    this.#turnstile.markServerVerifying?.();
+    try {
+      const result = await this.#request(
+        {
+          method: 'POST',
+          path,
+          responseSchema,
+          expectedStatuses,
+          body: serializeRequest(requestSchema, input),
+          authenticated,
+          headers: { 'X-Mirna-Turnstile-Token': token },
+        },
+        options,
+      );
+      this.#turnstile.markServerResult?.();
+      return result;
+    } catch (error) {
+      this.#turnstile.markServerResult?.(error);
+      throw error;
+    }
   }
 
   async #request<T>(spec: RequestSpec<T>, options?: SyncRequestOptions): Promise<T> {
     this.#assertEnabled();
     if (!this.#config.enabled) throw new SyncApiError('SYNC_DISABLED');
     const timeoutMs = parseTimeout(options?.timeoutMs, this.#defaultTimeoutMs);
-    if (options?.signal?.aborted === true) throw new SyncApiError('REQUEST_ABORTED');
+    if (signalIsAborted(options?.signal)) throw new SyncApiError('REQUEST_ABORTED');
 
     const headers = new Headers(spec.headers);
     headers.set('Accept', 'application/json');
@@ -1076,6 +1142,9 @@ export class MirnaSyncApi {
     if (spec.authenticated === true) {
       headers.set('Authorization', this.#session.authorization());
     }
+    const supportId = await boundedSupportId(this.#diagnostics, options?.signal);
+    if (options?.signal?.aborted === true) throw new SyncApiError('REQUEST_ABORTED');
+    if (supportId) headers.set('X-Mirna-Support-Id', supportId);
 
     const controller = new AbortController();
     let timedOut = false;
@@ -1109,16 +1178,41 @@ export class MirnaSyncApi {
         controller.signal,
       );
     } catch (error) {
-      if (timedOut) throw new SyncApiError('REQUEST_TIMEOUT');
-      if (controller.signal.aborted) throw new SyncApiError('REQUEST_ABORTED');
+      if (timedOut) {
+        const timeoutError = new SyncApiError('REQUEST_TIMEOUT');
+        await this.#recordRequestError(timeoutError);
+        throw timeoutError;
+      }
+      if (controller.signal.aborted) {
+        const abortedError = new SyncApiError('REQUEST_ABORTED');
+        await this.#recordRequestError(abortedError);
+        throw abortedError;
+      }
       if (error instanceof SyncApiError) {
         if (spec.authenticated === true && error.status === 401) this.#session.clear();
+        await this.#recordRequestError(error);
         throw error;
       }
-      throw new SyncApiError('NETWORK_FAILURE');
+      const networkError = new SyncApiError('NETWORK_FAILURE');
+      await this.#recordRequestError(networkError);
+      throw networkError;
     } finally {
       clearTimeout(timer);
       options?.signal?.removeEventListener('abort', abortFromCaller);
+    }
+  }
+
+  async #recordRequestError(error: SyncApiError): Promise<void> {
+    try {
+      await this.#diagnostics?.record({
+        eventType: 'sync_request_error',
+        severity: 'error',
+        requestId: error.requestId ?? undefined,
+        safeCode: error.code,
+        online: navigator.onLine,
+      });
+    } catch {
+      // Diagnostics must never change the outcome of a sync request.
     }
   }
 

@@ -156,6 +156,31 @@ afterEach(() => {
 });
 
 describe('Phase 1 sync UI', () => {
+  it('renders a React-owned visible Managed Turnstile card with privacy copy', async () => {
+    const listeners = new Set<(state: { phase: 'idle' }) => void>();
+    const attach = vi.fn();
+    const services = baseServices({
+      turnstile: {
+        state: { phase: 'idle' },
+        attach,
+        retry: vi.fn(),
+        subscribe: (listener) => {
+          listeners.add(listener);
+          listener({ phase: 'idle' });
+          return () => listeners.delete(listener);
+        },
+      },
+    });
+
+    renderManager(services);
+    expect(await screen.findByText('Bezbednosna provera')).toBeVisible();
+    expect(
+      screen.getByText(/Cloudflare proverava da zahtev ne šalje automatizovani program/u),
+    ).toBeVisible();
+    expect(screen.getByTestId('sync-turnstile-widget')).toBeVisible();
+    expect(attach).toHaveBeenCalledWith(expect.any(HTMLDivElement));
+  });
+
   it('requires recovery group verification and a separate explicit activation', async () => {
     const user = userEvent.setup();
     let status: SyncUiLocalStatus = {

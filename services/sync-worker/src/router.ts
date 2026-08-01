@@ -25,6 +25,7 @@ import {
 } from './recovery';
 import { handleGetCurrentSnapshot, handleUploadSnapshot } from './snapshots';
 import { handleCreateVault, handleGetCurrentManifest, handleGetManifestChanges } from './vaults';
+import { handleBetaDiagnosticEvent } from './diagnostics';
 
 const PAIRING_ROUTE =
   /^\/v1\/pairings\/([A-Za-z0-9_-]{22})\/(inspect|approve|poll|cancel|finalize)$/u;
@@ -60,6 +61,7 @@ export const allowedMethodsForPath = (pathname: string): readonly string[] | nul
     pathname === '/v1/recovery/challenge' ||
     pathname === '/v1/recovery/bundle' ||
     pathname === '/v1/recovery/snapshot' ||
+    pathname === '/v1/diagnostics/events' ||
     PAIRING_ROUTE.test(pathname) ||
     RECOVERY_COMPLETE_ROUTE.test(pathname) ||
     DEVICE_SECURITY_ROUTE.test(pathname)
@@ -80,6 +82,7 @@ export const routeRequest = async (context: RequestContext): Promise<Response> =
   if (pathname === '/v1/health') {
     return handleHealth(context.env, context.requestId, context.allowedOrigin);
   }
+  if (pathname === '/v1/diagnostics/events') return handleBetaDiagnosticEvent(context);
   if (pathname === '/v1/vaults') return handleCreateVault(context);
   if (pathname === '/v1/vault') return handleDeleteVault(context);
   if (pathname === '/v1/auth/challenge') return handleAuthChallenge(context);

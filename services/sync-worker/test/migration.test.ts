@@ -13,6 +13,8 @@ import {
 const EXPECTED_TABLES = [
   'access_sessions',
   'auth_challenges',
+  'beta_diagnostic_events',
+  'beta_diagnostic_totals',
   'deletion_requests',
   'device_acknowledgements',
   'device_grants',
@@ -56,7 +58,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(8);
+    expect(migrationCount).toBe(9);
 
     const reservationColumns = await env.MIRNA_SYNC_DB.prepare(
       "PRAGMA table_info('usage_reservations')",
@@ -162,6 +164,10 @@ describe('D1 migration foundation', () => {
       'idx_resource_inventory_vault_state',
       'idx_resource_inventory_accounting_reservation',
       'idx_vault_resource_totals_release_reservation',
+      'idx_beta_diagnostics_support_created',
+      'idx_beta_diagnostics_request',
+      'idx_beta_diagnostics_vault_created',
+      'idx_beta_diagnostics_expiry',
     ]) {
       expect(names.has(requiredIndex), `${requiredIndex} should exist`).toBe(true);
     }

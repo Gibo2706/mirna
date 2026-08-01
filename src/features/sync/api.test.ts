@@ -201,7 +201,13 @@ describe('Mirna sync API transport', () => {
     } as const;
     const turnstile = {
       token: vi.fn().mockResolvedValue('single-use-turnstile-token'),
+      markServerVerifying: vi.fn(),
+      markServerResult: vi.fn(),
       dispose: vi.fn(),
+    };
+    const diagnostics = {
+      supportId: vi.fn().mockResolvedValue('MIRNA-0123-4567-89AB-CDEF-GHJK-MNPQ-RS'),
+      record: vi.fn().mockResolvedValue(undefined),
     };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       protocolResponse(
@@ -213,12 +219,29 @@ describe('Mirna sync API transport', () => {
         201,
       ),
     );
-    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock, turnstile });
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock, turnstile, diagnostics });
 
     await expect(api.createPairing(input)).resolves.toMatchObject({ requestId: input.requestId });
     expect(turnstile.token).toHaveBeenCalledWith('mirna_pairing_create');
+    expect(turnstile.markServerVerifying).toHaveBeenCalledOnce();
+    expect(turnstile.markServerResult).toHaveBeenCalledWith();
     const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
     expect(headers.get('X-Mirna-Turnstile-Token')).toBe('single-use-turnstile-token');
+    expect(headers.get('X-Mirna-Support-Id')).toBe('MIRNA-0123-4567-89AB-CDEF-GHJK-MNPQ-RS');
+  });
+
+  it('never blocks a sync request when the diagnostic Support ID is unavailable', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(protocolResponse(healthBody));
+    const diagnostics = {
+      supportId: vi.fn().mockRejectedValue(new Error('IndexedDB unavailable')),
+      record: vi.fn().mockResolvedValue(undefined),
+    };
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock, diagnostics });
+
+    await expect(api.health()).resolves.toEqual(healthBody);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(headers.has('X-Mirna-Support-Id')).toBe(false);
   });
 
   it('fails closed before fetch when a protected route has no Turnstile provider', async () => {

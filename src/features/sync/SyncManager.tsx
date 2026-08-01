@@ -3,6 +3,8 @@ import {
   ArrowLeft,
   CheckCircle2,
   CloudUpload,
+  Copy,
+  Download,
   KeyRound,
   QrCode,
   RefreshCw,
@@ -10,6 +12,7 @@ import {
   ShieldX,
   Smartphone,
   TriangleAlert,
+  Trash2,
   Unplug,
 } from 'lucide-react';
 import { Link } from 'react-router';
@@ -39,8 +42,268 @@ import { formatDateTime, safeErrorMessage, truncateOpaqueId, useLocalQr } from '
 import { BackToChoices, BusyIcon, InlineError, RecoveryCodeStep, SectionTitle } from './ui/shared';
 import { useSnapshotSyncScheduler } from './scheduler';
 import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
+import type { TurnstilePhase, TurnstileViewState } from './turnstile-client';
+import type { BetaDiagnosticsSnapshot } from './diagnostics';
+import { APPLICATION_VERSION } from '@/lib/version';
 
 type EmptyMode = 'choose' | 'enable' | 'pair-new' | 'recover';
+
+const TURNSTILE_STATUS: Readonly<Record<TurnstilePhase, string>> = {
+  idle: 'Provera će se pokrenuti kada zatražite aktivaciju, uparivanje ili oporavak.',
+  'script-loading': 'Učitavam Cloudflare bezbednosnu proveru…',
+  'widget-ready': 'Bezbednosna provera je spremna.',
+  waiting: 'Dovršite proveru prikazanu ispod.',
+  'token-received': 'Provera je primljena. Token se neće ponovo koristiti.',
+  'server-verifying': 'Worker proverava rezultat sa Cloudflare-om…',
+  success: 'Bezbednosna provera je uspešna.',
+  expired: 'Provera je istekla. Pripremite novu proveru i ponovite poslednju radnju.',
+  rejected: 'Provera nije prihvaćena. Pripremite novu proveru i ponovite poslednju radnju.',
+  'network-error': 'Mreža je prekinula proveru. Pripremite novu proveru kada veza proradi.',
+  'configuration-error':
+    'Provera nije pravilno učitana ili podešena. Kopirajte dijagnostiku za podršku.',
+};
+
+const RETRYABLE_TURNSTILE_PHASES = new Set<TurnstilePhase>([
+  'expired',
+  'rejected',
+  'network-error',
+  'configuration-error',
+]);
+
+const TurnstileCard = ({ services }: { services: SyncUiServices }) => {
+  const turnstile = services.turnstile;
+  const [state, setState] = useState<TurnstileViewState>(
+    () => turnstile?.state ?? { phase: 'idle' },
+  );
+  const attach = useCallback(
+    (node: HTMLDivElement | null) => {
+      turnstile?.attach(node);
+    },
+    [turnstile],
+  );
+
+  useEffect(() => {
+    if (!turnstile) return;
+    return turnstile.subscribe(setState);
+  }, [turnstile]);
+
+  if (!turnstile) return null;
+  const isError = RETRYABLE_TURNSTILE_PHASES.has(state.phase);
+
+  return (
+    <Card className="grid gap-3 border-accent/25" data-testid="sync-turnstile-card">
+      <div>
+        <SectionTitle>Bezbednosna provera</SectionTitle>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          Cloudflare proverava da zahtev ne šalje automatizovani program. Provera ne dobija vaše
+          finansijske podatke.
+        </p>
+      </div>
+      <p
+        role={isError ? 'alert' : 'status'}
+        className={
+          isError
+            ? 'rounded-xl bg-danger-soft p-3 text-sm text-danger'
+            : 'rounded-xl bg-surface-2 p-3 text-sm text-muted'
+        }
+      >
+        {TURNSTILE_STATUS[state.phase]}
+        {state.requestId ? (
+          <span className="mt-1 block font-mono text-xs">Request ID: {state.requestId}</span>
+        ) : null}
+      </p>
+      <div
+        ref={attach}
+        data-testid="sync-turnstile-widget"
+        aria-label="Cloudflare bezbednosna provera"
+        className="min-h-[70px] w-full overflow-x-auto rounded-xl bg-white p-1"
+      />
+      {isError ? (
+        <Button variant="secondary" onClick={() => turnstile.retry()}>
+          <RefreshCw size={17} aria-hidden="true" /> Pripremi novu proveru
+        </Button>
+      ) : null}
+    </Card>
+  );
+};
+
+type DiagnosticHealth = Awaited<ReturnType<NonNullable<SyncUiServices['diagnostics']>['health']>>;
+
+const copyPlainText = async (value: string): Promise<void> => {
+  if (!navigator.clipboard?.writeText) throw new Error('Clipboard is unavailable.');
+  await navigator.clipboard.writeText(value);
+};
+
+const downloadJson = (filename: string, value: unknown): void => {
+  const url = URL.createObjectURL(
+    new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: 'application/json;charset=utf-8' }),
+  );
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = 'noopener';
+  anchor.click();
+  URL.revokeObjectURL(url);
+};
+
+const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
+  const diagnostics = services.diagnostics;
+  const [snapshot, setSnapshot] = useState<BetaDiagnosticsSnapshot>();
+  const [health, setHealth] = useState<DiagnosticHealth>();
+  const [message, setMessage] = useState('');
+
+  const refresh = useCallback(async () => {
+    if (!diagnostics) return;
+    const [nextSnapshot, nextHealth] = await Promise.allSettled([
+      diagnostics.snapshot(),
+      diagnostics.health(),
+    ]);
+    if (nextSnapshot.status === 'fulfilled') setSnapshot(nextSnapshot.value);
+    if (nextHealth.status === 'fulfilled') setHealth(nextHealth.value);
+  }, [diagnostics]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (!diagnostics) return null;
+  const latestRequestId = snapshot?.events.find((event) => event.requestId)?.requestId;
+  const latestError = snapshot?.events.find((event) => event.severity === 'error');
+  const latestSuccess = snapshot?.events.find(
+    (event) => event.eventType === 'turnstile_success' || event.eventType === 'health_result',
+  );
+  const exportValue = snapshot
+    ? {
+        schema: 'mirna-beta-diagnostics-v1',
+        generatedAt: new Date().toISOString(),
+        supportId: snapshot.supportId,
+        applicationVersion: APPLICATION_VERSION,
+        worker: health
+          ? {
+              buildCommit: health.buildCommit,
+              status: health.status,
+              environment: health.environment,
+              services: health.services,
+            }
+          : null,
+        events: snapshot.events,
+      }
+    : null;
+
+  const copy = async (value: string, successMessage: string) => {
+    setMessage('');
+    try {
+      await copyPlainText(value);
+      setMessage(successMessage);
+    } catch {
+      setMessage('Kopiranje nije dostupno u ovom pregledaču.');
+    }
+  };
+
+  return (
+    <Card className="grid gap-4" data-testid="sync-beta-diagnostics">
+      <div>
+        <SectionTitle>Beta dijagnostika</SectionTitle>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          Čuva samo tehničke događaje, bez iznosa, opisa, recovery koda, ključeva, tokena ili IP
+          adrese. Lokalna istorija je ograničena na 200 događaja.
+        </p>
+      </div>
+      <dl className="grid gap-3 text-sm sm:grid-cols-2">
+        <div className="rounded-xl bg-surface-2 p-3">
+          <dt className="text-xs font-semibold text-muted">Support ID</dt>
+          <dd className="mt-1 break-all font-mono font-bold">
+            {snapshot?.supportId ?? 'Učitavam…'}
+          </dd>
+        </div>
+        <div className="rounded-xl bg-surface-2 p-3">
+          <dt className="text-xs font-semibold text-muted">Poslednji Request ID</dt>
+          <dd className="mt-1 break-all font-mono font-bold">
+            {latestRequestId ?? 'Nije zabeležen'}
+          </dd>
+        </div>
+        <div className="rounded-xl bg-surface-2 p-3">
+          <dt className="text-xs font-semibold text-muted">Build</dt>
+          <dd className="mt-1 font-bold">
+            aplikacija {APPLICATION_VERSION}; Worker {health?.buildCommit ?? 'nije dostupan'}
+          </dd>
+        </div>
+        <div className="rounded-xl bg-surface-2 p-3">
+          <dt className="text-xs font-semibold text-muted">Health</dt>
+          <dd className="mt-1 font-bold">
+            {health
+              ? `${health.status}; D1 ${health.services.d1}; R2 ${health.services.r2}`
+              : 'Nije dostupan'}
+          </dd>
+        </div>
+      </dl>
+      <div className="grid gap-1 text-xs leading-5 text-muted">
+        <p>
+          Poslednja greška:{' '}
+          {latestError ? `${latestError.eventType} — ${latestError.createdAt}` : 'nema'}
+        </p>
+        <p>
+          Poslednji uspeh:{' '}
+          {latestSuccess ? `${latestSuccess.eventType} — ${latestSuccess.createdAt}` : 'nema'}
+        </p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Button
+          variant="secondary"
+          disabled={!snapshot}
+          onClick={() => snapshot && void copy(snapshot.supportId, 'Support ID je kopiran.')}
+        >
+          <Copy size={17} aria-hidden="true" /> Kopiraj Support ID
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={!latestRequestId}
+          onClick={() => latestRequestId && void copy(latestRequestId, 'Request ID je kopiran.')}
+        >
+          <Copy size={17} aria-hidden="true" /> Kopiraj Request ID
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={!exportValue}
+          onClick={() =>
+            exportValue &&
+            void copy(JSON.stringify(exportValue, null, 2), 'Dijagnostika je kopirana.')
+          }
+        >
+          <Copy size={17} aria-hidden="true" /> Kopiraj dijagnostiku
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={!exportValue}
+          onClick={() => exportValue && downloadJson('mirna-beta-dijagnostika.json', exportValue)}
+        >
+          <Download size={17} aria-hidden="true" /> Preuzmi dijagnostiku
+        </Button>
+        <Button
+          variant="ghost"
+          disabled={!snapshot || snapshot.events.length === 0}
+          onClick={() => {
+            void diagnostics.clear().then(async () => {
+              setMessage('Lokalna istorija dijagnostike je obrisana; Support ID je sačuvan.');
+              await refresh();
+            });
+          }}
+        >
+          <Trash2 size={17} aria-hidden="true" /> Obriši istoriju
+        </Button>
+      </div>
+      <p className="rounded-xl bg-warning-soft p-3 text-xs leading-5 text-warning">
+        Pre slanja podršci pregledajte fajl. Mirna dijagnostika nikada ne treba da sadrži
+        finansijske podatke ili tajne.
+      </p>
+      {message ? (
+        <p role="status" className="text-sm text-muted">
+          {message}
+        </p>
+      ) : null}
+    </Card>
+  );
+};
 
 const EmptyModeChooser = ({
   preOnboarding,
@@ -1422,52 +1685,62 @@ const SyncContent = ({
     void refresh();
   }, [refresh]);
 
-  if (!localStatus && !loadError) {
-    return (
-      <div role="status" className="grid min-h-48 place-items-center text-sm text-muted">
-        <span className="flex items-center gap-2">
-          <BusyIcon /> Čitam lokalno sync podešavanje…
-        </span>
-      </div>
-    );
-  }
-  if (loadError) return <InlineError message={loadError} />;
-  if (!localStatus) return null;
+  const content = (() => {
+    if (!localStatus && !loadError) {
+      return (
+        <div role="status" className="grid min-h-48 place-items-center text-sm text-muted">
+          <span className="flex items-center gap-2">
+            <BusyIcon /> Čitam lokalno sync podešavanje…
+          </span>
+        </div>
+      );
+    }
+    if (loadError) return <InlineError message={loadError} />;
+    if (!localStatus) return null;
 
-  if (localStatus.setup) {
-    return (
-      <ActivePanel
-        status={{ ...localStatus, setup: localStatus.setup }}
-        services={services}
-        preOnboarding={preOnboarding}
-        onDisabled={async () => {
-          setMode('choose');
-          await refresh();
-        }}
-        onChanged={refresh}
-      />
-    );
-  }
+    if (localStatus.setup) {
+      return (
+        <ActivePanel
+          status={{ ...localStatus, setup: localStatus.setup }}
+          services={services}
+          preOnboarding={preOnboarding}
+          onDisabled={async () => {
+            setMode('choose');
+            await refresh();
+          }}
+          onChanged={refresh}
+        />
+      );
+    }
 
-  if (mode === 'choose') {
-    return <EmptyModeChooser preOnboarding={preOnboarding} onChoose={setMode} />;
-  }
-  if (mode === 'enable') {
+    if (mode === 'choose') {
+      return <EmptyModeChooser preOnboarding={preOnboarding} onChoose={setMode} />;
+    }
+    if (mode === 'enable') {
+      return (
+        <EnablePanel services={services} onActivated={refresh} onBack={() => setMode('choose')} />
+      );
+    }
+    if (mode === 'pair-new') {
+      return (
+        <NewDevicePairingPanel
+          services={services}
+          onActivated={refresh}
+          onBack={() => setMode('choose')}
+        />
+      );
+    }
     return (
-      <EnablePanel services={services} onActivated={refresh} onBack={() => setMode('choose')} />
+      <RecoveryPanel services={services} onActivated={refresh} onBack={() => setMode('choose')} />
     );
-  }
-  if (mode === 'pair-new') {
-    return (
-      <NewDevicePairingPanel
-        services={services}
-        onActivated={refresh}
-        onBack={() => setMode('choose')}
-      />
-    );
-  }
+  })();
+
   return (
-    <RecoveryPanel services={services} onActivated={refresh} onBack={() => setMode('choose')} />
+    <div className="grid gap-4">
+      {content}
+      <TurnstileCard services={services} />
+      <BetaDiagnosticsCard services={services} />
+    </div>
   );
 };
 

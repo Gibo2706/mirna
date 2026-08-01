@@ -118,8 +118,10 @@ localhost
 ```
 
 The SPA loads the exact `challenges.cloudflare.com` script only when an
-anonymous create flow requests a token. Explicit-render widgets are removed
-after success, error, expiry or timeout so the next attempt receives a fresh
+anonymous create flow requests a token. React owns a visible card titled
+`Bezbednosna provera`; the explicit Managed widget uses `appearance: always`
+and is never placed in an imperative fixed overlay. Expiry, timeout or rejection
+resets the widget, and the next protected attempt must obtain a fresh
 single-use token. Protected routes/actions are:
 
 | Route                         | Expected action        |
@@ -131,12 +133,54 @@ single-use token. Protected routes/actions are:
 The Worker posts the token to Siteverify and checks success, exact hostname and
 exact action. Turnstile is defense in depth; edge rate limits, D1 attempt
 counters, signatures, sessions and idempotency remain authoritative. Token,
-secret and visitor IP values are never logged or stored.
+secret, Siteverify body and visitor IP values are never logged or stored.
+Public errors distinguish expired/replayed, rejected, temporarily unavailable
+and invalid staging configuration without exposing Cloudflare details.
+Outbound Siteverify validation uses the canonical 10-second Worker timeout.
+The strict bounded response schema also accepts Cloudflare's observed
+`messages` array but never stores it or exposes it to the client.
+The Worker enables `global_fetch_strictly_public` as a narrowly scoped outbound
+fetch hardening flag; a staging probe showed that the flag alone does not fix a
+Siteverify network failure. The Worker therefore keeps privacy-safe categories
+for timeout, network policy, redirect, runtime-context and generic fetch errors.
+No raw exception message is stored. No other external Worker fetch is present
+in protocol v1.
 
 The public site key is `VITE_TURNSTILE_SITE_KEY`. The secret is set only through
 the Cloudflare secret store as `TURNSTILE_SECRET_KEY`. Automated local tests use
 Cloudflare's documented always-pass test keys; real staging material never
 enters `.env`, `.dev.vars`, test fixtures or Git.
+
+## Privacy-safe beta diagnostics
+
+The beta UI creates a 128-bit random readable Support ID and stores it only in
+IndexedDB. It is not in `localStorage`, finance snapshots, encrypted sync
+payloads or JSON backups. A local ring buffer keeps at most 200 allowlisted
+technical events. The UI can copy Support ID, the last Request ID and a
+sanitized JSON report, download the same report, or clear event history without
+changing the Support ID.
+
+`POST /v1/diagnostics/events` accepts only a tiny anonymous allowlist for
+Turnstile/setup and health phases. Broader client events require an authorized
+device session. The endpoint has a separate edge limiter and does not require a
+second Turnstile challenge. D1 stores only one-way hashes of Support ID,
+vault/device references, a safe technical code, route action, build and a
+strict allowlisted JSON object of at most 2 KiB. It never stores a request body,
+token, secret, IP, user agent, financial field, recovery code or key material.
+
+Rows expire after 14 days. Inserts are capped at 200 per Support ID per UTC day,
+1,000 per hashed vault per UTC day and 50,000 globally. Scheduled cleanup is
+bounded and the global counter is maintained by insert/delete triggers.
+
+Operator lookup never reveals the original hashed references:
+
+```sh
+npm run sync:logs -- --support MIRNA-.... --since 2h
+npm run sync:logs -- --request 00000000-0000-4000-8000-000000000000 --since 2h
+```
+
+Always ask the tester to review the sanitized output before sharing it. Never
+ask for screenshots or exports containing finance data or recovery material.
 
 ## Local gate
 

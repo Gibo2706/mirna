@@ -28,6 +28,10 @@ import type {
   SyncOutboxRecord,
   SyncVaultRecord,
 } from './sync/records';
+import type {
+  SyncBetaDiagnosticEventRecord,
+  SyncBetaSupportRecord,
+} from './sync/diagnostic-records';
 
 export class FinanceDatabase extends Dexie {
   accounts!: EntityTable<Account, 'id'>;
@@ -53,6 +57,8 @@ export class FinanceDatabase extends Dexie {
   syncMetadata!: EntityTable<SyncMetadataRecord, 'id'>;
   syncCheckpoints!: EntityTable<SyncCheckpointRecord, 'id'>;
   syncEntityStates!: EntityTable<SyncEntityStateRecord, 'id'>;
+  syncBetaSupport!: EntityTable<SyncBetaSupportRecord, 'id'>;
+  syncBetaDiagnosticEvents!: EntityTable<SyncBetaDiagnosticEventRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -323,6 +329,13 @@ export class FinanceDatabase extends Dexie {
     this.version(10).stores({
       syncConflicts:
         'id, vaultId, entityId, mutationGroupId, resolutionState, [vaultId+resolutionState], [vaultId+mutationGroupId], detectedAt',
+    });
+
+    // Beta support metadata is deliberately isolated from financeTables, sync
+    // snapshots and backup/export payloads. It never contains financial data.
+    this.version(11).stores({
+      syncBetaSupport: 'id, &supportId, createdAt',
+      syncBetaDiagnosticEvents: 'id, createdAt, eventType, requestId',
     });
   }
 }

@@ -14,10 +14,12 @@ type RateLimitBindingName =
   | 'MIRNA_RECOVERY_ACTION_RATE_LIMITER'
   | 'MIRNA_SYNC_READ_RATE_LIMITER'
   | 'MIRNA_SNAPSHOT_UPLOAD_RATE_LIMITER'
-  | 'MIRNA_OPERATION_WRITE_RATE_LIMITER';
+  | 'MIRNA_OPERATION_WRITE_RATE_LIMITER'
+  | 'MIRNA_DIAGNOSTICS_RATE_LIMITER';
 
 const bindingForPath = (pathname: string): RateLimitBindingName | null => {
   if (pathname === '/v1/health') return 'MIRNA_HEALTH_RATE_LIMITER';
+  if (pathname === '/v1/diagnostics/events') return 'MIRNA_DIAGNOSTICS_RATE_LIMITER';
   if (pathname === '/v1/vaults') return 'MIRNA_SETUP_RATE_LIMITER';
   if (pathname === '/v1/pairings') return 'MIRNA_PAIRING_CREATE_RATE_LIMITER';
   if (pathname.startsWith('/v1/pairings/')) return 'MIRNA_PAIRING_ACTION_RATE_LIMITER';

@@ -152,7 +152,9 @@ ordinary finance backups. Their roles are:
 - deterministic outbox intents and encrypted envelopes;
 - inbox/application frontier and applied operation IDs;
 - local conflict records;
-- snapshot/frontier pins, scheduler state and non-sensitive diagnostics.
+- snapshot/frontier pins and scheduler state;
+- beta-only Support ID and an allowlisted 200-event diagnostic ring in separate
+  IndexedDB tables excluded from finance backup/export and sync snapshots.
 
 For operation sync, a successful finance mutation and its deterministic outbox intent
 must be written in one Dexie transaction. Web Crypto work must happen outside

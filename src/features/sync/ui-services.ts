@@ -27,6 +27,10 @@ import { ContinuousSyncService, type ContinuousSyncResult } from './continuous-s
 import { SyncOperationRepository } from '@/db/sync/operation-repository';
 import { DeviceSecurityService } from './device-security-service';
 import { BrowserTurnstileTokenProvider } from './turnstile-client';
+import type { TurnstileUiController } from './turnstile-client';
+import type { BetaDiagnosticsSnapshot } from './diagnostics';
+import { BetaDiagnosticsService } from './diagnostics';
+import type { TurnstilePhase, TurnstileViewState } from './turnstile-client';
 
 type CryptoCapability = Awaited<ReturnType<typeof probeIndexedDbCryptoKeyPersistence>>;
 
@@ -88,6 +92,13 @@ export interface SyncUiServices {
   readonly copySecret: (secret: string) => Promise<void>;
   readonly downloadSecret: (filename: string, secret: string) => void;
   readonly printSecret: () => void;
+  readonly turnstile?: TurnstileUiController;
+  readonly diagnostics?: {
+    supportId(): Promise<string>;
+    snapshot(): Promise<BetaDiagnosticsSnapshot>;
+    clear(): Promise<void>;
+    health(): ReturnType<MirnaSyncApi['health']>;
+  };
 }
 
 const downloadSecretFile = (filename: string, secret: string): void => {
@@ -118,8 +129,39 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
   const config = readSyncClientConfig();
   if (!config.enabled) throw new Error('Beta sinhronizacija nije uključena.');
 
-  const turnstile = new BrowserTurnstileTokenProvider(config.turnstileSiteKey);
-  const api = new MirnaSyncApi(config, { turnstile });
+  const diagnostics = new BetaDiagnosticsService(config.apiOrigin);
+  const diagnosticEventForPhase: Readonly<Record<TurnstilePhase, string | null>> = {
+    idle: null,
+    'script-loading': 'turnstile_script_loading',
+    'widget-ready': 'turnstile_widget_ready',
+    waiting: 'turnstile_waiting',
+    'token-received': 'turnstile_token_received',
+    'server-verifying': 'turnstile_server_verifying',
+    success: 'turnstile_success',
+    expired: 'turnstile_expired',
+    rejected: 'turnstile_rejected',
+    'network-error': 'turnstile_network_error',
+    'configuration-error': 'turnstile_configuration_error',
+  };
+  const turnstile = new BrowserTurnstileTokenProvider(config.turnstileSiteKey, {
+    onState: async (state: TurnstileViewState) => {
+      const eventType = diagnosticEventForPhase[state.phase];
+      if (!eventType) return;
+      await diagnostics.record({
+        eventType: eventType as Parameters<BetaDiagnosticsService['record']>[0]['eventType'],
+        severity:
+          state.phase === 'expired' ||
+          state.phase === 'rejected' ||
+          state.phase === 'network-error' ||
+          state.phase === 'configuration-error'
+            ? 'error'
+            : 'info',
+        action: state.action,
+        requestId: state.requestId,
+      });
+    },
+  });
+  const api = new MirnaSyncApi(config, { turnstile, diagnostics });
   const dependencies = { api, origin: window.location.origin } as const;
   const operationRepository = new SyncOperationRepository();
   const conflictRepository = new SyncConflictRepository();
@@ -203,5 +245,12 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
     copySecret: copySecretToClipboard,
     downloadSecret: downloadSecretFile,
     printSecret: () => window.print(),
+    turnstile,
+    diagnostics: {
+      supportId: () => diagnostics.supportId(),
+      snapshot: () => diagnostics.snapshot(),
+      clear: () => diagnostics.clear(),
+      health: () => api.health(),
+    },
   };
 };

@@ -74,17 +74,20 @@ const routeBudget = (request: Request): RouteBudget => {
   const method = request.method;
   if (method === 'OPTIONS') return { key: 'preflight', access: 'read', usage: ZERO_USAGE };
   if (path === '/v1/health') return { key: 'health', access: 'read', usage: usage(4, 0, 0, 1) };
+  if (method === 'POST' && path === '/v1/diagnostics/events') {
+    return { key: 'beta-diagnostics', access: 'write', usage: usage(2_048, 32) };
+  }
   if (method === 'POST' && path === '/v1/vaults') {
-    return { key: 'vault-create', access: 'new-vault', usage: usage(96, 24) };
+    return { key: 'vault-create', access: 'new-vault', usage: usage(512, 32) };
   }
   if (method === 'POST' && path === '/v1/pairings') {
-    return { key: 'pairing-create', access: 'pairing', usage: usage(48, 8) };
+    return { key: 'pairing-create', access: 'pairing', usage: usage(512, 16) };
   }
   if (path.startsWith('/v1/pairings/')) {
     return { key: 'pairing-action', access: 'pairing', usage: usage(160, 36) };
   }
   if (path === '/v1/recovery/challenge') {
-    return { key: 'recovery-init', access: 'write', usage: usage(64, 12) };
+    return { key: 'recovery-init', access: 'write', usage: usage(512, 20) };
   }
   if (path.includes('/recover') || path.startsWith('/v1/recovery/')) {
     return { key: 'recovery-action', access: 'write', usage: usage(240, 64, 0, 1) };

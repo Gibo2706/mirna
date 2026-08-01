@@ -3,7 +3,7 @@
   "name": "mirna-sync-local",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-31",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": false,
   "preview_urls": false,
   "observability": {
@@ -144,6 +144,11 @@
           "name": "MIRNA_OPERATION_WRITE_RATE_LIMITER",
           "namespace_id": "1010",
           "simple": { "limit": 120, "period": 60 },
+        },
+        {
+          "name": "MIRNA_DIAGNOSTICS_RATE_LIMITER",
+          "namespace_id": "1011",
+          "simple": { "limit": 30, "period": 60 },
         },
       ],
       "d1_databases": [

@@ -27,6 +27,7 @@ export interface CleanupResult {
   snapshots: number;
   syncChanges: number;
   deletionRequests: number;
+  betaDiagnosticEvents: number;
 }
 
 const changes = (result: D1Result<unknown>): number => result.meta.changes ?? 0;
@@ -244,6 +245,19 @@ export const runScheduledCleanup = async (env: Env, now = Date.now()): Promise<C
   );
 
   const snapshots = await cleanupSnapshots(env, now, snapshotBatchSize);
+  const betaDiagnosticEvents = await deleteExpiredRows(
+    env.MIRNA_SYNC_DB,
+    `DELETE FROM beta_diagnostic_events
+      WHERE event_id IN (
+        SELECT event_id
+          FROM beta_diagnostic_events
+         WHERE expires_at <= ?1
+         ORDER BY expires_at, event_id
+         LIMIT ?2
+      )`,
+    now,
+    ephemeralBatchSize,
+  );
   await reconcileR2InventoryPage(env, now);
 
   return {
@@ -255,5 +269,6 @@ export const runScheduledCleanup = async (env: Env, now = Date.now()): Promise<C
     snapshots,
     syncChanges,
     deletionRequests: resumedDeletionRequests + staleDeletionRequests + retainedDeletionRequests,
+    betaDiagnosticEvents,
   };
 };

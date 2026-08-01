@@ -22,7 +22,7 @@ describe('Turnstile staging validation', () => {
     const fetcher = vi.fn<typeof fetch>();
     await expect(
       requireTurnstile(stagingContext(), 'mirna_vault_create', fetcher),
-    ).rejects.toMatchObject({ status: 403, code: 'HUMAN_VERIFICATION_REQUIRED' });
+    ).rejects.toMatchObject({ status: 403, code: 'HUMAN_VERIFICATION_REJECTED' });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -47,15 +47,62 @@ describe('Turnstile staging validation', () => {
   });
 
   it.each([
-    { hostname: 'attacker.invalid', action: 'mirna_vault_create' },
-    { hostname: 'mirna-finansije-beta.vercel.app', action: 'mirna_pairing_create' },
-    { hostname: 'mirna-finansije-beta.vercel.app', action: 'mirna_vault_create', success: false },
-  ])('fails closed for mismatched Siteverify evidence', async (result) => {
+    {
+      hostname: 'attacker.invalid',
+      action: 'mirna_vault_create',
+      expectedCode: 'HUMAN_VERIFICATION_CONFIGURATION',
+      expectedStatus: 503,
+    },
+    {
+      hostname: 'mirna-finansije-beta.vercel.app',
+      action: 'mirna_pairing_create',
+      expectedCode: 'HUMAN_VERIFICATION_CONFIGURATION',
+      expectedStatus: 503,
+    },
+    {
+      hostname: 'mirna-finansije-beta.vercel.app',
+      action: 'mirna_vault_create',
+      success: false,
+      expectedCode: 'HUMAN_VERIFICATION_REJECTED',
+      expectedStatus: 403,
+    },
+  ])(
+    'fails closed for mismatched Siteverify evidence',
+    async ({ expectedCode, expectedStatus, ...result }) => {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(Response.json({ success: true, ...result }));
+      await expect(
+        requireTurnstile(stagingContext('opaque-single-use-token'), 'mirna_vault_create', fetcher),
+      ).rejects.toMatchObject({ status: expectedStatus, code: expectedCode });
+    },
+  );
+
+  it.each([
+    ['timeout-or-duplicate', 'HUMAN_VERIFICATION_EXPIRED', 403],
+    ['invalid-input-secret', 'HUMAN_VERIFICATION_CONFIGURATION', 503],
+    ['internal-error', 'HUMAN_VERIFICATION_UNAVAILABLE', 503],
+    ['invalid-input-response', 'HUMAN_VERIFICATION_REJECTED', 403],
+  ] as const)('maps Siteverify %s to a safe stable category', async (code, publicCode, status) => {
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(Response.json({ success: true, ...result }));
+      .mockResolvedValue(Response.json({ success: false, 'error-codes': [code], messages: [] }));
     await expect(
       requireTurnstile(stagingContext('opaque-single-use-token'), 'mirna_vault_create', fetcher),
-    ).rejects.toMatchObject({ status: 403, code: 'HUMAN_VERIFICATION_REQUIRED' });
+    ).rejects.toMatchObject({ status, code: publicCode });
+  });
+
+  it('fails closed on an undocumented Siteverify response shape', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        success: true,
+        hostname: 'mirna-finansije-beta.vercel.app',
+        action: 'mirna_vault_create',
+        unexpected: true,
+      }),
+    );
+    await expect(
+      requireTurnstile(stagingContext('opaque-single-use-token'), 'mirna_vault_create', fetcher),
+    ).rejects.toMatchObject({ status: 403, code: 'HUMAN_VERIFICATION_REJECTED' });
   });
 });
