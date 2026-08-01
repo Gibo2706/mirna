@@ -141,6 +141,8 @@ const worker: ExportedHandler<Env> = {
         return errorResponse(error.code, error.message, error.status, {
           requestId,
           allowedOrigin,
+          verificationReason:
+            env.MIRNA_ENVIRONMENT === 'staging' ? error.verificationReason : undefined,
           headers:
             error.status === 405 && allowedMethods
               ? { Allow: [...allowedMethods, 'OPTIONS'].join(', ') }

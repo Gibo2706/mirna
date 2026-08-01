@@ -185,7 +185,7 @@ describe('Mirna sync API transport', () => {
     expect(headers.has('Authorization')).toBe(false);
   });
 
-  it('uses a fresh action-bound Turnstile token only on anonymous creation routes', async () => {
+  it('never replays a failed action-bound token and uses a fresh token and attempt ID', async () => {
     const input = {
       protocolVersion: SYNC_PROTOCOL_VERSION,
       suite: SYNC_CRYPTO_SUITE,
@@ -199,8 +199,19 @@ describe('Mirna sync API transport', () => {
       pairingClaimTokenHash: hash('V'),
       pollingTokenHash: hash('W'),
     } as const;
+    const verificationAttemptId = '123e4567-e89b-42d3-a456-426614174000';
+    const retryAttemptId = '123e4567-e89b-42d3-a456-426614174001';
     const turnstile = {
-      token: vi.fn().mockResolvedValue('single-use-turnstile-token'),
+      token: vi
+        .fn()
+        .mockResolvedValueOnce({
+          token: 'failed-single-use-token',
+          verificationAttemptId,
+        })
+        .mockResolvedValueOnce({
+          token: 'fresh-single-use-token',
+          verificationAttemptId: retryAttemptId,
+        }),
       markServerVerifying: vi.fn(),
       markServerResult: vi.fn(),
       dispose: vi.fn(),
@@ -209,25 +220,35 @@ describe('Mirna sync API transport', () => {
       supportId: vi.fn().mockResolvedValue('MIRNA-0123-4567-89AB-CDEF-GHJK-MNPQ-RS'),
       record: vi.fn().mockResolvedValue(undefined),
     };
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      protocolResponse(
-        {
-          protocolVersion: SYNC_PROTOCOL_VERSION,
-          requestId: input.requestId,
-          expiresAt: LATER,
-        },
-        201,
-      ),
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(
+        protocolResponse(
+          {
+            protocolVersion: SYNC_PROTOCOL_VERSION,
+            requestId: input.requestId,
+            expiresAt: LATER,
+          },
+          201,
+        ),
+      );
     const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock, turnstile, diagnostics });
 
+    await expect(api.createPairing(input)).rejects.toMatchObject({ code: 'NETWORK_FAILURE' });
     await expect(api.createPairing(input)).resolves.toMatchObject({ requestId: input.requestId });
-    expect(turnstile.token).toHaveBeenCalledWith('mirna_pairing_create');
-    expect(turnstile.markServerVerifying).toHaveBeenCalledOnce();
-    expect(turnstile.markServerResult).toHaveBeenCalledWith();
-    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
-    expect(headers.get('X-Mirna-Turnstile-Token')).toBe('single-use-turnstile-token');
-    expect(headers.get('X-Mirna-Support-Id')).toBe('MIRNA-0123-4567-89AB-CDEF-GHJK-MNPQ-RS');
+    expect(turnstile.token).toHaveBeenCalledTimes(2);
+    expect(turnstile.token).toHaveBeenNthCalledWith(1, 'mirna_pairing_create');
+    expect(turnstile.token).toHaveBeenNthCalledWith(2, 'mirna_pairing_create');
+    expect(turnstile.markServerVerifying).toHaveBeenCalledTimes(2);
+    expect(turnstile.markServerResult).toHaveBeenLastCalledWith();
+    const firstHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    const retryHeaders = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(firstHeaders.get('X-Mirna-Turnstile-Token')).toBe('failed-single-use-token');
+    expect(firstHeaders.get('X-Mirna-Verification-Attempt-Id')).toBe(verificationAttemptId);
+    expect(retryHeaders.get('X-Mirna-Turnstile-Token')).toBe('fresh-single-use-token');
+    expect(retryHeaders.get('X-Mirna-Verification-Attempt-Id')).toBe(retryAttemptId);
+    expect(retryHeaders.get('X-Mirna-Support-Id')).toBe('MIRNA-0123-4567-89AB-CDEF-GHJK-MNPQ-RS');
   });
 
   it('never blocks a sync request when the diagnostic Support ID is unavailable', async () => {
@@ -242,6 +263,39 @@ describe('Mirna sync API transport', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
     expect(headers.has('X-Mirna-Support-Id')).toBe(false);
+  });
+
+  it('preserves only the allowlisted beta verification reason and Request ID', async () => {
+    const requestId = '123e4567-e89b-42d3-a456-426614174000';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      protocolResponse(
+        {
+          protocolVersion: SYNC_PROTOCOL_VERSION,
+          error: {
+            code: 'HUMAN_VERIFICATION_REJECTED',
+            message: 'Human verification was not accepted.',
+            requestId,
+            verificationReason: 'INVALID_INPUT_RESPONSE',
+          },
+        },
+        403,
+      ),
+    );
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock });
+
+    let caught: unknown;
+    try {
+      await api.health();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      code: 'HUMAN_VERIFICATION_REJECTED',
+      requestId,
+      verificationReason: 'INVALID_INPUT_RESPONSE',
+    });
+    expect(caught).toBeInstanceOf(SyncApiError);
+    expect((caught as SyncApiError).message).toMatch(/Cloudflare je odbio rezultat provere/u);
   });
 
   it('fails closed before fetch when a protected route has no Turnstile provider', async () => {

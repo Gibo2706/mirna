@@ -37,6 +37,17 @@ const clientEventSchema = z.strictObject({
   online: z.boolean().optional(),
   requestId: z.string().regex(REQUEST_ID).optional(),
   safeCode: z.string().regex(SAFE_CODE).optional(),
+  verificationAttemptId: z.string().uuid().optional(),
+  verificationReason: z
+    .enum([
+      'INVALID_INPUT_RESPONSE',
+      'TIMEOUT_OR_DUPLICATE',
+      'HOSTNAME_MISMATCH',
+      'ACTION_MISMATCH',
+      'SITEVERIFY_UNAVAILABLE',
+      'CONFIGURATION_ERROR',
+    ])
+    .optional(),
   severity: z.enum(['info', 'error']),
 });
 
@@ -65,6 +76,7 @@ export type ServerDiagnosticCategory =
   | 'siteverify-runtime-context-error'
   | 'siteverify-type-error'
   | 'siteverify-network-error'
+  | 'siteverify-started'
   | 'verified';
 
 interface DiagnosticInput {
@@ -207,6 +219,8 @@ export const handleBetaDiagnosticEvent = async (context: RequestContext): Promis
       appBuild: event.build ?? 'unknown',
       online: event.online ?? false,
       safeCode: event.safeCode ?? 'NONE',
+      verificationAttemptId: event.verificationAttemptId ?? 'NONE',
+      verificationReason: event.verificationReason ?? 'NONE',
     },
   });
   return jsonResponse(

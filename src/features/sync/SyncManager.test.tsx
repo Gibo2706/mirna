@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 import { SyncManager } from './SyncManager';
 import type { SyncUiLocalStatus, SyncUiServices } from './ui-services';
 import * as syncUiServices from './ui-services';
+import { SyncApiError } from './api';
 
 const supportedCapability = {
   supported: true,
@@ -163,7 +164,6 @@ describe('Phase 1 sync UI', () => {
       turnstile: {
         state: { phase: 'idle' },
         attach,
-        retry: vi.fn(),
         subscribe: (listener) => {
           listeners.add(listener);
           listener({ phase: 'idle' });
@@ -179,6 +179,73 @@ describe('Phase 1 sync UI', () => {
     ).toBeVisible();
     expect(screen.getByTestId('sync-turnstile-widget')).toBeVisible();
     expect(attach).toHaveBeenCalledWith(expect.any(HTMLDivElement));
+  });
+
+  it('keeps opaque diagnostics compact and refreshes the latest Request ID live', async () => {
+    const supportId = 'MIRNA-EMPZ-S5ZF-5VDE-VF3P-X024-D675-9R';
+    const firstRequestId = '7663c8e6-e4ab-4eef-89ab-ce96201126b7';
+    const nextRequestId = '123e4567-e89b-42d3-a456-426614174000';
+    const workerBuild = 'c091e36822db7add6974cf913336ce733b1f3942a44864778d08a1370d754621';
+    let notify: (() => void) | undefined;
+    let events = [
+      {
+        id: crypto.randomUUID(),
+        createdAt: '2026-08-01T17:00:00.000Z',
+        eventType: 'turnstile_rejected',
+        severity: 'error' as const,
+        requestId: firstRequestId,
+        safeCode: 'HUMAN_VERIFICATION_REJECTED',
+        verificationReason: 'INVALID_INPUT_RESPONSE',
+        build: '2.4.0-beta.1',
+      },
+    ];
+    const services = baseServices({
+      diagnostics: {
+        supportId: vi.fn(() => Promise.resolve(supportId)),
+        snapshot: vi.fn(() => Promise.resolve({ supportId, events })),
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {
+            notify = undefined;
+          };
+        },
+        clear: vi.fn(() => Promise.resolve()),
+        health: vi.fn(() =>
+          Promise.resolve({
+            protocolVersion: 1 as const,
+            status: 'ok' as const,
+            environment: 'staging' as const,
+            buildCommit: workerBuild,
+            writesEnabled: true,
+            services: { d1: 'ok' as const, r2: 'ok' as const },
+          }),
+        ),
+      },
+    });
+
+    renderManager(services);
+    const card = await screen.findByTestId('sync-beta-diagnostics');
+    expect(card).toHaveClass('min-w-0', 'overflow-hidden');
+    expect(await screen.findByText('MIRNA-EM…675-9R')).toBeVisible();
+    expect((await screen.findAllByText('7663c8e6…1126b7')).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText('c091e368…754621')).toBeVisible();
+    const eventsDisclosure = screen.getByText('Poslednji tehnički događaji').closest('details');
+    expect(eventsDisclosure).not.toHaveAttribute('open');
+
+    await userEvent.click(screen.getByRole('button', { name: /Support ID:/i }));
+    expect(screen.getByText(supportId)).toBeVisible();
+
+    events = [
+      {
+        ...events[0],
+        id: crypto.randomUUID(),
+        requestId: nextRequestId,
+        createdAt: '2026-08-01T17:01:00.000Z',
+      },
+      ...events,
+    ];
+    act(() => notify?.());
+    expect((await screen.findAllByText('123e4567…174000')).length).toBeGreaterThanOrEqual(1);
   });
 
   it('requires recovery group verification and a separate explicit activation', async () => {
@@ -239,6 +306,62 @@ describe('Phase 1 sync UI', () => {
     await waitFor(() => expect(activate).toHaveBeenCalledOnce());
     expect(await screen.findByText('Ovaj uređaj je povezan')).toBeVisible();
     expect(screen.queryByTestId('sync-recovery-code')).not.toBeInTheDocument();
+  });
+
+  it('prevents parallel activation and retries with the confirmed recovery setup', async () => {
+    const user = userEvent.setup();
+    let rejectFirst!: (error: unknown) => void;
+    const firstAttempt = new Promise<LocalSyncSetup>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const activate = vi
+      .fn<() => Promise<LocalSyncSetup>>()
+      .mockImplementationOnce(() => firstAttempt)
+      .mockResolvedValue(localSetup());
+    const services = baseServices({
+      createEnableLifecycle: () => ({
+        begin: vi.fn(() =>
+          Promise.resolve({
+            recoveryCode: 'MR1-AAAA-BBBB-CCCC-DDDD',
+            confirmationGroupNumbers: [2, 4],
+          }),
+        ),
+        confirmRecoveryCode: vi.fn(() => Promise.resolve()),
+        activate,
+      }),
+    });
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
+    await user.click(screen.getByRole('button', { name: /Proveri ovaj uređaj/i }));
+    await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
+    await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
+    await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'BBBB');
+    await user.type(screen.getByTestId('sync-recovery-confirmation-4'), 'DDDD');
+    await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
+
+    const activateButton = await screen.findByRole('button', {
+      name: /Aktiviraj šifrovanu sinhronizaciju/i,
+    });
+    await user.dblClick(activateButton);
+    expect(activate).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      rejectFirst(
+        new SyncApiError(
+          'HUMAN_VERIFICATION_REJECTED',
+          403,
+          '123e4567-e89b-42d3-a456-426614174000',
+          'INVALID_INPUT_RESPONSE',
+        ),
+      );
+      await firstAttempt.catch(() => undefined);
+    });
+    expect(await screen.findByText(/Cloudflare je odbio rezultat provere/u)).toBeVisible();
+    expect(screen.getByTestId('sync-recovery-code')).toHaveTextContent('MR1-AAAA-BBBB-CCCC-DDDD');
+
+    await user.click(screen.getByRole('button', { name: 'Pokušaj aktivaciju ponovo' }));
+    await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
   });
 
   it('cancels a new-device request when the user reports a SAS mismatch', async () => {

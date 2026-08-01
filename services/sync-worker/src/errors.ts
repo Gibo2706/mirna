@@ -1,8 +1,17 @@
+export type VerificationReason =
+  | 'INVALID_INPUT_RESPONSE'
+  | 'TIMEOUT_OR_DUPLICATE'
+  | 'HOSTNAME_MISMATCH'
+  | 'ACTION_MISMATCH'
+  | 'SITEVERIFY_UNAVAILABLE'
+  | 'CONFIGURATION_ERROR';
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly verificationReason?: VerificationReason,
   ) {
     super(message);
     this.name = 'HttpError';

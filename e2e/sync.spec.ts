@@ -164,7 +164,7 @@ const assertSyncWidths = async (
   label: string,
   visibleTestId?: string,
 ): Promise<void> => {
-  for (const width of [360, 390, 412, 430]) {
+  for (const width of [320, 360, 390, 412, 430]) {
     await page.setViewportSize({ width, height: 844 });
     await assertNoPageOverflow(page, `${label} (${width}px)`);
     if (visibleTestId) {
@@ -520,6 +520,80 @@ const expectPrivateMaterialAbsent = (
 test.beforeEach(() => {
   requestBodies.length = 0;
   unexpectedSyncResponses.length = 0;
+});
+
+test('Turnstile activation UI fits 320-430 px and rerenders at the supported breakpoint', async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    ...devices['Pixel 7'],
+    viewport: { width: 320, height: 800 },
+    serviceWorkers: 'block',
+    timezoneId: 'Europe/Belgrade',
+  });
+  await context.route('https://challenges.cloudflare.com/turnstile/v0/api.js**', (route) =>
+    route.fulfill({
+      contentType: 'application/javascript',
+      body: `(() => {
+        const widgets = new Map();
+        let sequence = 0;
+        window.turnstile = {
+          render(container, options) {
+            const id = 'fake-turnstile-' + (++sequence);
+            const widget = document.createElement('div');
+            widget.dataset.fakeTurnstile = id;
+            widget.style.width = options.size === 'flexible' ? '100%' : '150px';
+            widget.style.height = options.size === 'flexible' ? '65px' : '140px';
+            widget.textContent = 'Test Turnstile ' + options.size;
+            container.append(widget);
+            widgets.set(id, widget);
+            window.__mirnaTestTurnstileSize = options.size;
+            return id;
+          },
+          execute() {},
+          remove(id) {
+            widgets.get(id)?.remove();
+            widgets.delete(id);
+          }
+        };
+      })();`,
+    }),
+  );
+  const page = await context.newPage();
+  await seedSyntheticPlan(page);
+  await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  await page.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
+  await page.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
+  await expect(page.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
+  await page.getByRole('button', { name: 'Napravi recovery kod' }).click();
+  const recoveryCode = await readRecoveryCode(page);
+  await confirmRecoveryGroups(page, recoveryCode);
+  await page.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
+  await page.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+  const mount = page.getByTestId('sync-turnstile-widget');
+  await expect(mount.locator('[data-fake-turnstile]')).toBeVisible();
+
+  for (const width of [320, 360, 390, 412, 430]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as Window & { __mirnaTestTurnstileSize?: string }).__mirnaTestTurnstileSize,
+        ),
+      )
+      .toBe(width <= 360 ? 'compact' : 'flexible');
+    await assertNoPageOverflow(page, `Turnstile aktivacija (${width}px)`);
+    const bounds = await mount.evaluate((node) => ({
+      clientWidth: node.clientWidth,
+      scrollWidth: node.scrollWidth,
+      childWidth: node.firstElementChild?.getBoundingClientRect().width ?? 0,
+    }));
+    expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.clientWidth + 1);
+    expect(bounds.childWidth).toBeLessThanOrEqual(bounds.clientWidth + 1);
+  }
+
+  expect(await readRecoveryCode(page)).toBe(recoveryCode);
+  await context.close();
 });
 
 test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths, and recover', async ({

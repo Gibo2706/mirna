@@ -74,8 +74,22 @@ const publicErrorSchema = z.strictObject({
     code: z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/u),
     message: z.string().min(1).max(512),
     requestId: z.string().uuid(),
+    verificationReason: z
+      .enum([
+        'INVALID_INPUT_RESPONSE',
+        'TIMEOUT_OR_DUPLICATE',
+        'HOSTNAME_MISMATCH',
+        'ACTION_MISMATCH',
+        'SITEVERIFY_UNAVAILABLE',
+        'CONFIGURATION_ERROR',
+      ])
+      .optional(),
   }),
 });
+
+export type VerificationReason = NonNullable<
+  z.output<typeof publicErrorSchema>['error']['verificationReason']
+>;
 
 const healthResponseSchema = z.strictObject({
   protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
@@ -249,13 +263,31 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   REMOTE_ERROR: 'Zahtev za sinhronizaciju nije uspeo.',
 };
 
+const VERIFICATION_REASON_MESSAGES: Readonly<Record<VerificationReason, string>> = {
+  INVALID_INPUT_RESPONSE:
+    'Cloudflare je odbio rezultat provere. Napravite novu proveru i pokušajte ponovo.',
+  TIMEOUT_OR_DUPLICATE:
+    'Provera je istekla ili je isti rezultat već iskorišćen. Potrebna je potpuno nova provera.',
+  HOSTNAME_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
+  ACTION_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
+  SITEVERIFY_UNAVAILABLE:
+    'Cloudflare provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
+  CONFIGURATION_ERROR:
+    'Beta bezbednosna provera nije pravilno podešena. Kopirajte Request ID i Support ID.',
+};
+
 export class SyncApiError extends Error {
   constructor(
     readonly code: string,
     readonly status: number | null = null,
     readonly requestId: string | null = null,
+    readonly verificationReason: VerificationReason | null = null,
   ) {
-    super(ERROR_MESSAGES[code] ?? ERROR_MESSAGES.REMOTE_ERROR);
+    super(
+      verificationReason
+        ? VERIFICATION_REASON_MESSAGES[verificationReason]
+        : (ERROR_MESSAGES[code] ?? ERROR_MESSAGES.REMOTE_ERROR),
+    );
     this.name = 'SyncApiError';
   }
 }
@@ -1103,8 +1135,10 @@ export class MirnaSyncApi {
   ): Promise<ResponseBody> {
     this.#assertEnabled();
     if (!this.#turnstile) throw new SyncApiError('TURNSTILE_REQUIRED');
-    const token = await this.#turnstile.token(action);
-    if (!token || token.length > 2_048) throw new SyncApiError('TURNSTILE_REQUIRED');
+    const verification = await this.#turnstile.token(action);
+    if (!verification.token || verification.token.length > 2_048) {
+      throw new SyncApiError('TURNSTILE_REQUIRED');
+    }
     this.#turnstile.markServerVerifying?.();
     try {
       const result = await this.#request(
@@ -1115,7 +1149,10 @@ export class MirnaSyncApi {
           expectedStatuses,
           body: serializeRequest(requestSchema, input),
           authenticated,
-          headers: { 'X-Mirna-Turnstile-Token': token },
+          headers: {
+            'X-Mirna-Turnstile-Token': verification.token,
+            'X-Mirna-Verification-Attempt-Id': verification.verificationAttemptId,
+          },
         },
         options,
       );
@@ -1209,6 +1246,7 @@ export class MirnaSyncApi {
         severity: 'error',
         requestId: error.requestId ?? undefined,
         safeCode: error.code,
+        verificationReason: error.verificationReason ?? undefined,
         online: navigator.onLine,
       });
     } catch {
@@ -1244,7 +1282,12 @@ export class MirnaSyncApi {
     }
     const remote = parseSchema(publicErrorSchema, decoded);
     const safeCode = REMOTE_ERROR_CODES.has(remote.error.code) ? remote.error.code : 'REMOTE_ERROR';
-    throw new SyncApiError(safeCode, response.status, remote.error.requestId);
+    throw new SyncApiError(
+      safeCode,
+      response.status,
+      remote.error.requestId,
+      remote.error.verificationReason ?? null,
+    );
   }
 
   #parseSnapshotEnvelopeHeader(response: Response): EncryptedSnapshotEnvelopeV1 {

@@ -12,6 +12,8 @@ export interface SyncBetaDiagnosticEventRecord {
   readonly action?: string;
   readonly requestId?: string;
   readonly safeCode?: string;
+  readonly verificationReason?: string;
+  readonly verificationAttemptId?: string;
   readonly build?: string;
   readonly online?: boolean;
 }

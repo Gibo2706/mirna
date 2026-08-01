@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import type { VerificationReason } from './errors';
 
 export const SYNC_PROTOCOL_VERSION = 1 as const;
 
@@ -11,6 +12,7 @@ const ALLOWED_REQUEST_HEADERS = new Set([
   'x-mirna-protocol-version',
   'x-mirna-support-id',
   'x-mirna-turnstile-token',
+  'x-mirna-verification-attempt-id',
 ]);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -19,6 +21,7 @@ export interface PublicError {
     code: string;
     message: string;
     requestId: string;
+    verificationReason?: VerificationReason;
   };
   protocolVersion: typeof SYNC_PROTOCOL_VERSION;
 }
@@ -142,11 +145,17 @@ export const errorResponse = (
     requestId: string;
     allowedOrigin?: string | null;
     headers?: HeadersInit;
+    verificationReason?: VerificationReason;
   },
 ): Response =>
   jsonResponse(
     {
-      error: { code, message, requestId: options.requestId },
+      error: {
+        code,
+        message,
+        requestId: options.requestId,
+        ...(options.verificationReason ? { verificationReason: options.verificationReason } : {}),
+      },
       protocolVersion: SYNC_PROTOCOL_VERSION,
     } satisfies PublicError,
     {

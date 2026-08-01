@@ -11,6 +11,15 @@ const MAX_SERVER_EVENT_BYTES = 2_048;
 const BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SAFE_CODE = /^[A-Z][A-Z0-9_]{1,63}$/u;
+const VERIFICATION_ATTEMPT_ID = REQUEST_ID;
+const VERIFICATION_REASONS = new Set([
+  'INVALID_INPUT_RESPONSE',
+  'TIMEOUT_OR_DUPLICATE',
+  'HOSTNAME_MISMATCH',
+  'ACTION_MISMATCH',
+  'SITEVERIFY_UNAVAILABLE',
+  'CONFIGURATION_ERROR',
+]);
 
 export const BETA_DIAGNOSTIC_EVENT_TYPES = [
   'turnstile_script_loading',
@@ -35,6 +44,8 @@ export interface BetaDiagnosticEventInput {
   readonly action?: 'mirna_vault_create' | 'mirna_pairing_create' | 'mirna_recovery_init';
   readonly requestId?: string;
   readonly safeCode?: string;
+  readonly verificationReason?: string;
+  readonly verificationAttemptId?: string;
   readonly build?: string;
   readonly online?: boolean;
 }
@@ -76,6 +87,11 @@ const safeEvent = (input: BetaDiagnosticEventInput): SyncBetaDiagnosticEventReco
   action: input.action,
   requestId: boundedValue(input.requestId, REQUEST_ID),
   safeCode: boundedValue(input.safeCode, SAFE_CODE),
+  verificationReason:
+    input.verificationReason && VERIFICATION_REASONS.has(input.verificationReason)
+      ? input.verificationReason
+      : undefined,
+  verificationAttemptId: boundedValue(input.verificationAttemptId, VERIFICATION_ATTEMPT_ID),
   build: input.build?.slice(0, 64) ?? APPLICATION_VERSION,
   online: input.online ?? navigator.onLine,
 });
@@ -88,6 +104,7 @@ export class BetaDiagnosticsService {
   readonly #apiOrigin: string;
   readonly #fetch: typeof fetch;
   #supportId?: Promise<string>;
+  readonly #listeners = new Set<() => void>();
 
   constructor(apiOrigin: string, options?: { database?: FinanceDatabase; fetch?: typeof fetch }) {
     this.#database = options?.database ?? db;
@@ -97,6 +114,11 @@ export class BetaDiagnosticsService {
 
   supportId(): Promise<string> {
     return (this.#supportId ??= this.#readOrCreateSupportId());
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
   }
 
   async record(input: BetaDiagnosticEventInput): Promise<void> {
@@ -112,6 +134,7 @@ export class BetaDiagnosticsService {
     if (anonymousServerEvent(input.eventType)) {
       void this.#sendToWorker(supportId, event);
     }
+    this.#notify();
   }
 
   async snapshot(): Promise<BetaDiagnosticsSnapshot> {
@@ -126,6 +149,11 @@ export class BetaDiagnosticsService {
 
   async clear(): Promise<void> {
     await this.#database.syncBetaDiagnosticEvents.clear();
+    this.#notify();
+  }
+
+  #notify(): void {
+    for (const listener of this.#listeners) listener();
   }
 
   async #readOrCreateSupportId(): Promise<string> {
@@ -156,6 +184,12 @@ export class BetaDiagnosticsService {
       if (event.action !== undefined) payload.action = event.action;
       if (event.requestId !== undefined) payload.requestId = event.requestId;
       if (event.safeCode !== undefined) payload.safeCode = event.safeCode;
+      if (event.verificationReason !== undefined) {
+        payload.verificationReason = event.verificationReason;
+      }
+      if (event.verificationAttemptId !== undefined) {
+        payload.verificationAttemptId = event.verificationAttemptId;
+      }
       if (event.build !== undefined) payload.build = event.build;
       if (event.online !== undefined) payload.online = event.online;
       const body = canonicalizeJson(payload);

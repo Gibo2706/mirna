@@ -45,6 +45,7 @@ import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 import type { TurnstilePhase, TurnstileViewState } from './turnstile-client';
 import type { BetaDiagnosticsSnapshot } from './diagnostics';
 import { APPLICATION_VERSION } from '@/lib/version';
+import { SyncApiError, type VerificationReason } from './api';
 
 type EmptyMode = 'choose' | 'enable' | 'pair-new' | 'recover';
 
@@ -53,9 +54,9 @@ const TURNSTILE_STATUS: Readonly<Record<TurnstilePhase, string>> = {
   'script-loading': 'Učitavam Cloudflare bezbednosnu proveru…',
   'widget-ready': 'Bezbednosna provera je spremna.',
   waiting: 'Dovršite proveru prikazanu ispod.',
-  'token-received': 'Provera je primljena. Token se neće ponovo koristiti.',
-  'server-verifying': 'Worker proverava rezultat sa Cloudflare-om…',
-  success: 'Bezbednosna provera je uspešna.',
+  'token-received': 'Cloudflare rezultat je primljen. Server ga sada proverava…',
+  'server-verifying': 'Cloudflare rezultat je primljen. Server ga sada proverava…',
+  success: 'Bezbednosna provera je prihvaćena.',
   expired: 'Provera je istekla. Pripremite novu proveru i ponovite poslednju radnju.',
   rejected: 'Provera nije prihvaćena. Pripremite novu proveru i ponovite poslednju radnju.',
   'network-error': 'Mreža je prekinula proveru. Pripremite novu proveru kada veza proradi.',
@@ -69,6 +70,19 @@ const RETRYABLE_TURNSTILE_PHASES = new Set<TurnstilePhase>([
   'network-error',
   'configuration-error',
 ]);
+
+const VERIFICATION_REASON_STATUS: Readonly<Record<VerificationReason, string>> = {
+  INVALID_INPUT_RESPONSE:
+    'Cloudflare je odbio rezultat provere. Napravite novu proveru i pokušajte ponovo.',
+  TIMEOUT_OR_DUPLICATE:
+    'Provera je istekla ili je isti rezultat već iskorišćen. Potrebna je potpuno nova provera.',
+  HOSTNAME_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
+  ACTION_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
+  SITEVERIFY_UNAVAILABLE:
+    'Cloudflare provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
+  CONFIGURATION_ERROR:
+    'Beta bezbednosna provera nije pravilno podešena. Kopirajte Request ID i Support ID.',
+};
 
 const TurnstileCard = ({ services }: { services: SyncUiServices }) => {
   const turnstile = services.turnstile;
@@ -107,7 +121,9 @@ const TurnstileCard = ({ services }: { services: SyncUiServices }) => {
             : 'rounded-xl bg-surface-2 p-3 text-sm text-muted'
         }
       >
-        {TURNSTILE_STATUS[state.phase]}
+        {state.verificationReason
+          ? VERIFICATION_REASON_STATUS[state.verificationReason]
+          : TURNSTILE_STATUS[state.phase]}
         {state.requestId ? (
           <span className="mt-1 block font-mono text-xs">Request ID: {state.requestId}</span>
         ) : null}
@@ -116,13 +132,8 @@ const TurnstileCard = ({ services }: { services: SyncUiServices }) => {
         ref={attach}
         data-testid="sync-turnstile-widget"
         aria-label="Cloudflare bezbednosna provera"
-        className="min-h-[70px] w-full overflow-x-auto rounded-xl bg-white p-1"
+        className="min-h-[70px] min-w-0 max-w-full overflow-hidden rounded-xl bg-white p-1"
       />
-      {isError ? (
-        <Button variant="secondary" onClick={() => turnstile.retry()}>
-          <RefreshCw size={17} aria-hidden="true" /> Pripremi novu proveru
-        </Button>
-      ) : null}
     </Card>
   );
 };
@@ -146,29 +157,68 @@ const downloadJson = (filename: string, value: unknown): void => {
   URL.revokeObjectURL(url);
 };
 
+const compactOpaqueValue = (value: string): string =>
+  value.length <= 18 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
+
+const ExpandableOpaqueValue = ({ value, label }: { value: string; label: string }) => {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <button
+      type="button"
+      className="block min-w-0 max-w-full text-left font-mono font-bold"
+      aria-label={`${label}: ${value}. ${expanded ? 'Sakrij' : 'Prikaži'} celu vrednost.`}
+      aria-expanded={expanded}
+      title={value}
+      onClick={() => setExpanded((current) => !current)}
+    >
+      <span className={expanded ? 'block select-text [overflow-wrap:anywhere]' : 'block truncate'}>
+        {expanded ? value : compactOpaqueValue(value)}
+      </span>
+    </button>
+  );
+};
+
 const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
   const diagnostics = services.diagnostics;
   const [snapshot, setSnapshot] = useState<BetaDiagnosticsSnapshot>();
   const [health, setHealth] = useState<DiagnosticHealth>();
   const [message, setMessage] = useState('');
 
-  const refresh = useCallback(async () => {
+  const refreshSnapshot = useCallback(async () => {
     if (!diagnostics) return;
-    const [nextSnapshot, nextHealth] = await Promise.allSettled([
-      diagnostics.snapshot(),
-      diagnostics.health(),
-    ]);
-    if (nextSnapshot.status === 'fulfilled') setSnapshot(nextSnapshot.value);
-    if (nextHealth.status === 'fulfilled') setHealth(nextHealth.value);
+    const nextSnapshot = await diagnostics.snapshot();
+    setSnapshot(nextSnapshot);
   }, [diagnostics]);
+
+  const refreshHealth = useCallback(async () => {
+    if (!diagnostics) return;
+    const nextHealth = await diagnostics.health();
+    setHealth(nextHealth);
+  }, [diagnostics]);
+
+  const refresh = useCallback(async () => {
+    await Promise.allSettled([refreshSnapshot(), refreshHealth()]);
+  }, [refreshHealth, refreshSnapshot]);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    if (!diagnostics) return;
+    const unsubscribe = diagnostics.subscribe(() => {
+      void refreshSnapshot().catch(() => undefined);
+    });
+    const timer = window.setInterval(() => void refreshHealth().catch(() => undefined), 60_000);
+    return () => {
+      unsubscribe();
+      window.clearInterval(timer);
+    };
+  }, [diagnostics, refresh, refreshHealth, refreshSnapshot]);
 
   if (!diagnostics) return null;
   const latestRequestId = snapshot?.events.find((event) => event.requestId)?.requestId;
   const latestError = snapshot?.events.find((event) => event.severity === 'error');
+  const latestTurnstile = snapshot?.events.find((event) =>
+    event.eventType.startsWith('turnstile_'),
+  );
   const latestSuccess = snapshot?.events.find(
     (event) => event.eventType === 'turnstile_success' || event.eventType === 'health_result',
   );
@@ -201,7 +251,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
   };
 
   return (
-    <Card className="grid gap-4" data-testid="sync-beta-diagnostics">
+    <Card className="grid min-w-0 gap-4 overflow-hidden" data-testid="sync-beta-diagnostics">
       <div>
         <SectionTitle>Beta dijagnostika</SectionTitle>
         <p className="mt-2 text-sm leading-6 text-muted">
@@ -209,23 +259,38 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           adrese. Lokalna istorija je ograničena na 200 događaja.
         </p>
       </div>
-      <dl className="grid gap-3 text-sm sm:grid-cols-2">
-        <div className="rounded-xl bg-surface-2 p-3">
+      <dl className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
+        <div className="min-w-0 rounded-xl bg-surface-2 p-3">
           <dt className="text-xs font-semibold text-muted">Support ID</dt>
-          <dd className="mt-1 break-all font-mono font-bold">
-            {snapshot?.supportId ?? 'Učitavam…'}
+          <dd className="mt-1 min-w-0">
+            {snapshot?.supportId ? (
+              <ExpandableOpaqueValue value={snapshot.supportId} label="Support ID" />
+            ) : (
+              'Učitavam…'
+            )}
           </dd>
         </div>
-        <div className="rounded-xl bg-surface-2 p-3">
+        <div className="min-w-0 rounded-xl bg-surface-2 p-3">
           <dt className="text-xs font-semibold text-muted">Poslednji Request ID</dt>
-          <dd className="mt-1 break-all font-mono font-bold">
-            {latestRequestId ?? 'Nije zabeležen'}
+          <dd className="mt-1 min-w-0">
+            {latestRequestId ? (
+              <ExpandableOpaqueValue value={latestRequestId} label="Request ID" />
+            ) : (
+              'Nije zabeležen'
+            )}
           </dd>
         </div>
-        <div className="rounded-xl bg-surface-2 p-3">
+        <div className="min-w-0 rounded-xl bg-surface-2 p-3">
           <dt className="text-xs font-semibold text-muted">Build</dt>
-          <dd className="mt-1 font-bold">
-            aplikacija {APPLICATION_VERSION}; Worker {health?.buildCommit ?? 'nije dostupan'}
+          <dd className="mt-1 min-w-0 font-bold">
+            <span className="block">aplikacija {APPLICATION_VERSION}</span>
+            {health?.buildCommit ? (
+              <span className="mt-1 block min-w-0">
+                Worker <ExpandableOpaqueValue value={health.buildCommit} label="Worker build" />
+              </span>
+            ) : (
+              <span className="block">Worker nije dostupan</span>
+            )}
           </dd>
         </div>
         <div className="rounded-xl bg-surface-2 p-3">
@@ -239,16 +304,58 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
       </dl>
       <div className="grid gap-1 text-xs leading-5 text-muted">
         <p>
-          Poslednja greška:{' '}
-          {latestError ? `${latestError.eventType} — ${latestError.createdAt}` : 'nema'}
+          Poslednja greška: {latestError?.safeCode ?? latestError?.eventType ?? 'nema'}
+          {latestError?.verificationReason ? ` — ${latestError.verificationReason}` : ''}
         </p>
+        <p>Klijentska faza: {latestTurnstile?.eventType ?? 'nije zabeležena'}</p>
+        <p>Vreme: {formatDateTime(latestTurnstile?.createdAt)}</p>
+        <p>Klijentski build: {latestTurnstile?.build ?? APPLICATION_VERSION}</p>
         <p>
           Poslednji uspeh:{' '}
           {latestSuccess ? `${latestSuccess.eventType} — ${latestSuccess.createdAt}` : 'nema'}
         </p>
       </div>
-      <div className="grid gap-2 sm:grid-cols-2">
+      <details className="min-w-0 rounded-xl border bg-surface-2 p-3">
+        <summary className="cursor-pointer font-bold">Poslednji tehnički događaji</summary>
+        <div className="mt-3 grid min-w-0 gap-2">
+          {(snapshot?.events ?? []).slice(0, 10).map((event) => (
+            <details key={event.id} className="min-w-0 rounded-lg bg-surface p-3 text-xs">
+              <summary className="cursor-pointer">
+                <span className={event.severity === 'error' ? 'text-danger' : 'text-accent'}>
+                  {event.severity === 'error' ? 'Greška' : 'Uspeh'}
+                </span>{' '}
+                · {event.eventType} · {formatDateTime(event.createdAt)}
+              </summary>
+              <dl className="mt-2 grid min-w-0 gap-1 text-muted">
+                {event.safeCode ? <div>Kod: {event.safeCode}</div> : null}
+                {event.verificationReason ? <div>Razlog: {event.verificationReason}</div> : null}
+                {event.requestId ? (
+                  <div className="min-w-0">
+                    Request ID:{' '}
+                    <ExpandableOpaqueValue value={event.requestId} label="Request ID događaja" />
+                  </div>
+                ) : null}
+                {event.verificationAttemptId ? (
+                  <div className="min-w-0">
+                    Attempt ID:{' '}
+                    <ExpandableOpaqueValue
+                      value={event.verificationAttemptId}
+                      label="Verification Attempt ID"
+                    />
+                  </div>
+                ) : null}
+              </dl>
+            </details>
+          ))}
+          {snapshot?.events.length === 0 ? <p>Nema zabeleženih događaja.</p> : null}
+        </div>
+      </details>
+      <div className="grid min-w-0 gap-2 sm:grid-cols-2">
+        <Button className="w-full" variant="secondary" onClick={() => void refresh()}>
+          <RefreshCw size={17} aria-hidden="true" /> Osveži dijagnostiku
+        </Button>
         <Button
+          className="w-full"
           variant="secondary"
           disabled={!snapshot}
           onClick={() => snapshot && void copy(snapshot.supportId, 'Support ID je kopiran.')}
@@ -256,6 +363,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           <Copy size={17} aria-hidden="true" /> Kopiraj Support ID
         </Button>
         <Button
+          className="w-full"
           variant="secondary"
           disabled={!latestRequestId}
           onClick={() => latestRequestId && void copy(latestRequestId, 'Request ID je kopiran.')}
@@ -263,6 +371,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           <Copy size={17} aria-hidden="true" /> Kopiraj Request ID
         </Button>
         <Button
+          className="w-full"
           variant="secondary"
           disabled={!exportValue}
           onClick={() =>
@@ -273,6 +382,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           <Copy size={17} aria-hidden="true" /> Kopiraj dijagnostiku
         </Button>
         <Button
+          className="w-full"
           variant="secondary"
           disabled={!exportValue}
           onClick={() => exportValue && downloadJson('mirna-beta-dijagnostika.json', exportValue)}
@@ -280,6 +390,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           <Download size={17} aria-hidden="true" /> Preuzmi dijagnostiku
         </Button>
         <Button
+          className="w-full"
           variant="ghost"
           disabled={!snapshot || snapshot.events.length === 0}
           onClick={() => {
@@ -380,6 +491,8 @@ const EnablePanel = ({
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [activationRetryAvailable, setActivationRetryAvailable] = useState(false);
+  const activationInFlight = useRef(false);
 
   const checkCapability = async () => {
     setCapability('checking');
@@ -430,18 +543,28 @@ const EnablePanel = ({
   };
 
   const activate = async () => {
-    if (!confirmed || !lifecycle.current || busy) return;
+    if (!confirmed || !lifecycle.current || busy || activationInFlight.current) return;
+    activationInFlight.current = true;
     setBusy(true);
     setError('');
     try {
       await lifecycle.current.activate();
+      setActivationRetryAvailable(false);
       setPresentation(undefined);
       setConfirmationValues({});
       success('Šifrovana sinhronizacija je aktivirana na ovom uređaju.');
       await onActivated();
     } catch (caught) {
+      setActivationRetryAvailable(
+        caught instanceof SyncApiError &&
+          (caught.code.startsWith('TURNSTILE_') ||
+            caught.code.startsWith('HUMAN_VERIFICATION_') ||
+            caught.code === 'NETWORK_FAILURE' ||
+            caught.code === 'REQUEST_TIMEOUT'),
+      );
       setError(safeErrorMessage(caught));
     } finally {
+      activationInFlight.current = false;
       setBusy(false);
     }
   };
@@ -542,10 +665,19 @@ const EnablePanel = ({
             Kod je potvrđen. Aktivacija sada registruje javni manifest i šifrovani recovery paket;
             finansijski podaci se ne šalju.
           </p>
-          <Button onClick={() => void activate()} disabled={busy}>
-            {busy ? <BusyIcon /> : <ShieldCheck size={17} aria-hidden="true" />}
-            Aktiviraj šifrovanu sinhronizaciju
-          </Button>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button onClick={() => void activate()} disabled={busy}>
+              {busy ? <BusyIcon /> : <ShieldCheck size={17} aria-hidden="true" />}
+              {activationRetryAvailable
+                ? 'Pokušaj aktivaciju ponovo'
+                : 'Aktiviraj šifrovanu sinhronizaciju'}
+            </Button>
+            {activationRetryAvailable ? (
+              <Button variant="ghost" disabled={busy} onClick={onBack}>
+                Odustani
+              </Button>
+            ) : null}
+          </div>
         </Card>
       ) : null}
       <InlineError message={error} />

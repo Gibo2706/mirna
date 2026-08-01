@@ -61,7 +61,7 @@ describe('privacy-safe beta diagnostics', () => {
     expect(stored?.support_ref).toMatch(/^[0-9A-F]{64}$/u);
     expect(JSON.stringify(stored)).not.toContain(SUPPORT_ID);
     expect(stored?.safe_details_json).toBe(
-      '{"appBuild":"2.4.0-beta.1","online":true,"safeCode":"HUMAN_VERIFICATION_REJECTED"}',
+      '{"appBuild":"2.4.0-beta.1","online":true,"safeCode":"HUMAN_VERIFICATION_REJECTED","verificationAttemptId":"NONE","verificationReason":"NONE"}',
     );
   });
 

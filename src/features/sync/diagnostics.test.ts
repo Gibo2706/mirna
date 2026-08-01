@@ -56,4 +56,32 @@ describe('privacy-safe beta diagnostics', () => {
     expect((await service.snapshot()).events).toEqual([]);
     expect(await service.supportId()).toBe(supportId);
   });
+
+  it('notifies subscribers immediately after a local record and clear', async () => {
+    const name = `mirna-beta-diagnostics-live-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    const service = new BetaDiagnosticsService('https://sync.invalid', {
+      database: new FinanceDatabase(name),
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(Response.json({ accepted: true })),
+    });
+    const listener = vi.fn();
+    const unsubscribe = service.subscribe(listener);
+
+    await service.record({
+      eventType: 'turnstile_rejected',
+      severity: 'error',
+      requestId: '123e4567-e89b-42d3-a456-426614174000',
+      safeCode: 'HUMAN_VERIFICATION_REJECTED',
+      verificationReason: 'INVALID_INPUT_RESPONSE',
+    });
+    expect(listener).toHaveBeenCalledOnce();
+    expect((await service.snapshot()).events[0]).toMatchObject({
+      requestId: '123e4567-e89b-42d3-a456-426614174000',
+      verificationReason: 'INVALID_INPUT_RESPONSE',
+    });
+
+    await service.clear();
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
 });

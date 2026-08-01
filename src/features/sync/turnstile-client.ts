@@ -1,4 +1,4 @@
-import { SyncApiError } from './api';
+import { SyncApiError, type VerificationReason } from './api';
 
 export type TurnstileAction = 'mirna_vault_create' | 'mirna_pairing_create' | 'mirna_recovery_init';
 
@@ -19,6 +19,8 @@ export interface TurnstileViewState {
   readonly phase: TurnstilePhase;
   readonly action?: TurnstileAction;
   readonly requestId?: string;
+  readonly verificationAttemptId?: string;
+  readonly verificationReason?: VerificationReason;
 }
 
 type TurnstileListener = (state: TurnstileViewState) => void;
@@ -31,6 +33,8 @@ interface TurnstileApi {
       action: TurnstileAction;
       execution: 'execute';
       appearance: 'always';
+      size: 'flexible' | 'compact';
+      theme: 'auto';
       callback: (token: string) => void;
       'before-interactive-callback': () => void;
       'after-interactive-callback': () => void;
@@ -40,7 +44,6 @@ interface TurnstileApi {
     },
   ): string;
   execute(widgetId: string): void;
-  reset(widgetId: string): void;
   remove(widgetId: string): void;
 }
 
@@ -94,7 +97,10 @@ const loadTurnstile = (): Promise<TurnstileApi> => {
 };
 
 export interface TurnstileTokenProvider {
-  token(action: TurnstileAction): Promise<string>;
+  token(action: TurnstileAction): Promise<{
+    readonly token: string;
+    readonly verificationAttemptId: string;
+  }>;
   markServerVerifying?(): void;
   markServerResult?(error?: unknown): void;
   dispose(): void;
@@ -102,7 +108,6 @@ export interface TurnstileTokenProvider {
 
 export interface TurnstileUiController {
   attach(container: HTMLElement | null): void;
-  retry(): void;
   subscribe(listener: TurnstileListener): () => void;
   readonly state: TurnstileViewState;
 }
@@ -110,6 +115,8 @@ export interface TurnstileUiController {
 interface ActiveWidget {
   readonly api: TurnstileApi;
   readonly widgetId: string;
+  readonly size: 'flexible' | 'compact';
+  readonly rerender: (size: 'flexible' | 'compact') => void;
 }
 
 interface TurnstileProviderOptions {
@@ -145,8 +152,8 @@ const serverFailurePhase = (error: SyncApiError): TurnstilePhase | null => {
 
 /**
  * Owns one visible Managed widget and serializes token requests. A token is
- * never reused: retry resets the widget, and the next protected API call must
- * obtain a fresh token before it can contact the Worker.
+ * never reused: every protected API attempt discards the previous widget and
+ * obtains a fresh token plus a fresh diagnostic attempt identifier.
  */
 export class BrowserTurnstileTokenProvider
   implements TurnstileTokenProvider, TurnstileUiController
@@ -157,6 +164,7 @@ export class BrowserTurnstileTokenProvider
   #queue: Promise<void> = Promise.resolve();
   #disposed = false;
   #container: HTMLElement | null = null;
+  #resizeObserver?: ResizeObserver;
   #active?: ActiveWidget;
   #state: TurnstileViewState = Object.freeze({ phase: 'idle' });
 
@@ -177,12 +185,22 @@ export class BrowserTurnstileTokenProvider
 
   attach(container: HTMLElement | null): void {
     if (this.#container === container) return;
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = undefined;
     this.#removeActive();
     this.#container = container;
+    if (container && typeof ResizeObserver !== 'undefined') {
+      this.#resizeObserver = new ResizeObserver(() => this.#rerenderForSize());
+      this.#resizeObserver.observe(container);
+    }
   }
 
-  token(action: TurnstileAction): Promise<string> {
-    const operation = this.#queue.then(() => this.#execute(action));
+  token(action: TurnstileAction): Promise<{
+    readonly token: string;
+    readonly verificationAttemptId: string;
+  }> {
+    const verificationAttemptId = crypto.randomUUID();
+    const operation = this.#queue.then(() => this.#execute(action, verificationAttemptId));
     this.#queue = operation.then(
       () => undefined,
       () => undefined,
@@ -207,99 +225,129 @@ export class BrowserTurnstileTokenProvider
       this.#publish({ ...this.#state, phase: 'success', requestId: error.requestId ?? undefined });
       return;
     }
-    this.#resetActive();
+    this.#removeActive();
     this.#publish({
       ...this.#state,
       phase,
       requestId: error.requestId ?? undefined,
+      verificationReason: error.verificationReason ?? undefined,
     });
-  }
-
-  retry(): void {
-    this.#resetActive();
-    this.#publish({ ...this.#state, phase: 'waiting', requestId: undefined });
   }
 
   dispose(): void {
     this.#disposed = true;
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = undefined;
     this.#removeActive();
     this.#container = null;
     this.#listeners.clear();
   }
 
-  async #execute(action: TurnstileAction): Promise<string> {
+  async #execute(
+    action: TurnstileAction,
+    verificationAttemptId: string,
+  ): Promise<{ readonly token: string; readonly verificationAttemptId: string }> {
     if (this.#disposed) throw new SyncApiError('TURNSTILE_CONFIG');
     const container = this.#container;
     if (!container) {
-      this.#publish({ phase: 'configuration-error', action });
+      this.#publish({ phase: 'configuration-error', action, verificationAttemptId });
       throw new SyncApiError('TURNSTILE_CONFIG');
     }
 
     this.#removeActive();
     container.replaceChildren();
-    this.#publish({ phase: 'script-loading', action });
+    this.#publish({ phase: 'script-loading', action, verificationAttemptId });
     let api: TurnstileApi;
     try {
       api = await loadTurnstile();
     } catch (error) {
-      this.#publish({ phase: 'configuration-error', action });
+      this.#publish({ phase: 'configuration-error', action, verificationAttemptId });
       throw error;
     }
     if (this.#disposed || this.#container !== container) {
       throw new SyncApiError('TURNSTILE_CONFIG');
     }
 
-    return new Promise<string>((resolve, reject) => {
-      let settled = false;
-      const finish = (result: { token?: string; errorCode?: string }): void => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timeout);
-        if (result.token) {
-          this.#publish({ phase: 'token-received', action });
-          resolve(result.token);
-          return;
-        }
-        const code = result.errorCode ?? 'TURNSTILE_REQUIRED';
-        this.#resetActive();
-        reject(new SyncApiError(code));
-      };
-      const timeout = window.setTimeout(() => {
-        this.#publish({ phase: 'expired', action });
-        finish({ errorCode: 'TURNSTILE_TIMEOUT' });
-      }, CHALLENGE_TIMEOUT_MS);
+    return new Promise<{ readonly token: string; readonly verificationAttemptId: string }>(
+      (resolve, reject) => {
+        let settled = false;
+        let renderGeneration = 0;
+        const finish = (result: { token?: string; errorCode?: string }): void => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          if (result.token) {
+            this.#publish({ phase: 'token-received', action, verificationAttemptId });
+            resolve({ token: result.token, verificationAttemptId });
+            return;
+          }
+          const code = result.errorCode ?? 'TURNSTILE_REQUIRED';
+          this.#removeActive();
+          reject(new SyncApiError(code));
+        };
+        const timeout = window.setTimeout(() => {
+          this.#publish({ phase: 'expired', action, verificationAttemptId });
+          finish({ errorCode: 'TURNSTILE_TIMEOUT' });
+        }, CHALLENGE_TIMEOUT_MS);
 
-      try {
-        const widgetId = api.render(container, {
-          sitekey: this.#siteKey,
-          action,
-          execution: 'execute',
-          appearance: 'always',
-          callback: (token) => finish({ token }),
-          'before-interactive-callback': () => this.#publish({ phase: 'waiting', action }),
-          'after-interactive-callback': () => this.#publish({ phase: 'waiting', action }),
-          'error-callback': () => {
-            this.#publish({ phase: 'rejected', action });
-            finish({ errorCode: 'TURNSTILE_REJECTED' });
-          },
-          'expired-callback': () => {
-            this.#publish({ phase: 'expired', action });
-            finish({ errorCode: 'TURNSTILE_EXPIRED' });
-          },
-          'timeout-callback': () => {
-            this.#publish({ phase: 'expired', action });
-            finish({ errorCode: 'TURNSTILE_TIMEOUT' });
-          },
-        });
-        this.#active = { api, widgetId };
-        this.#publish({ phase: 'widget-ready', action });
-        api.execute(widgetId);
-        this.#publish({ phase: 'waiting', action });
-      } catch {
-        this.#publish({ phase: 'configuration-error', action });
-        finish({ errorCode: 'TURNSTILE_CONFIG' });
-      }
-    });
+        const renderWidget = (size: 'flexible' | 'compact'): void => {
+          if (settled) return;
+          const previous = this.#active;
+          this.#active = undefined;
+          if (previous) {
+            try {
+              previous.api.remove(previous.widgetId);
+            } catch {
+              // A failed iframe is discarded before a new responsive render.
+            }
+          }
+          container.replaceChildren();
+          const generation = ++renderGeneration;
+          const current = (callback: () => void): void => {
+            if (generation === renderGeneration) callback();
+          };
+          try {
+            const widgetId = api.render(container, {
+              sitekey: this.#siteKey,
+              action,
+              execution: 'execute',
+              appearance: 'always',
+              size,
+              theme: 'auto',
+              callback: (token) => current(() => finish({ token })),
+              'before-interactive-callback': () =>
+                current(() => this.#publish({ phase: 'waiting', action, verificationAttemptId })),
+              'after-interactive-callback': () =>
+                current(() => this.#publish({ phase: 'waiting', action, verificationAttemptId })),
+              'error-callback': () =>
+                current(() => {
+                  this.#publish({ phase: 'rejected', action, verificationAttemptId });
+                  finish({ errorCode: 'TURNSTILE_REJECTED' });
+                }),
+              'expired-callback': () =>
+                current(() => {
+                  this.#publish({ phase: 'expired', action, verificationAttemptId });
+                  finish({ errorCode: 'TURNSTILE_EXPIRED' });
+                }),
+              'timeout-callback': () =>
+                current(() => {
+                  this.#publish({ phase: 'expired', action, verificationAttemptId });
+                  finish({ errorCode: 'TURNSTILE_TIMEOUT' });
+                }),
+            });
+            this.#active = { api, widgetId, size, rerender: renderWidget };
+            this.#publish({ phase: 'widget-ready', action, verificationAttemptId });
+            api.execute(widgetId);
+            this.#publish({ phase: 'waiting', action, verificationAttemptId });
+          } catch {
+            this.#publish({ phase: 'configuration-error', action, verificationAttemptId });
+            finish({ errorCode: 'TURNSTILE_CONFIG' });
+          }
+        };
+
+        renderWidget(this.#widgetSize(container));
+      },
+    );
   }
 
   #publish(state: TurnstileViewState): void {
@@ -310,13 +358,17 @@ export class BrowserTurnstileTokenProvider
     });
   }
 
-  #resetActive(): void {
-    if (!this.#active) return;
-    try {
-      this.#active.api.reset(this.#active.widgetId);
-    } catch {
-      this.#removeActive();
-    }
+  #widgetSize(container: HTMLElement): 'flexible' | 'compact' {
+    const width = container.clientWidth || container.getBoundingClientRect().width;
+    return width >= 300 ? 'flexible' : 'compact';
+  }
+
+  #rerenderForSize(): void {
+    const active = this.#active;
+    const container = this.#container;
+    if (!active || !container || !['widget-ready', 'waiting'].includes(this.#state.phase)) return;
+    const nextSize = this.#widgetSize(container);
+    if (nextSize !== active.size) active.rerender(nextSize);
   }
 
   #removeActive(): void {

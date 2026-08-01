@@ -96,6 +96,7 @@ export interface SyncUiServices {
   readonly diagnostics?: {
     supportId(): Promise<string>;
     snapshot(): Promise<BetaDiagnosticsSnapshot>;
+    subscribe(listener: () => void): () => void;
     clear(): Promise<void>;
     health(): ReturnType<MirnaSyncApi['health']>;
   };
@@ -158,6 +159,8 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
             : 'info',
         action: state.action,
         requestId: state.requestId,
+        verificationAttemptId: state.verificationAttemptId,
+        verificationReason: state.verificationReason,
       });
     },
   });
@@ -249,6 +252,7 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
     diagnostics: {
       supportId: () => diagnostics.supportId(),
       snapshot: () => diagnostics.snapshot(),
+      subscribe: (listener) => diagnostics.subscribe(listener),
       clear: () => diagnostics.clear(),
       health: () => api.health(),
     },
