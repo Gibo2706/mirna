@@ -42,7 +42,7 @@
     "package:source": "node scripts/package-source.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run public:check && npm run format:check && npm run lint && npm run typecheck && npm run sync:typecheck && npm run test && npm run sync:test:worker && npm run build"
+    "check": "npm run public:check && npm run format:check && npm run lint && npm run typecheck && npm run sync:typecheck && npm run sync:types:check && npm run test && npm run sync:test:worker && npm run build"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",

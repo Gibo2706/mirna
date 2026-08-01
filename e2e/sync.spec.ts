@@ -1,6 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { devices, expect, test, type BrowserContext, type Page } from '@playwright/test';
+import {
+  devices,
+  expect,
+  test,
+  type BrowserContext,
+  type Page,
+  type Response,
+} from '@playwright/test';
 import {
   createSyntheticFinanceFixtureData,
   defaultSyntheticFinanceFixtureInput,
@@ -27,6 +34,7 @@ interface LocalSyncSecurityView {
   readonly displayName: string;
   readonly manifestVersion: number;
   readonly manifestDeviceCount: number;
+  readonly keyEpoch: number;
   readonly signingPrivateKeyExtractable: boolean;
   readonly agreementPrivateKeyExtractable: boolean;
   readonly localWrappingKeyExtractable: boolean;
@@ -34,6 +42,9 @@ interface LocalSyncSecurityView {
   readonly lastSnapshotRevision: number;
   readonly lastSnapshotId: string | null;
   readonly firstUploadConsent: string;
+  readonly syncBlockReason?: string;
+  readonly pendingLocalOperationCount: number;
+  readonly pendingConflictCount: number;
 }
 
 type D1Row = Readonly<Record<string, unknown>>;
@@ -94,12 +105,20 @@ const localD1 = (command: string): readonly D1Row[] => {
 };
 
 const requestBodies: string[] = [];
+const unexpectedSyncResponses: string[] = [];
 
 const captureSyncRequestBodies = (context: BrowserContext): void => {
   context.on('request', (request) => {
     if (!request.url().startsWith(`${SYNC_API_ORIGIN}/`)) return;
     const body = request.postData();
     if (body !== null) requestBodies.push(body);
+  });
+  context.on('response', (response) => {
+    if (!response.url().startsWith(`${SYNC_API_ORIGIN}/`) || response.status() < 400) return;
+    const request = response.request();
+    unexpectedSyncResponses.push(
+      `${request.method()} ${new URL(response.url()).pathname} ${response.status()}`,
+    );
   });
 };
 
@@ -163,8 +182,31 @@ const assertNoPageOverflow = async (page: Page, label: string): Promise<void> =>
   }));
   expect(
     layout.documentWidth <= layout.viewportWidth + 1,
-    `${label} ne sme da pravi horizontalni overflow na 360px.`,
+    `${label} ne sme da pravi horizontalni overflow na ${layout.viewportWidth}px.`,
   ).toBe(true);
+};
+
+const assertSyncWidths = async (
+  page: Page,
+  label: string,
+  visibleTestId?: string,
+): Promise<void> => {
+  for (const width of [360, 390, 412, 430]) {
+    await page.setViewportSize({ width, height: 844 });
+    await assertNoPageOverflow(page, `${label} (${width}px)`);
+    if (visibleTestId) {
+      const element = page.getByTestId(visibleTestId);
+      await expect(element).toBeVisible();
+      const dimensions = await element.evaluate((node) => ({
+        clientWidth: node.clientWidth,
+        scrollWidth: node.scrollWidth,
+      }));
+      expect(
+        dimensions.scrollWidth <= dimensions.clientWidth + 1,
+        `${label} mora bezbedno da prelomi sadržaj na ${width}px.`,
+      ).toBe(true);
+    }
+  }
 };
 
 const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityView> =>
@@ -180,16 +222,21 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
             'syncDevice',
             'syncKeys',
             'syncMetadata',
+            'syncOutbox',
+            'syncConflicts',
           ]);
           const vaultRequest = transaction.objectStore('syncVault').get(vaultRecordId);
           const deviceRequest = transaction.objectStore('syncDevice').get('local-sync-device');
           const keysRequest = transaction.objectStore('syncKeys').getAll();
           const metadataRequest = transaction.objectStore('syncMetadata').get('sync-metadata');
+          const outboxRequest = transaction.objectStore('syncOutbox').count();
+          const conflictsRequest = transaction.objectStore('syncConflicts').getAll();
           transaction.onerror = () => reject(new Error('Lokalni sync zapisi nisu pročitani.'));
           transaction.oncomplete = () => {
             database.close();
             const vault = vaultRequest.result as {
               vaultId: string;
+              keyEpoch: number;
               manifest: { manifestVersion: number; devices: unknown[] };
             };
             const device = deviceRequest.result as {
@@ -206,6 +253,7 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
               lastSnapshotRevision: number;
               lastSnapshotId: string | null;
               firstUploadConsent: string;
+              syncBlockReason?: string;
             };
             if (!vault || !device || !key || !metadata) {
               reject(new Error('Lokalni sync setup nije potpun.'));
@@ -217,6 +265,7 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
               displayName: device.displayName,
               manifestVersion: vault.manifest.manifestVersion,
               manifestDeviceCount: vault.manifest.devices.length,
+              keyEpoch: vault.keyEpoch,
               signingPrivateKeyExtractable: device.signingPrivateKey.extractable,
               agreementPrivateKeyExtractable: device.agreementPrivateKey.extractable,
               localWrappingKeyExtractable: device.localWrappingKey.extractable,
@@ -224,6 +273,11 @@ const readLocalSyncSecurityView = async (page: Page): Promise<LocalSyncSecurityV
               lastSnapshotRevision: metadata.lastSnapshotRevision,
               lastSnapshotId: metadata.lastSnapshotId,
               firstUploadConsent: metadata.firstUploadConsent,
+              syncBlockReason: metadata.syncBlockReason,
+              pendingLocalOperationCount: outboxRequest.result,
+              pendingConflictCount: (
+                conflictsRequest.result as Array<{ resolutionState?: string }>
+              ).filter((conflict) => conflict.resolutionState === 'pending').length,
             });
           };
         };
@@ -253,6 +307,150 @@ const hasAccountName = async (page: Page, name: string): Promise<boolean> =>
       }),
     { databaseName: DATABASE_NAME, expectedName: name },
   );
+
+interface LocalFinanceMergeView {
+  readonly transactions: readonly { readonly description: string; readonly notes?: string }[];
+  readonly budgets: readonly { readonly name: string; readonly defaultAmount: number }[];
+}
+
+const readLocalFinanceMergeView = (page: Page): Promise<LocalFinanceMergeView> =>
+  page.evaluate(
+    (databaseName) =>
+      new Promise<LocalFinanceMergeView>((resolvePromise, reject) => {
+        const open = indexedDB.open(databaseName);
+        open.onerror = () => reject(new Error('Lokalna baza nije otvorena.'));
+        open.onsuccess = () => {
+          const database = open.result;
+          const transaction = database.transaction(['transactions', 'variableBudgets']);
+          const transactions = transaction.objectStore('transactions').getAll();
+          const budgets = transaction.objectStore('variableBudgets').getAll();
+          transaction.onerror = () => reject(new Error('Finansijski zapisi nisu pročitani.'));
+          transaction.oncomplete = () => {
+            database.close();
+            resolvePromise({
+              transactions: transactions.result as LocalFinanceMergeView['transactions'],
+              budgets: budgets.result as LocalFinanceMergeView['budgets'],
+            });
+          };
+        };
+      }),
+    DATABASE_NAME,
+  );
+
+const addPresetExpense = async (
+  page: Page,
+  presetName: string,
+  formattedAmount: string,
+): Promise<void> => {
+  if (new URL(page.url()).pathname !== '/') await page.goto(`${ENABLED_APP_ORIGIN}/`);
+  await dismissOfflineReady(page);
+  await page.getByRole('button', { name: 'Dodaj transakciju' }).click();
+  await page
+    .getByRole('button', { name: new RegExp(`${presetName}.*${formattedAmount}`, 'i') })
+    .click();
+  await page.getByRole('button', { name: new RegExp(`Sačuvaj ${formattedAmount}`, 'i') }).click();
+  const confirmation = page.getByRole('button', { name: 'Potvrdi i sačuvaj' });
+  if (await confirmation.isVisible().catch(() => false)) await confirmation.click();
+  await expect(page.getByText('Transakcija je sačuvana.')).toBeVisible();
+};
+
+const editTransactionNote = async (
+  page: Page,
+  description: string,
+  note: string,
+): Promise<void> => {
+  if (new URL(page.url()).pathname !== '/more/transactions') {
+    await page.goto(`${ENABLED_APP_ORIGIN}/more/transactions`);
+  }
+  await page.getByRole('button', { name: `Detalji ${description}` }).click();
+  await page.getByLabel('Beleška').fill(note);
+  await page.getByRole('button', { name: 'Sačuvaj izmene' }).click();
+  await expect(page.getByText('Transakcija je izmenjena.')).toBeVisible();
+};
+
+const editBudgetAmount = async (page: Page, name: string, amount: string): Promise<void> => {
+  if (new URL(page.url()).pathname !== '/more/budgets') {
+    await page.goto(`${ENABLED_APP_ORIGIN}/more/budgets`);
+  }
+  await page.getByRole('button', { name: `Izmeni ${name}` }).click();
+  await page.getByLabel('Podrazumevani mesečni iznos').fill(amount);
+  await page.getByRole('button', { name: 'Sačuvaj budžet' }).click();
+  await expect(page.getByText('Budžet je sačuvan.')).toBeVisible();
+};
+
+const synchronizeSuccessfully = async (page: Page): Promise<void> => {
+  await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  const button = page.getByRole('button', { name: 'Sinhronizuj sada' });
+  await expect(button).toBeVisible();
+  const localState = await readLocalSyncSecurityView(page);
+  await expect(
+    button,
+    `Ručni sync mora biti dozvoljen; lokalni blok: ${localState.syncBlockReason ?? 'nema'}.`,
+  ).toBeEnabled();
+  const syncResponses: Response[] = [];
+  const captureResponse = (response: Response): void => {
+    if (response.url().startsWith(`${SYNC_API_ORIGIN}/`)) syncResponses.push(response);
+  };
+  page.on('response', captureResponse);
+  await button.click();
+  await expect(button).toBeDisabled();
+  await expect(button).toBeEnabled();
+  page.off('response', captureResponse);
+  const failures = await Promise.all(
+    syncResponses
+      .filter((response) => response.status() >= 400)
+      .map(async (response) => {
+        const body = (await response.json().catch((): undefined => undefined)) as
+          { error?: { code?: string } } | undefined;
+        return {
+          method: response.request().method(),
+          path: new URL(response.url()).pathname,
+          status: response.status(),
+          code: body?.error?.code,
+        };
+      }),
+  );
+  expect(
+    failures.filter(
+      (failure) =>
+        !(
+          failure.method === 'PUT' &&
+          failure.path.startsWith('/v1/snapshots/') &&
+          failure.status === 409 &&
+          failure.code === 'SNAPSHOT_ACK_PENDING'
+        ),
+    ),
+  ).toEqual([]);
+  expect(await readLocalSyncSecurityView(page)).toMatchObject({
+    pendingLocalOperationCount: 0,
+    pendingConflictCount: 0,
+    syncBlockReason: undefined,
+  });
+};
+
+const synchronizeUntilConflict = async (page: Page): Promise<void> => {
+  await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  const button = page.getByRole('button', { name: 'Sinhronizuj sada' });
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(page.getByText(/Konfliktna radnja/).first()).toBeVisible();
+  await expect(button).toBeEnabled();
+  expect((await readLocalSyncSecurityView(page)).syncBlockReason).toBeUndefined();
+};
+
+const expectSyncRejected = async (page: Page): Promise<void> => {
+  await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  const rejected = page.waitForResponse(
+    (response) => response.url().startsWith(`${SYNC_API_ORIGIN}/`) && response.status() >= 400,
+  );
+  const button = page.getByRole('button', { name: 'Sinhronizuj sada' });
+  await button.click();
+  expect((await rejected).status()).toBeGreaterThanOrEqual(400);
+  await expect(page.getByRole('alert').last()).toContainText(
+    'Ovlašćenje ovog uređaja je isteklo ili je opozvano.',
+  );
+  await expect(button).toBeEnabled();
+};
 
 const alterChecksum = (code: string): string =>
   `${code.slice(0, -1)}${code.endsWith('0') ? '1' : '0'}`;
@@ -289,6 +487,51 @@ const waitForNewDeviceSas = async (page: Page): Promise<string> => {
   return (await page.getByTestId('sync-new-device-sas').textContent())?.trim() ?? '';
 };
 
+const enableAndPairTwoDevices = async (
+  phone: Page,
+  desktop: Page,
+): Promise<{
+  readonly recoveryCode: string;
+  readonly phone: LocalSyncSecurityView;
+  readonly desktop: LocalSyncSecurityView;
+}> => {
+  const pairingCode = await startPairingRequest(desktop, DESKTOP_DEVICE_NAME);
+  await assertSyncWidths(desktop, 'QR i ručni pairing kod', 'sync-pairing-code');
+  await seedSyntheticPlan(phone);
+  await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  await phone.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
+  await phone.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
+  await expect(phone.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
+  await phone.getByLabel('Naziv ovog uređaja').fill(PHONE_DEVICE_NAME);
+  await phone.getByRole('button', { name: 'Napravi recovery kod' }).click();
+  const recoveryCode = await readRecoveryCode(phone);
+  await assertSyncWidths(phone, 'Recovery kod i eksplicitne akcije', 'sync-recovery-code');
+  await expect(phone.getByRole('button', { name: 'Kopiraj recovery kod' })).toBeVisible();
+  await confirmRecoveryGroups(phone, recoveryCode);
+  await phone.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
+  await phone.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+  await phone
+    .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
+    .click();
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(phone)).lastSnapshotRevision)
+    .toBe(1);
+
+  const existingSas = await inspectPairingOnExistingDevice(phone, pairingCode);
+  await phone.getByRole('button', { name: 'Poklapa se — odobri' }).click();
+  expect(await waitForNewDeviceSas(desktop)).toBe(existingSas);
+  await desktop.getByRole('button', { name: 'Poklapaju se — poveži' }).click();
+  await expect(desktop.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  await synchronizeSuccessfully(desktop);
+  await expect.poll(() => hasAccountName(desktop, PLAINTEXT_SENTINEL)).toBe(true);
+
+  return {
+    recoveryCode,
+    phone: await readLocalSyncSecurityView(phone),
+    desktop: await readLocalSyncSecurityView(desktop),
+  };
+};
+
 const expectPrivateMaterialAbsent = (
   haystack: string,
   forbiddenValues: readonly string[],
@@ -303,6 +546,7 @@ const expectPrivateMaterialAbsent = (
 
 test.beforeEach(() => {
   requestBodies.length = 0;
+  unexpectedSyncResponses.length = 0;
 });
 
 test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths, and recover', async ({
@@ -349,7 +593,12 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   await phone
     .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
     .click();
-  await expect(phone.getByText('Šifrovani snapshot je uspešno poslat.')).toBeVisible();
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(phone)).lastSnapshotRevision)
+    .toBe(1);
+  expect(
+    unexpectedSyncResponses.filter((entry) => entry !== 'GET /v1/snapshots/current 404'),
+  ).toEqual([]);
 
   const phoneLocal = await readLocalSyncSecurityView(phone);
   expect(phoneLocal.displayName).toBe(PHONE_DEVICE_NAME);
@@ -544,6 +793,211 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
 
   requestBodies.length = 0;
   await Promise.all([recoveryContext.close(), reusedContext.close()]);
+});
+
+test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, revoke and delete cloud state', async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(300_000);
+  const performanceTimingsMs: Record<string, number> = {};
+  const phoneContext = await browser.newContext({
+    ...devices['Pixel 7'],
+    viewport: { width: 390, height: 844 },
+    serviceWorkers: 'allow',
+    timezoneId: 'Europe/Belgrade',
+  });
+  const desktopContext = await browser.newContext({
+    ...devices['Desktop Chrome'],
+    serviceWorkers: 'allow',
+    timezoneId: 'Europe/Belgrade',
+  });
+  captureSyncRequestBodies(phoneContext);
+  captureSyncRequestBodies(desktopContext);
+  const phone = await phoneContext.newPage();
+  const desktop = await desktopContext.newPage();
+  let performanceStartedAt = performance.now();
+  const initial = await enableAndPairTwoDevices(phone, desktop);
+  performanceTimingsMs.initialUploadAndPairing = Math.round(
+    performance.now() - performanceStartedAt,
+  );
+  expect(initial.phone.keyEpoch).toBe(1);
+  expect(initial.desktop.keyEpoch).toBe(1);
+
+  await phone.goto(`${ENABLED_APP_ORIGIN}/`);
+  await phoneContext.setOffline(true);
+  await addPresetExpense(phone, 'Kafa', '360 RSD');
+  await phoneContext.setOffline(false);
+  performanceStartedAt = performance.now();
+  await synchronizeSuccessfully(phone);
+  performanceTimingsMs.incrementalOperationUpload = Math.round(
+    performance.now() - performanceStartedAt,
+  );
+  await synchronizeSuccessfully(desktop);
+  await expect
+    .poll(async () =>
+      (await readLocalFinanceMergeView(desktop)).transactions.some(
+        (transaction) => transaction.description === 'Kafa',
+      ),
+    )
+    .toBe(true);
+
+  await desktop.goto(`${ENABLED_APP_ORIGIN}/more/budgets`);
+  await phone.goto(`${ENABLED_APP_ORIGIN}/`);
+  await Promise.all([desktopContext.setOffline(true), phoneContext.setOffline(true)]);
+  await editBudgetAmount(desktop, 'Hrana', '32123');
+  await addPresetExpense(phone, 'Apoteka', '1.350 RSD');
+  performanceStartedAt = performance.now();
+  await phoneContext.setOffline(false);
+  await synchronizeSuccessfully(phone);
+  await desktopContext.setOffline(false);
+  await synchronizeSuccessfully(desktop);
+  await synchronizeSuccessfully(phone);
+  performanceTimingsMs.independentMerge = Math.round(performance.now() - performanceStartedAt);
+
+  for (const page of [phone, desktop]) {
+    const merged = await readLocalFinanceMergeView(page);
+    expect(merged.transactions.some((transaction) => transaction.description === 'Apoteka')).toBe(
+      true,
+    );
+    expect(merged.budgets.find((budget) => budget.name === 'Hrana')?.defaultAmount).toBe(32_123);
+  }
+
+  await Promise.all([
+    phone.goto(`${ENABLED_APP_ORIGIN}/more/transactions`),
+    desktop.goto(`${ENABLED_APP_ORIGIN}/more/transactions`),
+  ]);
+  await Promise.all([phoneContext.setOffline(true), desktopContext.setOffline(true)]);
+  await editTransactionNote(phone, 'Kafa', 'Telefon bira ovu vrednost');
+  await editTransactionNote(desktop, 'Kafa', 'Računar bira drugu vrednost');
+  performanceStartedAt = performance.now();
+  await phoneContext.setOffline(false);
+  const deferredCompactions = unexpectedSyncResponses.filter(
+    (entry) => entry.startsWith('PUT /v1/snapshots/') && entry.endsWith(' 409'),
+  ).length;
+  await synchronizeSuccessfully(phone);
+  expect(
+    unexpectedSyncResponses.filter(
+      (entry) => entry.startsWith('PUT /v1/snapshots/') && entry.endsWith(' 409'),
+    ),
+  ).toHaveLength(deferredCompactions + 1);
+  await desktopContext.setOffline(false);
+  await synchronizeUntilConflict(desktop);
+  await assertSyncWidths(desktop, 'Ekran za eksplicitnu rezoluciju konflikta');
+  await desktop.getByRole('button', { name: 'Prihvati predlog drugog uređaja' }).click();
+  await desktop.getByRole('button', { name: 'Potvrdi rezoluciju' }).click();
+  await expect(desktop.getByText(/Konfliktna radnja/)).toHaveCount(0);
+  await synchronizeSuccessfully(desktop);
+  await synchronizeSuccessfully(phone);
+  performanceTimingsMs.conflictDetectionResolutionAndMerge = Math.round(
+    performance.now() - performanceStartedAt,
+  );
+
+  for (const page of [phone, desktop]) {
+    const resolved = await readLocalFinanceMergeView(page);
+    expect(
+      resolved.transactions.find((transaction) => transaction.description === 'Kafa')?.notes,
+    ).toBe('Telefon bira ovu vrednost');
+  }
+
+  localD1(
+    `UPDATE device_grants SET issued_at = 0, expires_at = 1 WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND device_id = ${sqlLiteral(initial.desktop.deviceId)} AND revoked_at IS NULL`,
+  );
+  const expiredGrant = localD1(
+    `SELECT expires_at FROM device_grants WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND device_id = ${sqlLiteral(initial.desktop.deviceId)} AND revoked_at IS NULL`,
+  );
+  expect(expiredGrant).toEqual([{ expires_at: 1 }]);
+  await expectSyncRejected(desktop);
+
+  await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  const desktopLabel = `${initial.desktop.deviceId.slice(0, 8)}…${initial.desktop.deviceId.slice(-4)}`;
+  const desktopDeviceRow = phone.locator('li').filter({ hasText: desktopLabel });
+  await desktopDeviceRow.getByRole('button', { name: 'Obnovi 30 dana' }).click();
+  const renewed = phone.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname.endsWith('/renew') && response.request().method() === 'POST',
+  );
+  await phone.getByRole('button', { name: 'Obnovi ovlašćenje' }).click();
+  expect((await renewed).status()).toBe(201);
+  await synchronizeSuccessfully(desktop);
+  expect((await readLocalSyncSecurityView(desktop)).manifestVersion).toBe(3);
+
+  await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  const revisionBeforeRevocation = (await readLocalSyncSecurityView(phone)).lastSnapshotRevision;
+  performanceStartedAt = performance.now();
+  await phone
+    .locator('li')
+    .filter({ hasText: desktopLabel })
+    .getByRole('button', { name: 'Bezbedno opozovi' })
+    .click();
+  await assertSyncWidths(phone, 'Potvrda bezbednog opoziva uređaja');
+  await phone.getByLabel('Recovery kod').fill(initial.recoveryCode);
+  await phone.getByLabel('Za potvrdu unesite: OPOZOVI UREĐAJ').fill('OPOZOVI UREĐAJ');
+  const revoked = phone.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname.endsWith('/revoke') &&
+      response.request().method() === 'POST',
+  );
+  await phone.getByRole('button', { name: 'Opozovi i rotiraj ključ' }).click();
+  expect((await revoked).status()).toBe(201);
+  await expect
+    .poll(async () => {
+      const view = await readLocalSyncSecurityView(phone);
+      return {
+        keyEpoch: view.keyEpoch,
+        revisionAdvanced: view.lastSnapshotRevision > revisionBeforeRevocation,
+      };
+    })
+    .toEqual({ keyEpoch: 2, revisionAdvanced: true });
+  performanceTimingsMs.revokeRotateAndSnapshot = Math.round(
+    performance.now() - performanceStartedAt,
+  );
+
+  const epochEnvelopes = localD1(
+    `SELECT recipient_device_id FROM device_key_envelopes WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND key_epoch = 2 ORDER BY recipient_device_id`,
+  );
+  expect(epochEnvelopes).toEqual([{ recipient_device_id: initial.phone.deviceId }]);
+  await expectSyncRejected(desktop);
+  expect((await readLocalSyncSecurityView(desktop)).keyEpoch).toBe(1);
+
+  await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  performanceStartedAt = performance.now();
+  await phone.getByRole('button', { name: 'Pripremi cloud brisanje' }).click();
+  await assertSyncWidths(phone, 'Potvrda trajnog cloud brisanja');
+  await phone.getByLabel('Recovery kod za cloud brisanje').fill(initial.recoveryCode);
+  await phone
+    .getByLabel('Za potvrdu unesite: OBRIŠI ŠIFROVANI CLOUD TREZOR')
+    .fill('OBRIŠI ŠIFROVANI CLOUD TREZOR');
+  const deleted = phone.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === '/v1/vault' && response.request().method() === 'DELETE',
+  );
+  await phone.getByRole('button', { name: 'Trajno obriši cloud trezor' }).click();
+  expect((await deleted).status()).toBe(200);
+  await expect(phone.getByRole('button', { name: 'Uključi na prvom uređaju' })).toBeVisible();
+  expect(await hasAccountName(phone, PLAINTEXT_SENTINEL)).toBe(true);
+  expect(
+    (await readLocalFinanceMergeView(phone)).transactions.some(
+      (transaction) => transaction.description === 'Kafa',
+    ),
+  ).toBe(true);
+  expect(
+    localD1(
+      `SELECT COUNT(*) AS count FROM vaults WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
+    ),
+  ).toEqual([{ count: 0 }]);
+  expect(
+    localD1(
+      `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
+    ),
+  ).toEqual([{ state: 'completed' }]);
+  performanceTimingsMs.cloudDeletion = Math.round(performance.now() - performanceStartedAt);
+  console.info(JSON.stringify({ syncBrowserPerformance: performanceTimingsMs }));
+  await testInfo.attach('sync-performance-timings.json', {
+    body: JSON.stringify(performanceTimingsMs, null, 2),
+    contentType: 'application/json',
+  });
+
+  await Promise.all([phoneContext.close(), desktopContext.close()]);
 });
 
 test('disabled build exposes no sync entry point and makes no sync request', async ({

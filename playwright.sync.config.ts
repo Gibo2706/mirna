@@ -14,6 +14,8 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: 'test-results/sync',
   use: {
+    actionTimeout: 15_000,
+    navigationTimeout: 30_000,
     baseURL: 'http://localhost:4173',
     serviceWorkers: 'allow',
     timezoneId: 'Europe/Belgrade',
