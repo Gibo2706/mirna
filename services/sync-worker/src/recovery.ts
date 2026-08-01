@@ -400,21 +400,70 @@ const authorizeRecoveryRead = async (
   context: RequestContext,
   input: ReturnType<typeof recoveryBundleFetchRequestSchema.parse>,
 ): Promise<StoredRecoveryChallengeRow> => {
-  const row = await storedRecoveryChallenge(
-    context.env.MIRNA_SYNC_DB,
-    input.transcript.challenge.challengeId,
-  );
+  const authorized = await authorizeRecoveryCapabilityRow(context, {
+    challenge: input.transcript.challenge,
+    gateKey: input.gateKey,
+    transcript: input.transcript,
+    gateProof: input.gateProof,
+  });
+  return authorized.row;
+};
+
+const authorizeRecoveryCapabilityRow = async (
+  context: RequestContext,
+  input: {
+    challenge: ReturnType<typeof recoveryChallengeSchema.parse>;
+    gateKey: string;
+    transcript: unknown;
+    gateProof: string;
+  },
+) => {
+  const row = await storedRecoveryChallenge(context.env.MIRNA_SYNC_DB, input.challenge.challengeId);
   if (!row) throw notFound();
-  assertFetchChallenge(context, row, input.transcript.challenge);
+  assertFetchChallenge(context, row, input.challenge);
   const expectedChallengeHash = await domainHashBytes(
     SYNC_DOMAIN_LABELS.recoveryChallengeHash,
-    base64UrlToBytes(input.transcript.challenge.challenge),
+    base64UrlToBytes(input.challenge.challenge),
   );
   if (!timingSafeEqual(expectedChallengeHash, new Uint8Array(row.challenge_hash))) {
     throw forbidden('RECOVERY_CHALLENGE_MISMATCH', 'Recovery challenge is invalid.');
   }
   await verifyGate(context, row, input.gateKey, input.transcript, input.gateProof);
-  return row;
+  return {
+    row,
+    currentManifest: vaultManifestSchema.parse(JSON.parse(row.canonical_manifest) as unknown),
+  };
+};
+
+export interface AuthorizedRecoveryCapability {
+  readonly vaultId: string;
+  readonly recoveryLookupId: string;
+  readonly recoveryVersion: number;
+  readonly recoveryGateKeyHash: string;
+  readonly recoverySigningPublicKeyRaw: string;
+  readonly challengeId: string;
+  readonly currentManifest: VaultManifestV1;
+}
+
+export const authorizeRecoveryCapability = async (
+  context: RequestContext,
+  input: {
+    challenge: ReturnType<typeof recoveryChallengeSchema.parse>;
+    gateKey: string;
+    transcript: unknown;
+    gateProof: string;
+  },
+): Promise<AuthorizedRecoveryCapability> => {
+  const { row, currentManifest } = await authorizeRecoveryCapabilityRow(context, input);
+  return {
+    vaultId: row.vault_id,
+    recoveryLookupId: row.recovery_lookup_id,
+    recoveryVersion: row.recovery_version,
+    recoveryGateKeyHash: bytesToBase64Url(new Uint8Array(row.recovery_gate_key_hash)),
+    recoverySigningPublicKeyRaw: row.recovery_signing_public_key_raw,
+    challengeId: row.challenge_id,
+    currentManifest,
+  };
 };
 
 export const handleFetchRecoverySnapshot = async (context: RequestContext): Promise<Response> => {

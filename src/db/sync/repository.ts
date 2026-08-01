@@ -7,7 +7,11 @@ import {
   openEncryptedKeyEnvelope,
 } from '@/domain/sync/crypto';
 import { clearBytes, timingSafeEqual } from '@/domain/sync/encoding';
-import { manifestBodyHash, verifyStandaloneManifestWithPin } from '@/domain/sync/manifest';
+import {
+  manifestBodyHash,
+  validateManifestTransition,
+  verifyStandaloneManifestWithPin,
+} from '@/domain/sync/manifest';
 import {
   cryptoSuiteSchema,
   encryptedKeyEnvelopeSchema,
@@ -120,6 +124,7 @@ const syncMetadataRecordSchema = z.strictObject({
     .string()
     .regex(/^[A-Za-z0-9_-]{43}$/u)
     .nullable(),
+  pendingKeyRotationSnapshotEpoch: z.number().int().positive().optional(),
   enabledAt: timestampSchema,
   lastSyncAt: timestampSchema.optional(),
   lastSuccessfulSyncAt: timestampSchema.optional(),
@@ -415,6 +420,62 @@ export const writeLocalSyncSetup = async (
     [database.syncVault, database.syncDevice, database.syncKeys, database.syncMetadata],
     async () => {
       await assertCompatibleExistingVault(database, validatedSetup);
+      await putSetupRecords(database, validatedSetup);
+    },
+  );
+};
+
+/**
+ * Advances the local vault to exactly the next key epoch while retaining the
+ * previous encrypted key for already accepted historical operations.
+ */
+export const writeRotatedLocalSyncSetup = async (
+  setup: LocalSyncSetup,
+  database: FinanceDatabase = db,
+): Promise<void> => {
+  const [validatedSetup, current] = await Promise.all([
+    validateSetup(setup),
+    readLocalSyncSetup(database),
+  ]);
+  if (!current) throw new IncompleteLocalSyncSetupError();
+  if (
+    current.vault.vaultId !== validatedSetup.vault.vaultId ||
+    validatedSetup.vault.keyEpoch !== current.vault.keyEpoch + 1 ||
+    validatedSetup.vault.manifest.manifestVersion !== current.vault.manifest.manifestVersion + 1 ||
+    validatedSetup.device.deviceId !== current.device.deviceId ||
+    validatedSetup.metadata.enabledAt !== current.metadata.enabledAt ||
+    validatedSetup.metadata.firstUploadConsent !== current.metadata.firstUploadConsent ||
+    validatedSetup.metadata.lastServerCursor !== current.metadata.lastServerCursor ||
+    validatedSetup.metadata.lastSnapshotServerCursor !==
+      current.metadata.lastSnapshotServerCursor ||
+    validatedSetup.metadata.lastSnapshotRevision !== current.metadata.lastSnapshotRevision ||
+    validatedSetup.metadata.lastSnapshotId !== current.metadata.lastSnapshotId ||
+    validatedSetup.metadata.lastSnapshotHash !== current.metadata.lastSnapshotHash ||
+    validatedSetup.metadata.lastSnapshotContentHash !== current.metadata.lastSnapshotContentHash
+  ) {
+    throw new InvalidLocalSyncSetupError('Local key rotation is not an exact next-epoch update.');
+  }
+  await validateManifestTransition(current.vault.manifest, validatedSetup.vault.manifest);
+
+  const retiredAt = validatedSetup.vault.updatedAt;
+  await database.transaction(
+    'rw',
+    [database.syncVault, database.syncDevice, database.syncKeys, database.syncMetadata],
+    async () => {
+      const [storedVault, storedKey] = await Promise.all([
+        database.syncVault.get(ACTIVE_SYNC_VAULT_RECORD_ID),
+        database.syncKeys.get(current.vaultKey.id),
+      ]);
+      if (
+        !storedVault ||
+        !storedKey ||
+        storedKey.retiredAt !== undefined ||
+        storedVault.keyEpoch !== current.vault.keyEpoch ||
+        canonicalizeJson(storedVault.manifest) !== canonicalizeJson(current.vault.manifest)
+      ) {
+        throw new InvalidLocalSyncSetupError('Local key rotation lost its state race.');
+      }
+      await database.syncKeys.put({ ...storedKey, retiredAt });
       await putSetupRecords(database, validatedSetup);
     },
   );

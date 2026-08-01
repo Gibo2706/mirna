@@ -79,6 +79,12 @@ export const SYNC_DOMAIN_LABELS = Object.freeze({
   recoveryCompleteRequest: 'MIRNA-E2EE-V1/recovery-complete-request',
   recoveryIdempotencyHash: 'MIRNA-E2EE-V1/recovery-idempotency-hash',
   snapshotIdempotencyHash: 'MIRNA-E2EE-V1/snapshot-idempotency-hash',
+  deviceEnvelopeContext: 'MIRNA-E2EE-V1/device-envelope-context',
+  deviceEnvelopeSet: 'MIRNA-E2EE-V1/device-envelope-set',
+  secureRevocation: 'MIRNA-E2EE-V1/secure-device-revocation',
+  secureRevocationRequest: 'MIRNA-E2EE-V1/secure-device-revocation-request',
+  vaultDeletion: 'MIRNA-E2EE-V1/vault-deletion',
+  vaultDeletionRequest: 'MIRNA-E2EE-V1/vault-deletion-request',
   recoveryCode: 'MIRNA-RECOVERY-CODE-V1',
 });
 
@@ -93,4 +99,6 @@ export const SYNC_TRANSCRIPT_TYPES = Object.freeze({
   recoveryProof: 'mirna-recovery-proof-v1',
   recoveryChallenge: 'mirna-recovery-challenge-v1',
   recoveryBundleFetch: 'mirna-recovery-bundle-fetch-v1',
+  secureDeviceRevocation: 'mirna-secure-device-revocation-v1',
+  vaultDeletion: 'mirna-vault-deletion-v1',
 });

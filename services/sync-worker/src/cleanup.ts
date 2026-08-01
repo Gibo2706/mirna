@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import { resumePendingVaultDeletions } from './deletion';
 
 // Snapshot cleanup needs two D1 statements per object plus R2 work, so it stays
 // deliberately small. Expired metadata is deleted with one bounded SQL
@@ -203,6 +204,8 @@ export const runScheduledCleanup = async (env: Env, now = Date.now()): Promise<C
     ephemeralBatchSize,
   );
 
+  const resumedDeletionRequests = await resumePendingVaultDeletions(env);
+
   const staleDeletionRequests = changes(
     await env.MIRNA_SYNC_DB.prepare(
       `UPDATE deletion_requests
@@ -247,6 +250,6 @@ export const runScheduledCleanup = async (env: Env, now = Date.now()): Promise<C
     pairingRequests,
     snapshots,
     syncChanges,
-    deletionRequests: staleDeletionRequests + retainedDeletionRequests,
+    deletionRequests: resumedDeletionRequests + staleDeletionRequests + retainedDeletionRequests,
   };
 };

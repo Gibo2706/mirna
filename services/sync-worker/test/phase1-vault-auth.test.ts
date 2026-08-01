@@ -201,6 +201,37 @@ describe('Phase 1 challenge and access-session authentication', () => {
     expect(await manifest.json()).toMatchObject({ vaultId: fixture.vaultId, manifestVersion: 1 });
   });
 
+  it('keeps a bounded session pool by rotating the oldest device-signed session', async () => {
+    const fixture = await createInitialVaultFixture();
+    expect((await registerInitialVault(fixture)).status).toBe(201);
+    const sessions = [];
+    for (let index = 0; index < 6; index += 1) {
+      sessions.push(await createAccessSession(fixture));
+    }
+
+    const counts = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN revoked_at IS NULL AND expires_at > ?3 THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END) AS revoked
+         FROM access_sessions
+        WHERE vault_id = ?1 AND device_id = ?2`,
+    )
+      .bind(fixture.vaultId, fixture.deviceId, Date.now())
+      .first<Record<string, number>>();
+    expect(counts).toEqual({ total: 6, active: 5, revoked: 1 });
+
+    const manifestWith = (accessToken: string) =>
+      SELF.fetch('https://sync.invalid/v1/vault/manifest', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Origin: TEST_ORIGIN,
+          'X-Mirna-Protocol-Version': '1',
+        },
+      });
+    expect((await manifestWith(sessions[0].accessToken)).status).toBe(401);
+    expect((await manifestWith(sessions.at(-1)!.accessToken)).status).toBe(200);
+  });
+
   it('rejects a tampered challenge, tampered signature and wrong audience', async () => {
     const fixture = await createInitialVaultFixture();
     expect((await registerInitialVault(fixture)).status).toBe(201);

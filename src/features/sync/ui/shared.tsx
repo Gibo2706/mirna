@@ -47,7 +47,7 @@ const SecretActions = ({
   return (
     <div className="grid gap-2 sm:grid-cols-3">
       <Button variant="secondary" onClick={() => void copy()}>
-        <ClipboardCopy size={16} aria-hidden="true" /> Kopiraj
+        <ClipboardCopy size={16} aria-hidden="true" /> Kopiraj recovery kod
       </Button>
       <Button
         variant="secondary"
@@ -56,10 +56,10 @@ const SecretActions = ({
           success('Recovery kod je preuzet kao tekstualni fajl.');
         }}
       >
-        <Download size={16} aria-hidden="true" /> Preuzmi
+        <Download size={16} aria-hidden="true" /> Preuzmi recovery kod
       </Button>
       <Button variant="secondary" onClick={services.printSecret}>
-        <Printer size={16} aria-hidden="true" /> Odštampaj
+        <Printer size={16} aria-hidden="true" /> Odštampaj recovery kod
       </Button>
       {error ? (
         <div className="sm:col-span-3">
@@ -96,7 +96,7 @@ export const RecoveryCodeStep = ({
     </div>
     <code
       data-testid="sync-recovery-code"
-      className="block overflow-x-auto rounded-xl bg-surface-2 p-3 text-sm font-bold leading-7 break-normal select-all"
+      className="block whitespace-pre-wrap break-all rounded-xl bg-surface-2 p-3 text-sm font-bold leading-7 select-all"
     >
       {presentation.recoveryCode}
     </code>

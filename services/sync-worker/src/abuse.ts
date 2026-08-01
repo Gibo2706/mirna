@@ -27,6 +27,8 @@ const bindingForPath = (pathname: string): RateLimitBindingName | null => {
   if (
     pathname === '/v1/recovery/bundle' ||
     pathname === '/v1/recovery/snapshot' ||
+    pathname === '/v1/vault' ||
+    /^\/v1\/devices\/[^/]+\/(renew|revoke)$/u.test(pathname) ||
     /^\/v1\/vaults\/[^/]+\/recover$/u.test(pathname)
   ) {
     return 'MIRNA_RECOVERY_ACTION_RATE_LIMITER';
@@ -34,7 +36,9 @@ const bindingForPath = (pathname: string): RateLimitBindingName | null => {
   if (
     pathname === '/v1/vault/manifest' ||
     pathname === '/v1/snapshots/current' ||
-    pathname === '/v1/changes'
+    pathname === '/v1/changes' ||
+    pathname === '/v1/manifests' ||
+    /^\/v1\/key-epochs\/(current|[1-9][0-9]*)$/u.test(pathname)
   ) {
     return 'MIRNA_SYNC_READ_RATE_LIMITER';
   }

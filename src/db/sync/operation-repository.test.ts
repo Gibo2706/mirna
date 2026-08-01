@@ -292,6 +292,45 @@ describe('local encrypted operation preparation', () => {
     clearBytes(reopened, vaultMasterKey);
     database.close();
   });
+
+  it('measures bounded IndexedDB outbox growth for 250 offline edits', async () => {
+    const database = createDatabase();
+    const { setup, vaultMasterKey } = await createSetup();
+    await writeLocalSyncSetup(setup, database);
+    await Promise.all([database.accounts.put(originalAccount), database.settings.put(settings)]);
+    let current = originalAccount;
+    const startedAt = performance.now();
+    for (let index = 0; index < 250; index += 1) {
+      const next = { ...current, name: `Sintetička offline izmena ${index}` };
+      await auditedFinanceTransaction(
+        [database.accounts],
+        async (audit) => {
+          await database.accounts.put(next);
+          await audit.upsert('account', current, next);
+        },
+        database,
+        () => NOW,
+      );
+      current = next;
+    }
+    const records = await database.syncOutbox.toArray();
+    const canonicalPayloadBytes = records.reduce(
+      (total, record) => total + new TextEncoder().encode(record.canonicalPayload).byteLength,
+      0,
+    );
+    const metrics = {
+      operations: records.length,
+      canonicalPayloadBytes,
+      averageCanonicalPayloadBytes: Math.round(canonicalPayloadBytes / records.length),
+      elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
+    };
+    expect(metrics.operations).toBe(250);
+    expect(metrics.canonicalPayloadBytes).toBeGreaterThan(0);
+    expect(metrics.canonicalPayloadBytes).toBeLessThan(1_024 * 1_024);
+    console.info(JSON.stringify({ syncOutboxPerformance: metrics }));
+    clearBytes(vaultMasterKey);
+    database.close();
+  });
 });
 
 describe('operation conflict resolution', () => {
@@ -301,6 +340,8 @@ describe('operation conflict resolution', () => {
     await writeLocalSyncSetup(setup, database);
     await Promise.all([database.accounts.put(originalAccount), database.settings.put(settings)]);
     const mutationGroupId = createOpaqueId();
+    const remoteAccountOperationId = createOpaqueId();
+    const remoteSettingsOperationId = createOpaqueId();
     const remoteAccount = { ...originalAccount, name: 'Udaljeni naziv' };
     const remoteSettings = {
       id: 'settings',
@@ -318,7 +359,7 @@ describe('operation conflict resolution', () => {
         entityType: 'account',
         entityId: originalAccount.id,
         localOperationId: 'snapshot-baseline',
-        remoteOperationId: createOpaqueId(),
+        remoteOperationId: remoteAccountOperationId,
         mutationGroupId,
         mutationGroupIndex: 0,
         mutationGroupSize: 2,
@@ -334,7 +375,7 @@ describe('operation conflict resolution', () => {
         entityType: 'settings',
         entityId: settings.id,
         localOperationId: 'snapshot-baseline',
-        remoteOperationId: createOpaqueId(),
+        remoteOperationId: remoteSettingsOperationId,
         mutationGroupId,
         mutationGroupIndex: 1,
         mutationGroupSize: 2,
@@ -375,6 +416,24 @@ describe('operation conflict resolution', () => {
       vaultMasterKey,
     );
     expect(prepared).toHaveLength(2);
+    const resolutions = await Promise.all(
+      new SyncOperationRepository(database, () => NOW).envelopes(prepared).map((envelope) =>
+        openEncryptedOperation({
+          envelope,
+          vaultMasterKey,
+          signingPublicKey: setup.device.signingPublicKey,
+          expected: {
+            vaultId: setup.vault.vaultId,
+            keyEpoch: 1,
+            deviceId: setup.device.deviceId,
+          },
+        }),
+      ),
+    );
+    expect(resolutions.map((operation) => operation.resolvesOperationIds)).toEqual([
+      [remoteAccountOperationId],
+      [remoteSettingsOperationId],
+    ]);
     clearBytes(vaultMasterKey);
     database.close();
   });

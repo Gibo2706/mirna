@@ -494,6 +494,27 @@ export interface PairingAgreementKeys {
   confirmationKey: CryptoKey;
 }
 
+const deriveEcdhHkdfMaterial = async (
+  ownPrivateKey: CryptoKey,
+  peerPublicKey: CryptoKey,
+  runtime: CryptoRuntime,
+): Promise<CryptoKey> => {
+  if (ownPrivateKey.type !== 'private' || ownPrivateKey.algorithm.name !== 'ECDH') {
+    throw new Error('Razmena ključa zahteva privatni ECDH ključ.');
+  }
+  if (peerPublicKey.type !== 'public' || peerPublicKey.algorithm.name !== 'ECDH') {
+    throw new Error('Razmena ključa zahteva javni ECDH ključ druge strane.');
+  }
+  const shared = new Uint8Array(
+    await runtime.subtle.deriveBits({ name: 'ECDH', public: peerPublicKey }, ownPrivateKey, 256),
+  );
+  try {
+    return await importHkdfMaterial(shared, runtime);
+  } finally {
+    clearBytes(shared);
+  }
+};
+
 export async function derivePairingAgreementKeys(
   ownPrivateKey: CryptoKey,
   peerPublicKey: CryptoKey,
@@ -501,49 +522,57 @@ export async function derivePairingAgreementKeys(
   context: unknown,
   runtime: CryptoRuntime = currentCrypto(),
 ): Promise<PairingAgreementKeys> {
-  if (ownPrivateKey.type !== 'private' || ownPrivateKey.algorithm.name !== 'ECDH') {
-    throw new Error('Uparivanje zahteva privatni ECDH ključ.');
-  }
-  if (peerPublicKey.type !== 'public' || peerPublicKey.algorithm.name !== 'ECDH') {
-    throw new Error('Uparivanje zahteva javni ECDH ključ druge strane.');
-  }
   assertByteLength(pairingSalt, SYNC_LIMITS.pairingSaltBytes, 'Pairing salt');
-  const shared = new Uint8Array(
-    await runtime.subtle.deriveBits({ name: 'ECDH', public: peerPublicKey }, ownPrivateKey, 256),
+  const material = await deriveEcdhHkdfMaterial(ownPrivateKey, peerPublicKey, runtime);
+  const contextHash = await sha256(
+    domainSeparatedCanonicalBytes(SYNC_DOMAIN_LABELS.pairingContext, context),
+    runtime,
   );
-  try {
-    const material = await importHkdfMaterial(shared, runtime);
-    const contextHash = await sha256(
-      domainSeparatedCanonicalBytes(SYNC_DOMAIN_LABELS.pairingContext, context),
+  const [wrappingKey, confirmationKey] = await Promise.all([
+    deriveHkdfAesKey(
+      material,
+      pairingSalt,
+      concatBytes(utf8(SYNC_HKDF_LABELS.pairingWrapping), DOMAIN_SEPARATOR, contextHash),
       runtime,
-    );
-    const [wrappingKey, confirmationKey] = await Promise.all([
-      deriveHkdfAesKey(
-        material,
-        pairingSalt,
-        concatBytes(utf8(SYNC_HKDF_LABELS.pairingWrapping), DOMAIN_SEPARATOR, contextHash),
-        runtime,
-      ),
-      runtime.subtle.deriveKey(
-        {
-          name: 'HKDF',
-          hash: 'SHA-256',
-          salt: arrayBuffer(pairingSalt),
-          info: arrayBuffer(
-            concatBytes(utf8(SYNC_HKDF_LABELS.pairingConfirmation), DOMAIN_SEPARATOR, contextHash),
-          ),
-        },
-        material,
-        { name: 'HMAC', hash: 'SHA-256', length: 256 },
-        false,
-        ['sign', 'verify'],
-      ),
-    ]);
-    return { wrappingKey, confirmationKey };
-  } finally {
-    clearBytes(shared);
-  }
+    ),
+    runtime.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: arrayBuffer(pairingSalt),
+        info: arrayBuffer(
+          concatBytes(utf8(SYNC_HKDF_LABELS.pairingConfirmation), DOMAIN_SEPARATOR, contextHash),
+        ),
+      },
+      material,
+      { name: 'HMAC', hash: 'SHA-256', length: 256 },
+      false,
+      ['sign', 'verify'],
+    ),
+  ]);
+  return { wrappingKey, confirmationKey };
 }
+
+export const deriveDeviceEnvelopeWrappingKey = async (
+  ownPrivateKey: CryptoKey,
+  peerPublicKey: CryptoKey,
+  salt: Uint8Array,
+  context: unknown,
+  runtime: CryptoRuntime = currentCrypto(),
+): Promise<CryptoKey> => {
+  assertByteLength(salt, SYNC_LIMITS.pairingSaltBytes, 'Device envelope salt');
+  const material = await deriveEcdhHkdfMaterial(ownPrivateKey, peerPublicKey, runtime);
+  const contextHash = await sha256(
+    domainSeparatedCanonicalBytes(SYNC_DOMAIN_LABELS.deviceEnvelopeContext, context),
+    runtime,
+  );
+  return deriveHkdfAesKey(
+    material,
+    salt,
+    concatBytes(utf8(SYNC_HKDF_LABELS.deviceEnvelope), DOMAIN_SEPARATOR, contextHash),
+    runtime,
+  );
+};
 
 export const createPairingKeyConfirmation = async (
   transcript: unknown,

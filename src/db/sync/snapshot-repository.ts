@@ -41,6 +41,7 @@ export type SnapshotMetadataChanges = Pick<
   | 'lastSnapshotContentHash'
   | 'lastManifestHash'
   | 'lastLocalDataHash'
+  | 'pendingKeyRotationSnapshotEpoch'
 > &
   Partial<
     Pick<
@@ -48,6 +49,28 @@ export type SnapshotMetadataChanges = Pick<
       'lastSyncAt' | 'lastSuccessfulSyncAt' | 'lastErrorCode' | 'syncBlockReason'
     >
   >;
+
+const storedSnapshotEntityState = (
+  vaultId: string,
+  state: SnapshotEntityStateV1,
+  updatedAt: string,
+) => ({
+  id: `${vaultId}:${state.entityType}:${state.entityId}`,
+  vaultId,
+  entityType: state.entityType,
+  entityId: state.entityId,
+  entityVersion: state.entityVersion,
+  stateHash: state.stateHash,
+  tombstone: state.tombstone,
+  canonicalTombstone: state.tombstoneMetadata
+    ? canonicalizeJson(state.tombstoneMetadata)
+    : undefined,
+  lastOperationId: state.lastOperationId,
+  lastDeviceId: state.lastDeviceId,
+  lastDeviceSequence: state.lastDeviceSequence,
+  lastLamportTime: state.lastLamportTime,
+  updatedAt,
+});
 
 export class SyncSnapshotRepository {
   constructor(private readonly database: FinanceDatabase = db) {}
@@ -158,6 +181,39 @@ export class SyncSnapshotRepository {
     });
   }
 
+  async commitLocalSnapshot(
+    setup: LocalSyncSetup,
+    changes: SnapshotMetadataChanges,
+    entityStates: readonly SnapshotEntityStateV1[],
+  ): Promise<void> {
+    await this.database.transaction(
+      'rw',
+      [this.database.syncMetadata, this.database.syncEntityStates],
+      async () => {
+        const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
+        if (
+          !current ||
+          current.vaultId !== setup.vault.vaultId ||
+          current.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
+          current.lastSnapshotHash !== setup.metadata.lastSnapshotHash
+        ) {
+          throw new LocalSnapshotRaceError();
+        }
+        await this.database.syncEntityStates.where('vaultId').equals(setup.vault.vaultId).delete();
+        await this.database.syncEntityStates.bulkPut(
+          entityStates.map((state) =>
+            storedSnapshotEntityState(
+              setup.vault.vaultId,
+              state,
+              changes.lastSyncAt ?? new Date().toISOString(),
+            ),
+          ),
+        );
+        await this.database.syncMetadata.put({ ...current, ...changes });
+      },
+    );
+  }
+
   async applyRemoteSnapshot(
     setup: LocalSyncSetup,
     data: FinanceData,
@@ -181,25 +237,15 @@ export class SyncSnapshotRepository {
           throw new LocalSnapshotRaceError();
         }
         await replaceFinanceDataInTransaction(this.database, validated);
-        await this.database.syncEntityStates.clear();
+        await this.database.syncEntityStates.where('vaultId').equals(setup.vault.vaultId).delete();
         await this.database.syncEntityStates.bulkPut(
-          snapshotStates.map((state) => ({
-            id: `${setup.vault.vaultId}:${state.entityType}:${state.entityId}`,
-            vaultId: setup.vault.vaultId,
-            entityType: state.entityType,
-            entityId: state.entityId,
-            entityVersion: state.entityVersion,
-            stateHash: state.stateHash,
-            tombstone: state.tombstone,
-            canonicalTombstone: state.tombstoneMetadata
-              ? canonicalizeJson(state.tombstoneMetadata)
-              : undefined,
-            lastOperationId: state.lastOperationId,
-            lastDeviceId: state.lastDeviceId,
-            lastDeviceSequence: state.lastDeviceSequence,
-            lastLamportTime: state.lastLamportTime,
-            updatedAt: changes.lastSyncAt ?? new Date().toISOString(),
-          })),
+          snapshotStates.map((state) =>
+            storedSnapshotEntityState(
+              setup.vault.vaultId,
+              state,
+              changes.lastSyncAt ?? new Date().toISOString(),
+            ),
+          ),
         );
         await this.database.syncMetadata.put({ ...current, ...changes });
       },

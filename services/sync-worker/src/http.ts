@@ -10,7 +10,7 @@ const ALLOWED_REQUEST_HEADERS = new Set([
   'x-mirna-snapshot-envelope',
   'x-mirna-protocol-version',
 ]);
-const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export interface PublicError {
   error: {

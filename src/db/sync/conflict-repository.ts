@@ -149,6 +149,9 @@ export class SyncConflictRepository {
             conflict.entityId,
             current,
             desired,
+            [conflict.localOperationId, conflict.remoteOperationId].filter((operationId) =>
+              /^[A-Za-z0-9_-]{22}$/u.test(operationId),
+            ),
           );
           await this.database.syncConflicts.put({
             ...conflict,

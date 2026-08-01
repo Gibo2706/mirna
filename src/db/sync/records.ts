@@ -151,6 +151,7 @@ export interface SyncMetadataRecord {
   lastSnapshotContentHash: string | null;
   lastManifestHash: string;
   lastLocalDataHash: string | null;
+  pendingKeyRotationSnapshotEpoch?: number;
   enabledAt: string;
   lastSyncAt?: string;
   lastSuccessfulSyncAt?: string;

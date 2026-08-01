@@ -35,6 +35,10 @@ export interface ContinuousSnapshotSyncPort {
   readonly synchronize: (options?: SnapshotSyncOptions) => Promise<SnapshotSyncResult>;
 }
 
+export interface ContinuousDeviceSecurityPort {
+  readonly reconcileKeyEpoch: () => Promise<LocalSyncSetup>;
+}
+
 export interface ContinuousSyncRepositoryPort {
   readonly readSetup: () => Promise<LocalSyncSetup | undefined>;
   readonly readMetadata: () => Promise<SyncMetadataRecord | undefined>;
@@ -57,15 +61,18 @@ export class ContinuousSyncService {
   readonly #operations: ContinuousOperationSyncPort;
   readonly #snapshots: ContinuousSnapshotSyncPort;
   readonly #repository: ContinuousSyncRepositoryPort;
+  readonly #security?: ContinuousDeviceSecurityPort;
   #queue: Promise<void> = Promise.resolve();
 
   constructor(input: {
     operations: ContinuousOperationSyncPort;
     snapshots: ContinuousSnapshotSyncPort;
+    security?: ContinuousDeviceSecurityPort;
     repository?: ContinuousSyncRepositoryPort;
   }) {
     this.#operations = input.operations;
     this.#snapshots = input.snapshots;
+    this.#security = input.security;
     this.#repository = input.repository ?? new SyncOperationRepository();
   }
 
@@ -79,6 +86,7 @@ export class ContinuousSyncService {
   }
 
   async #synchronizeOnce(options: ContinuousSyncOptions): Promise<ContinuousSyncResult> {
+    await this.#security?.reconcileKeyEpoch();
     const initialSetup = await this.#repository.readSetup();
     if (!initialSetup) throw new Error('Sinhronizacija nije uključena na ovom uređaju.');
     const bootstrapping = initialSetup.metadata.lastSnapshotRevision === 0;
@@ -98,11 +106,23 @@ export class ContinuousSyncService {
       setupAfterOperations.vault.vaultId,
       setupAfterOperations.metadata.lastSnapshotServerCursor,
     );
+    if (stats.pendingConflictCount > 0) {
+      const metadata = await this.#repository.readMetadata();
+      if (!metadata) throw new Error('Sync metadata nedostaje posle obrade konflikta.');
+      return this.#result(
+        operationResult,
+        operationResult.acknowledgedServerCursor,
+        metadata.lastSnapshotRevision,
+        false,
+      );
+    }
     const shouldCompact =
-      stats.pendingConflictCount === 0 &&
-      ((!bootstrapping && options.forceCompaction === true) ||
-        stats.operationCount >= COMPACTION_OPERATION_THRESHOLD ||
-        stats.encryptedBytes >= COMPACTION_ENCRYPTED_BYTES_THRESHOLD);
+      (!bootstrapping &&
+        (options.forceCompaction === true ||
+          setupAfterOperations.metadata.pendingKeyRotationSnapshotEpoch ===
+            setupAfterOperations.vault.keyEpoch)) ||
+      stats.operationCount >= COMPACTION_OPERATION_THRESHOLD ||
+      stats.encryptedBytes >= COMPACTION_ENCRYPTED_BYTES_THRESHOLD;
     const snapshotResult = await this.#snapshots.synchronize({
       continuousOperations: true,
       forceCompaction: shouldCompact,

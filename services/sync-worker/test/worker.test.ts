@@ -73,7 +73,18 @@ describe('Worker HTTP foundation', () => {
       }),
     );
     expect(wrongMethod.status).toBe(405);
-    expect(wrongMethod.headers.get('Allow')).toBe('GET, POST, OPTIONS');
+    expect(wrongMethod.headers.get('Allow')).toBe('GET, OPTIONS');
+
+    const wrongDeletionMethod = await SELF.fetch(
+      request('/v1/vault', {
+        headers: {
+          Origin: 'http://localhost:5173',
+          'X-Mirna-Protocol-Version': '1',
+        },
+      }),
+    );
+    expect(wrongDeletionMethod.status).toBe(405);
+    expect(wrongDeletionMethod.headers.get('Allow')).toBe('DELETE, OPTIONS');
 
     const wrongContentType = await SELF.fetch(
       request('/v1/not-implemented', {

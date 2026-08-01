@@ -313,6 +313,28 @@ export const handleAuthSession = async (context: RequestContext): Promise<Respon
   const expiresAt = Math.min(now + limits.accessSessionLifetimeMs, stored.authorization_expires_at);
   const results = await context.env.MIRNA_SYNC_DB.batch([
     context.env.MIRNA_SYNC_DB.prepare(
+      `UPDATE access_sessions
+          SET revoked_at = ?3
+        WHERE session_id = (
+          SELECT session_id
+            FROM access_sessions
+           WHERE vault_id = ?1
+             AND device_id = ?2
+             AND revoked_at IS NULL
+             AND expires_at > ?3
+           ORDER BY COALESCE(last_used_at, created_at), created_at, session_id
+           LIMIT 1
+        )
+          AND (
+            SELECT COUNT(*)
+              FROM access_sessions
+             WHERE vault_id = ?1
+               AND device_id = ?2
+               AND revoked_at IS NULL
+               AND expires_at > ?3
+          ) >= ?4`,
+    ).bind(stored.vault_id, stored.device_id, now, limits.maxActiveSessionsPerDevice),
+    context.env.MIRNA_SYNC_DB.prepare(
       `INSERT INTO access_sessions (
          session_id, vault_id, device_id, token_hash, created_at, expires_at,
          last_used_at, revoked_at
@@ -370,7 +392,7 @@ export const handleAuthSession = async (context: RequestContext): Promise<Respon
           AND status = 'active'`,
     ).bind(stored.vault_id, stored.device_id, now),
   ]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+  if (results[1]?.meta.changes !== 1 || results[2]?.meta.changes !== 1) {
     const activeSessions = await context.env.MIRNA_SYNC_DB.prepare(
       `SELECT COUNT(*) AS count
          FROM access_sessions

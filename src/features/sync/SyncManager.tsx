@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   CheckCircle2,
-  CloudCog,
   CloudUpload,
   KeyRound,
   QrCode,
@@ -39,6 +38,7 @@ import {
 import { formatDateTime, safeErrorMessage, truncateOpaqueId, useLocalQr } from './ui/helpers';
 import { BackToChoices, BusyIcon, InlineError, RecoveryCodeStep, SectionTitle } from './ui/shared';
 import { useSnapshotSyncScheduler } from './scheduler';
+import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 
 type EmptyMode = 'choose' | 'enable' | 'pair-new' | 'recover';
 
@@ -475,7 +475,7 @@ const NewDevicePairingPanel = ({
                 <p className="text-sm font-bold">Ručni kod</p>
                 <code
                   data-testid="sync-pairing-code"
-                  className="mt-2 block max-h-48 overflow-auto rounded-xl bg-surface-2 p-3 text-xs leading-6 break-normal select-all"
+                  className="mt-2 block max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-surface-2 p-3 text-xs leading-6 select-all"
                 >
                   {presentation.pairingCode}
                 </code>
@@ -780,17 +780,6 @@ const ExistingDeviceApproval = ({ services }: { services: SyncUiServices }) => {
   );
 };
 
-const UnavailableBetaStep = ({ title, description }: { title: string; description: string }) => (
-  <div className="flex items-start gap-3 p-4 opacity-70" aria-disabled="true">
-    <CloudCog size={19} className="mt-0.5 shrink-0 text-muted" aria-hidden="true" />
-    <div className="min-w-0">
-      <p className="font-bold">{title}</p>
-      <p className="mt-1 text-xs leading-5 text-muted">{description}</p>
-      <StatusBadge className="mt-2">Nije dostupno u ovoj beta fazi</StatusBadge>
-    </div>
-  </div>
-);
-
 const ActivePanel = ({
   status,
   services,
@@ -813,9 +802,17 @@ const ActivePanel = ({
     mutationGroupId: string;
     selection: 'local' | 'remote';
   }>();
+  const [renewDeviceId, setRenewDeviceId] = useState<string>();
+  const [revokeDeviceId, setRevokeDeviceId] = useState<string>();
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [revokeConfirmation, setRevokeConfirmation] = useState('');
+  const [showCloudDelete, setShowCloudDelete] = useState(false);
+  const [cloudRecoveryCode, setCloudRecoveryCode] = useState('');
+  const [cloudDeleteConfirmation, setCloudDeleteConfirmation] = useState('');
   const { setup } = status;
   const authorizationExpired = Date.parse(setup.device.authorizationExpiresAt) <= Date.now();
   const disablePhrase = 'ISKLJUČI OVAJ UREĐAJ';
+  const revokePhrase = 'OPOZOVI UREĐAJ';
 
   const synchronize = async (allowInitialUpload = false, forceCompaction = false) => {
     if (busy) return;
@@ -899,6 +896,73 @@ const ActivePanel = ({
     );
     success('Rezolucija je sačuvana kao nova lokalna sync operacija.');
     await onChanged();
+  };
+
+  const renewDevice = async () => {
+    if (!renewDeviceId || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await services.renewDevice(renewDeviceId);
+      success('Ovlašćenje uređaja je obnovljeno u potpisanom manifestu.');
+      setRenewDeviceId(undefined);
+      await onChanged();
+    } catch (caught) {
+      setError(safeErrorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeDevice = async () => {
+    if (
+      !revokeDeviceId ||
+      busy ||
+      recoveryCode.length === 0 ||
+      revokeConfirmation !== revokePhrase
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await services.secureRevokeDevice(revokeDeviceId, recoveryCode);
+      success('Uređaj je opozvan, ključ rotiran i novi šifrovani snapshot je potvrđen.');
+      setRevokeDeviceId(undefined);
+      setRecoveryCode('');
+      setRevokeConfirmation('');
+      await onChanged();
+    } catch (caught) {
+      setRecoveryCode('');
+      setError(safeErrorMessage(caught));
+      await onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteCloudVault = async () => {
+    if (
+      busy ||
+      cloudRecoveryCode.length === 0 ||
+      cloudDeleteConfirmation !== CLOUD_VAULT_DELETE_CONFIRMATION
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await services.deleteCloudVault(cloudRecoveryCode, cloudDeleteConfirmation);
+      setCloudRecoveryCode('');
+      setCloudDeleteConfirmation('');
+      success('Šifrovani cloud trezor je obrisan. Lokalni finansijski podaci su sačuvani.');
+      await onDisabled();
+    } catch (caught) {
+      setCloudRecoveryCode('');
+      setError(safeErrorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -1061,19 +1125,109 @@ const ActivePanel = ({
           </p>
         </div>
         <ul className="divide-y">
-          {setup.vault.manifest.devices.map((device) => (
-            <li key={device.deviceId} className="flex min-w-0 items-center gap-3 p-4 text-sm">
-              <Smartphone size={18} className="shrink-0 text-muted" aria-hidden="true" />
-              <span className="min-w-0 flex-1 font-mono font-bold">
-                {truncateOpaqueId(device.deviceId)}
-              </span>
-              {device.deviceId === setup.device.deviceId ? (
-                <StatusBadge tone="positive">Ovaj uređaj</StatusBadge>
-              ) : null}
-            </li>
-          ))}
+          {setup.vault.manifest.devices.map((device) => {
+            const isLocal = device.deviceId === setup.device.deviceId;
+            const expiringSoon =
+              Date.parse(device.authorizationExpiresAt) - Date.now() <= 5 * 24 * 60 * 60 * 1_000;
+            return (
+              <li key={device.deviceId} className="grid min-w-0 gap-3 p-4 text-sm">
+                <div className="flex min-w-0 items-center gap-3">
+                  <Smartphone size={18} className="shrink-0 text-muted" aria-hidden="true" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-mono font-bold">{truncateOpaqueId(device.deviceId)}</p>
+                    <p className="mt-1 text-xs text-muted">
+                      Ovlašćen do {formatDateTime(device.authorizationExpiresAt)}
+                    </p>
+                  </div>
+                  {isLocal ? <StatusBadge tone="positive">Ovaj uređaj</StatusBadge> : null}
+                  {expiringSoon ? <StatusBadge tone="warning">Obnova uskoro</StatusBadge> : null}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => setRenewDeviceId(device.deviceId)}
+                  >
+                    <RefreshCw size={16} aria-hidden="true" /> Obnovi 30 dana
+                  </Button>
+                  {!isLocal ? (
+                    <Button
+                      variant="danger"
+                      disabled={busy}
+                      onClick={() => {
+                        setRevokeDeviceId(device.deviceId);
+                        setRecoveryCode('');
+                        setRevokeConfirmation('');
+                      }}
+                    >
+                      <ShieldX size={16} aria-hidden="true" /> Bezbedno opozovi
+                    </Button>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       </Card>
+
+      {revokeDeviceId ? (
+        <Card className="grid gap-4 border-danger/30">
+          <div>
+            <SectionTitle>Bezbedno opozivanje i rotacija ključa</SectionTitle>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Server će blokirati buduće sesije uređaja {truncateOpaqueId(revokeDeviceId)}. Mirna
+              pravi potpuno novi nasumični master ključ, deli ga samo preostalim uređajima i odmah
+              šalje novi šifrovani snapshot.
+            </p>
+            <p className="mt-2 text-sm leading-6 text-danger">
+              Ovo ne može obrisati čitljive podatke ili stare ključeve koji su već ostali na
+              izgubljenom uređaju.
+            </p>
+          </div>
+          <Field
+            label="Recovery kod"
+            hint="Kod se koristi lokalno za potvrdu i nikada se ne šalje serveru."
+          >
+            <Input
+              aria-label="Recovery kod"
+              value={recoveryCode}
+              onChange={(event) => setRecoveryCode(event.target.value.trim())}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label={`Za potvrdu unesite: ${revokePhrase}`}>
+            <Input
+              aria-label={`Za potvrdu unesite: ${revokePhrase}`}
+              value={revokeConfirmation}
+              onChange={(event) => setRevokeConfirmation(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Button
+              variant="danger"
+              disabled={busy || recoveryCode.length === 0 || revokeConfirmation !== revokePhrase}
+              onClick={() => void revokeDevice()}
+            >
+              {busy ? <BusyIcon /> : <TriangleAlert size={17} aria-hidden="true" />}
+              Opozovi i rotiraj ključ
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setRevokeDeviceId(undefined);
+                setRecoveryCode('');
+                setRevokeConfirmation('');
+              }}
+            >
+              Odustani
+            </Button>
+          </div>
+        </Card>
+      ) : null}
 
       <ConfirmDialog
         open={Boolean(conflictResolution)}
@@ -1091,17 +1245,82 @@ const ActivePanel = ({
         onConfirm={resolveConflict}
       />
 
+      <ConfirmDialog
+        open={Boolean(renewDeviceId)}
+        onOpenChange={(open) => {
+          if (!open) setRenewDeviceId(undefined);
+        }}
+        title="Obnovite ovlašćenje uređaja"
+        description="Biće upisana nova potpisana verzija manifesta i novo ovlašćenje od 30 dana. Ključevi uređaja se ne menjaju."
+        confirmLabel="Obnovi ovlašćenje"
+        onConfirm={renewDevice}
+      />
+
       <ExistingDeviceApproval services={services} />
 
-      <Card className="divide-y p-0">
-        <UnavailableBetaStep
-          title="Obnovi ili opozovi udaljeni uređaj"
-          description="Manifest radnje postoje u protokolu, ali ovaj Phase 1 ekran ih još ne izvršava."
-        />
-        <UnavailableBetaStep
-          title="Obriši šifrovane podatke iz cloud-a"
-          description="Cloud brisanje nije implementirano; lokalno isključivanje ispod nije isto što i cloud brisanje."
-        />
+      <Card className="grid gap-4 border-danger/25">
+        <div>
+          <SectionTitle>Obriši šifrovani cloud trezor</SectionTitle>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            Briše R2 snapshot objekte i D1 operacije, manifeste, sesije, zahteve za uparivanje,
+            recovery omot, uređaje i operativne metapodatke. Server zadržava samo kratkotrajni
+            nečitljivi tombstone za bezbedan retry.
+          </p>
+          <p className="mt-2 text-sm font-semibold text-danger">
+            Lokalni Mirna finansijski podaci se ne brišu. Ova radnja ne može da se poništi.
+          </p>
+        </div>
+        {!showCloudDelete ? (
+          <Button variant="danger" disabled={busy} onClick={() => setShowCloudDelete(true)}>
+            <TriangleAlert size={17} aria-hidden="true" /> Pripremi cloud brisanje
+          </Button>
+        ) : (
+          <div className="grid gap-3 rounded-xl bg-danger-soft p-3">
+            <Field label="Recovery kod za cloud brisanje">
+              <Input
+                aria-label="Recovery kod za cloud brisanje"
+                value={cloudRecoveryCode}
+                onChange={(event) => setCloudRecoveryCode(event.target.value.trim())}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </Field>
+            <Field label={`Za potvrdu unesite: ${CLOUD_VAULT_DELETE_CONFIRMATION}`}>
+              <Input
+                aria-label={`Za potvrdu unesite: ${CLOUD_VAULT_DELETE_CONFIRMATION}`}
+                value={cloudDeleteConfirmation}
+                onChange={(event) => setCloudDeleteConfirmation(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </Field>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Button
+                variant="danger"
+                disabled={
+                  busy ||
+                  cloudRecoveryCode.length === 0 ||
+                  cloudDeleteConfirmation !== CLOUD_VAULT_DELETE_CONFIRMATION
+                }
+                onClick={() => void deleteCloudVault()}
+              >
+                {busy ? <BusyIcon /> : <TriangleAlert size={17} aria-hidden="true" />}
+                Trajno obriši cloud trezor
+              </Button>
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setShowCloudDelete(false);
+                  setCloudRecoveryCode('');
+                  setCloudDeleteConfirmation('');
+                }}
+              >
+                Odustani
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
 
       {preOnboarding ? (

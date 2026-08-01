@@ -16,6 +16,10 @@ import {
   authChallengeSchema,
   authSessionRequestSchema,
   authSessionResponseSchema,
+  deviceKeyEnvelopeResponseSchema,
+  deviceRenewRequestSchema,
+  deviceRenewResponseSchema,
+  manifestChangesResponseSchema,
   opaqueIdSchema,
   pairingApprovalSchema,
   pairingCandidateSchema,
@@ -32,8 +36,12 @@ import {
   recoveryChallengeSchema,
   recoveryCompleteRequestSchema,
   recoveryCompleteResponseSchema,
+  secureDeviceRevocationRequestSchema,
+  secureDeviceRevocationResponseSchema,
   vaultCreateRequestSchema,
   vaultCreateResponseSchema,
+  vaultDeletionRequestSchema,
+  vaultDeletionResponseSchema,
   vaultManifestSchema,
 } from '@/domain/sync/schemas';
 import {
@@ -104,12 +112,21 @@ const REMOTE_ERROR_CODES = new Set([
   'CHALLENGE_INVALID',
   'CHALLENGE_REUSED',
   'DEVICE_AUTHORIZATION_REQUIRED',
+  'DEVICE_KEY_ENVELOPE_NOT_FOUND',
+  'DEVICE_KEY_ENVELOPE_SET_INVALID',
   'DEVICE_LIMIT_REACHED',
+  'DEVICE_RENEWAL_CONTEXT_MISMATCH',
+  'DELETION_CONTEXT_MISMATCH',
+  'DELETION_IDEMPOTENCY_REUSED',
+  'DELETION_JOB_NOT_FOUND',
+  'DELETION_SIGNATURE_INVALID',
+  'DELETION_STATE_CHANGED',
   'INTERNAL_ERROR',
   'INVALID_JSON',
   'INVALID_PUBLIC_KEY',
   'INVALID_REQUEST',
   'MANIFEST_INVALID',
+  'MANIFEST_CURSOR_INVALID',
   'MANIFEST_STATE_CHANGED',
   'METHOD_NOT_ALLOWED',
   'NEW_RECOVERY_BINDING_INVALID',
@@ -155,6 +172,11 @@ const REMOTE_ERROR_CODES = new Set([
   'REQUEST_LENGTH_MISMATCH',
   'RESOURCE_NOT_FOUND',
   'ROUTE_NOT_FOUND',
+  'SECURE_REVOCATION_CONTEXT_MISMATCH',
+  'SECURE_REVOCATION_HASH_MISMATCH',
+  'SECURE_REVOCATION_SIGNATURE_INVALID',
+  'SECURE_REVOCATION_STATE_CHANGED',
+  'SECURITY_TRANSITION_ID_REUSED',
   'SIGNATURE_INVALID',
   'STALE_JOB_RETRY_REQUIRED',
   'STORAGE_QUOTA_REACHED',
@@ -188,6 +210,9 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   RESPONSE_TOO_LARGE: 'Odgovor servisa je veći od dozvoljenog.',
   PROTOCOL_MISMATCH: 'Potrebna je novija verzija aplikacije.',
   PROTOCOL_UPGRADE_REQUIRED: 'Potrebna je novija verzija aplikacije.',
+  DEVICE_AUTHORIZATION_REQUIRED:
+    'Ovlašćenje ovog uređaja je isteklo ili je opozvano. Obnovite ga sa drugog aktivnog uređaja.',
+  AUTHENTICATION_REQUIRED: 'Sync sesija je istekla. Uređaj će ponovo potvrditi svoj potpis.',
   REMOTE_ERROR: 'Zahtev za sinhronizaciju nije uspeo.',
 };
 
@@ -204,23 +229,33 @@ export class SyncApiError extends Error {
 
 class MemoryAccessSession {
   #token: string | null = null;
+  #expiresAt = 0;
 
-  set(token: string): void {
+  set(token: string, expiresAt: string): void {
     if (!ACCESS_TOKEN.test(token)) throw new SyncApiError('INVALID_RESPONSE');
+    const expiry = Date.parse(expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) {
+      throw new SyncApiError('INVALID_RESPONSE');
+    }
     this.#token = token;
+    this.#expiresAt = expiry;
   }
 
   authorization(): string {
-    if (this.#token === null) throw new SyncApiError('SESSION_REQUIRED');
+    if (!this.active || this.#token === null) {
+      this.clear();
+      throw new SyncApiError('SESSION_REQUIRED');
+    }
     return `Bearer ${this.#token}`;
   }
 
   clear(): void {
     this.#token = null;
+    this.#expiresAt = 0;
   }
 
   get active(): boolean {
-    return this.#token !== null;
+    return this.#token !== null && Date.now() < this.#expiresAt;
   }
 }
 
@@ -353,7 +388,7 @@ export interface SyncApiClientOptions {
 }
 
 interface RequestSpec<T> {
-  readonly method: 'GET' | 'POST' | 'PUT';
+  readonly method: 'DELETE' | 'GET' | 'POST' | 'PUT';
   readonly path: string;
   readonly responseSchema: ZodType<T>;
   readonly expectedStatuses: readonly number[];
@@ -388,6 +423,8 @@ export const SYNC_PHASE_ONE_ROUTES = Object.freeze({
   operations: '/v1/operations',
   changes: '/v1/changes',
   acknowledgements: '/v1/acks',
+  currentDeviceKeyEnvelope: '/v1/key-epochs/current',
+  manifests: '/v1/manifests',
 });
 
 export class MirnaSyncApi {
@@ -467,7 +504,7 @@ export class MirnaSyncApi {
       false,
       options,
     );
-    this.#session.set(response.accessToken);
+    this.#session.set(response.accessToken, response.expiresAt);
     return Object.freeze({
       expiresAt: response.expiresAt,
       authorizationExpiresAt: response.authorizationExpiresAt,
@@ -578,6 +615,109 @@ export class MirnaSyncApi {
         path: SYNC_PHASE_ONE_ROUTES.currentManifest,
         responseSchema: vaultManifestSchema,
         expectedStatuses: [200],
+        authenticated: true,
+      },
+      options,
+    );
+  }
+
+  async renewDevice(
+    deviceId: string,
+    input: z.input<typeof deviceRenewRequestSchema>,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof deviceRenewResponseSchema>> {
+    return this.#post(
+      `/v1/devices/${exactOpaqueId(deviceId)}/renew`,
+      deviceRenewRequestSchema,
+      deviceRenewResponseSchema,
+      input,
+      [201],
+      true,
+      options,
+    );
+  }
+
+  async secureRevokeDevice(
+    deviceId: string,
+    input: z.input<typeof secureDeviceRevocationRequestSchema>,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof secureDeviceRevocationResponseSchema>> {
+    return this.#post(
+      `/v1/devices/${exactOpaqueId(deviceId)}/revoke`,
+      secureDeviceRevocationRequestSchema,
+      secureDeviceRevocationResponseSchema,
+      input,
+      [201],
+      true,
+      options,
+    );
+  }
+
+  async getCurrentDeviceKeyEnvelope(
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof deviceKeyEnvelopeResponseSchema>> {
+    return this.#request(
+      {
+        method: 'GET',
+        path: SYNC_PHASE_ONE_ROUTES.currentDeviceKeyEnvelope,
+        responseSchema: deviceKeyEnvelopeResponseSchema,
+        expectedStatuses: [200],
+        authenticated: true,
+      },
+      options,
+    );
+  }
+
+  async getDeviceKeyEnvelope(
+    keyEpoch: number,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof deviceKeyEnvelopeResponseSchema>> {
+    if (!Number.isSafeInteger(keyEpoch) || keyEpoch < 2) {
+      throw new SyncApiError('INVALID_CLIENT_REQUEST');
+    }
+    return this.#request(
+      {
+        method: 'GET',
+        path: `/v1/key-epochs/${keyEpoch}`,
+        responseSchema: deviceKeyEnvelopeResponseSchema,
+        expectedStatuses: [200],
+        authenticated: true,
+      },
+      options,
+    );
+  }
+
+  async getManifestChanges(
+    afterManifestVersion: number,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof manifestChangesResponseSchema>> {
+    if (!Number.isSafeInteger(afterManifestVersion) || afterManifestVersion < 1) {
+      throw new SyncApiError('INVALID_CLIENT_REQUEST');
+    }
+    return this.#request(
+      {
+        method: 'GET',
+        path: `${SYNC_PHASE_ONE_ROUTES.manifests}?after=${afterManifestVersion}`,
+        responseSchema: manifestChangesResponseSchema,
+        expectedStatuses: [200],
+        authenticated: true,
+        responseLimitBytes: RECOVERY_RESPONSE_LIMIT_BYTES,
+      },
+      options,
+    );
+  }
+
+  async deleteVault(
+    input: z.input<typeof vaultDeletionRequestSchema>,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof vaultDeletionResponseSchema>> {
+    return this.#request(
+      {
+        method: 'DELETE',
+        path: '/v1/vault',
+        responseSchema: vaultDeletionResponseSchema,
+        expectedStatuses: [200, 202],
+        body: serializeRequest(vaultDeletionRequestSchema, input),
         authenticated: true,
       },
       options,

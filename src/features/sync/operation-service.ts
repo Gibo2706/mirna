@@ -31,6 +31,7 @@ import type { MirnaSyncApi } from './api';
 const MAX_PULL_PAGES_PER_RUN = 100;
 
 export interface OperationSyncApiPort {
+  readonly hasActiveSession?: boolean;
   requestAuthChallenge(input: {
     protocolVersion: typeof SYNC_PROTOCOL_VERSION;
     suite: typeof SYNC_CRYPTO_SUITE;
@@ -129,11 +130,7 @@ export class OperationSyncService {
       const setup = await this.#repository.readSetup();
       if (!setup) throw new Error('Sinhronizacija nije uključena na ovom uređaju.');
       await this.#authenticate(setup);
-      try {
-        return await this.#acknowledgeCurrent(setup);
-      } finally {
-        this.#api.clearSession();
-      }
+      return this.#acknowledgeCurrent(setup);
     });
     this.#queue = operation.then(
       () => undefined,
@@ -150,6 +147,28 @@ export class OperationSyncService {
       setup.vaultKey.encryptedKey,
       setup.device.localWrappingKey,
     );
+    const epochKeys = new Map<number, Uint8Array>([[setup.vault.keyEpoch, vaultMasterKey]]);
+    const keyForEpoch = async (keyEpoch: number): Promise<Uint8Array> => {
+      const cached = epochKeys.get(keyEpoch);
+      if (cached) return cached;
+      if (keyEpoch >= setup.vault.keyEpoch) {
+        throw new Error('Operacija koristi nedostupnu buduću epohu ključa.');
+      }
+      const stored = await this.#repository.readVaultKey(setup.vault.vaultId, keyEpoch);
+      if (!stored || stored.retiredAt === undefined) {
+        throw new Error('Istorijski ključ za prihvaćenu operaciju nije dostupan.');
+      }
+      const opened = await openEncryptedKeyEnvelope(
+        stored.encryptedKey,
+        setup.device.localWrappingKey,
+      );
+      if (opened.byteLength !== SYNC_LIMITS.vaultMasterKeyBytes) {
+        clearBytes(opened);
+        throw new Error('Istorijski ključ nema očekivanu dužinu.');
+      }
+      epochKeys.set(keyEpoch, opened);
+      return opened;
+    };
     let uploaded = 0;
     let downloaded = 0;
     let appliedGroups = 0;
@@ -198,8 +217,8 @@ export class OperationSyncService {
         const page = await this.#api.getChanges(cursor, SYNC_LIMITS.maxOperationsPerBatch);
         if (page.nextCursor < cursor) throw new Error('Server cursor pokušava rollback.');
         const opened = await Promise.all(
-          page.changes.map((accepted) =>
-            this.#openRemoteOperation(setup, vaultMasterKey, accepted),
+          page.changes.map(async (accepted) =>
+            this.#openRemoteOperation(setup, await keyForEpoch(accepted.keyEpoch), accepted),
           ),
         );
         await this.#repository.stageRemoteOperations(setup, opened, page.nextCursor);
@@ -217,7 +236,7 @@ export class OperationSyncService {
         let progressed = false;
         for (const records of groups) {
           const opened = await Promise.all(
-            records.map((record) => this.#openInboxOperation(setup, vaultMasterKey, record)),
+            records.map((record) => this.#openInboxOperation(setup, keyForEpoch, record)),
           );
           const result = await this.#repository.applyRemoteGroup(setup, opened);
           if (result === 'applied') appliedGroups += 1;
@@ -243,8 +262,7 @@ export class OperationSyncService {
         acknowledgedServerCursor,
       };
     } finally {
-      clearBytes(vaultMasterKey);
-      this.#api.clearSession();
+      clearBytes(...epochKeys.values());
     }
   }
 
@@ -267,6 +285,7 @@ export class OperationSyncService {
   }
 
   async #authenticate(setup: LocalSyncSetup): Promise<void> {
+    if (this.#api.hasActiveSession === true) return;
     const challenge = authChallengeSchema.parse(
       await this.#api.requestAuthChallenge({
         protocolVersion: SYNC_PROTOCOL_VERSION,
@@ -316,7 +335,7 @@ export class OperationSyncService {
       signingPublicKey: await importSigningPublicKey(manifestDevice.publicKeys.signing),
       expected: {
         vaultId: setup.vault.vaultId,
-        keyEpoch: setup.vault.keyEpoch,
+        keyEpoch: envelope.keyEpoch,
         deviceId: envelope.deviceId,
       },
     });
@@ -325,13 +344,15 @@ export class OperationSyncService {
 
   #openInboxOperation(
     setup: LocalSyncSetup,
-    vaultMasterKey: Uint8Array,
+    keyForEpoch: (keyEpoch: number) => Promise<Uint8Array>,
     record: SyncInboxRecord,
   ): Promise<OpenedRemoteOperation> {
     const envelope = parseOperationEnvelope(JSON.parse(record.encryptedEnvelope) as unknown);
-    return this.#openRemoteOperation(setup, vaultMasterKey, {
-      ...envelope,
-      serverCursor: record.serverCursor,
-    });
+    return keyForEpoch(envelope.keyEpoch).then((vaultMasterKey) =>
+      this.#openRemoteOperation(setup, vaultMasterKey, {
+        ...envelope,
+        serverCursor: record.serverCursor,
+      }),
+    );
   }
 }

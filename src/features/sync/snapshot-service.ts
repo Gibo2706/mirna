@@ -67,6 +67,7 @@ export interface SnapshotSyncOptions {
 }
 
 export interface SnapshotSyncApiPort {
+  readonly hasActiveSession?: boolean;
   requestAuthChallenge(input: {
     protocolVersion: typeof SYNC_PROTOCOL_VERSION;
     suite: typeof SYNC_CRYPTO_SUITE;
@@ -141,6 +142,7 @@ const metadataChanges = (
   lastSnapshotContentHash: metadata.lastSnapshotContentHash,
   lastManifestHash: metadata.lastManifestHash,
   lastLocalDataHash: metadata.lastLocalDataHash,
+  pendingKeyRotationSnapshotEpoch: metadata.pendingKeyRotationSnapshotEpoch,
   ...overrides,
 });
 
@@ -229,11 +231,11 @@ export class SnapshotSyncService {
       return await this.#acceptOrAdvance(setup, vaultMasterKey, remote, options);
     } finally {
       clearBytes(vaultMasterKey);
-      this.#api.clearSession();
     }
   }
 
   async #authenticate(setup: LocalSyncSetup): Promise<void> {
+    if (this.#api.hasActiveSession === true) return;
     const challenge = authChallengeSchema.parse(
       await this.#api.requestAuthChallenge({
         protocolVersion: SYNC_PROTOCOL_VERSION,
@@ -504,6 +506,7 @@ export class SnapshotSyncService {
           lastSnapshotHash: remoteHash,
           lastSnapshotContentHash: snapshot.contentIntegrityHash,
           lastLocalDataHash: localDataHash,
+          pendingKeyRotationSnapshotEpoch: undefined,
           lastSyncAt: syncedAt,
           lastSuccessfulSyncAt: syncedAt,
           lastErrorCode: undefined,
@@ -542,6 +545,7 @@ export class SnapshotSyncService {
         lastSnapshotHash: remoteHash,
         lastSnapshotContentHash: snapshot.contentIntegrityHash,
         lastLocalDataHash: acceptedDataHash,
+        pendingKeyRotationSnapshotEpoch: undefined,
         lastSyncAt: syncedAt,
         lastSuccessfulSyncAt: syncedAt,
         lastErrorCode: undefined,
@@ -608,9 +612,8 @@ export class SnapshotSyncService {
         );
       }
       const syncedAt = this.#now().toISOString();
-      await this.#repository.updateMetadata(
-        setup.vault.vaultId,
-        setup.metadata.lastSnapshotRevision,
+      await this.#repository.commitLocalSnapshot(
+        setup,
         metadataChanges(setup.metadata, {
           firstUploadConsent: 'accepted',
           lastServerCursor: causalFrontier.serverCursor,
@@ -620,13 +623,35 @@ export class SnapshotSyncService {
           lastSnapshotHash: snapshotHash,
           lastSnapshotContentHash: artifact.snapshotContentHash,
           lastLocalDataHash: dataHash,
+          pendingKeyRotationSnapshotEpoch: undefined,
           lastSyncAt: syncedAt,
           lastSuccessfulSyncAt: syncedAt,
           lastErrorCode: undefined,
           syncBlockReason: undefined,
         }),
+        entityStates,
       );
       return { kind: 'uploaded', revision: artifact.envelope.revision };
+    } catch (error) {
+      if (
+        !initialUpload &&
+        error instanceof SyncApiError &&
+        error.status === 409 &&
+        error.code === 'SNAPSHOT_ACK_PENDING'
+      ) {
+        const syncedAt = this.#now().toISOString();
+        await this.#repository.updateMetadata(
+          setup.vault.vaultId,
+          setup.metadata.lastSnapshotRevision,
+          metadataChanges(setup.metadata, {
+            lastSyncAt: syncedAt,
+            lastSuccessfulSyncAt: syncedAt,
+            lastErrorCode: undefined,
+          }),
+        );
+        return { kind: 'up-to-date', revision: setup.metadata.lastSnapshotRevision };
+      }
+      throw error;
     } finally {
       clearBytes(artifact.ciphertext);
     }

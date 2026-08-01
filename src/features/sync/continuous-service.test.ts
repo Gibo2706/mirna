@@ -157,4 +157,25 @@ describe('continuous encrypted sync orchestration', () => {
     });
     expect(ports.operations.acknowledge).not.toHaveBeenCalled();
   });
+
+  it('defers snapshot reconciliation and server ACK while a conflict awaits resolution', async () => {
+    const ports = createPorts({
+      stats: { operationCount: 4, encryptedBytes: 1_024, pendingConflictCount: 1 },
+    });
+    vi.mocked(ports.operations.synchronize).mockResolvedValue({
+      ...operationResult,
+      conflictedGroups: 1,
+    });
+    const service = new ContinuousSyncService(ports);
+
+    await expect(service.synchronize({ forceCompaction: true })).resolves.toMatchObject({
+      kind: 'synchronized',
+      revision: 2,
+      conflictedGroups: 1,
+      compacted: false,
+      acknowledgedServerCursor: 8,
+    });
+    expect(ports.snapshots.synchronize).not.toHaveBeenCalled();
+    expect(ports.operations.acknowledge).not.toHaveBeenCalled();
+  });
 });

@@ -25,6 +25,7 @@ import { SnapshotSyncService } from './snapshot-service';
 import { OperationSyncService } from './operation-service';
 import { ContinuousSyncService, type ContinuousSyncResult } from './continuous-service';
 import { SyncOperationRepository } from '@/db/sync/operation-repository';
+import { DeviceSecurityService } from './device-security-service';
 
 type CryptoCapability = Awaited<ReturnType<typeof probeIndexedDbCryptoKeyPersistence>>;
 
@@ -74,6 +75,9 @@ export interface SyncUiServices {
     allowInitialUpload?: boolean,
     forceCompaction?: boolean,
   ) => Promise<ContinuousSyncResult>;
+  readonly renewDevice: (deviceId: string) => Promise<void>;
+  readonly secureRevokeDevice: (deviceId: string, recoveryCode: string) => Promise<void>;
+  readonly deleteCloudVault: (recoveryCode: string, typedConfirmation: string) => Promise<void>;
   readonly createEnableLifecycle: () => EnableLifecyclePort;
   readonly createNewDevicePairingLifecycle: () => NewDevicePairingLifecyclePort;
   readonly createExistingDevicePairingLifecycle: () => ExistingDevicePairingLifecyclePort;
@@ -113,23 +117,26 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
   if (!config.enabled) throw new Error('Beta sinhronizacija nije uključena.');
 
   const api = new MirnaSyncApi(config);
-  const snapshotApi = new MirnaSyncApi(config);
-  const operationApi = new MirnaSyncApi(config);
   const dependencies = { api, origin: window.location.origin } as const;
   const operationRepository = new SyncOperationRepository();
   const conflictRepository = new SyncConflictRepository();
   const snapshotService = new SnapshotSyncService({
-    api: snapshotApi,
+    api,
     origin: window.location.origin,
   });
   const operationService = new OperationSyncService({
-    api: operationApi,
+    api,
     origin: window.location.origin,
     repository: operationRepository,
+  });
+  const securityService = new DeviceSecurityService({
+    api,
+    origin: window.location.origin,
   });
   const continuousService = new ContinuousSyncService({
     operations: operationService,
     snapshots: snapshotService,
+    security: securityService,
     repository: operationRepository,
   });
 
@@ -157,11 +164,26 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
     disableLocalDevice: disableSyncOnThisDevice,
     clearSession: () => {
       api.clearSession();
-      snapshotApi.clearSession();
-      operationApi.clearSession();
     },
     synchronize: (allowInitialUpload = false, forceCompaction = false) =>
       continuousService.synchronize({ allowInitialUpload, forceCompaction }),
+    renewDevice: async (deviceId) => {
+      await securityService.renewDevice(deviceId);
+    },
+    secureRevokeDevice: async (deviceId, recoveryCode) => {
+      await securityService.secureRevokeDevice(deviceId, recoveryCode);
+      const result = await continuousService.synchronize({ forceCompaction: true });
+      if (result.kind !== 'synchronized' || !result.compacted) {
+        throw new Error(
+          'Uređaj je opozvan i ključ je rotiran, ali novi cloud snimak još nije potvrđen. Pokrenite sync ponovo.',
+        );
+      }
+    },
+    deleteCloudVault: async (recoveryCode, typedConfirmation) => {
+      await securityService.deleteCloudVault(recoveryCode, typedConfirmation);
+      api.clearSession();
+      await disableSyncOnThisDevice();
+    },
     resolveConflictGroup: (vaultId, mutationGroupId, selection) =>
       conflictRepository.resolveOperationGroup(vaultId, mutationGroupId, selection),
     createEnableLifecycle: () => new EnableSyncLifecycle(dependencies),

@@ -118,10 +118,14 @@ const worker: ExportedHandler<Env> = {
       return await fetchHandler(request, env, requestId, allowedOrigin);
     } catch (error) {
       if (error instanceof HttpError) {
+        const allowedMethods = allowedMethodsForPath(new URL(request.url).pathname);
         return errorResponse(error.code, error.message, error.status, {
           requestId,
           allowedOrigin,
-          headers: error.status === 405 ? { Allow: 'GET, POST, OPTIONS' } : undefined,
+          headers:
+            error.status === 405 && allowedMethods
+              ? { Allow: [...allowedMethods, 'OPTIONS'].join(', ') }
+              : undefined,
         });
       }
       return errorResponse('INTERNAL_ERROR', 'Request could not be processed.', 500, {

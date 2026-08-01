@@ -326,6 +326,19 @@ export const syncOperationSchema = z
     deviceSequence: positiveSafeSequenceSchema,
     lamportTime: positiveSafeSequenceSchema,
     causalFrontier: causalFrontierSchema,
+    resolvesOperationIds: z
+      .array(opaqueIdSchema)
+      .min(1)
+      .max(20)
+      .refine(
+        (operationIds) =>
+          new Set(operationIds).size === operationIds.length &&
+          operationIds.every((operationId, index) =>
+            index === 0 ? true : operationIds[index - 1] < operationId,
+          ),
+        'Reference razrešenih operacija moraju biti jedinstvene i sortirane.',
+      )
+      .optional(),
     command: syncCommandSchema,
     previousOperationHash: sha256Schema.nullable(),
     keyEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),

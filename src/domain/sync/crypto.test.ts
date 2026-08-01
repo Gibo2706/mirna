@@ -13,6 +13,7 @@ import {
   createRecoveryCode,
   createRecoveryProof,
   decryptAesGcm,
+  deriveDeviceEnvelopeWrappingKey,
   deriveObjectEncryptionKey,
   derivePairingAgreementKeys,
   derivePairingSecrets,
@@ -199,6 +200,56 @@ describe('Mirna sync Web Crypto suite', () => {
         runtime,
       ),
     ).toBe(false);
+  });
+
+  it('derives recipient-bound epoch envelope keys on both devices', async () => {
+    const sender = await generateDeviceKeyPairs(runtime);
+    const recipient = await generateDeviceKeyPairs(runtime);
+    const salt = fixed(32, 77);
+    const context = {
+      vaultId,
+      keyEpoch: 2,
+      senderDeviceId: createOpaqueId(runtime),
+      recipientDeviceId: createOpaqueId(runtime),
+      parentManifestHash: bytesToBase64Url(fixed(32, 109)),
+    };
+    const [senderKey, recipientKey] = await Promise.all([
+      deriveDeviceEnvelopeWrappingKey(
+        sender.agreement.privateKey,
+        recipient.agreement.publicKey,
+        salt,
+        context,
+        runtime,
+      ),
+      deriveDeviceEnvelopeWrappingKey(
+        recipient.agreement.privateKey,
+        sender.agreement.publicKey,
+        salt,
+        context,
+        runtime,
+      ),
+    ]);
+    const nonce = fixed(12, 14);
+    const ciphertext = await encryptAesGcm(
+      utf8('new random VMK'),
+      senderKey,
+      nonce,
+      context,
+      runtime,
+    );
+    expect(
+      bytesToBase64Url(await decryptAesGcm(ciphertext, recipientKey, nonce, context, runtime)),
+    ).toBe(bytesToBase64Url(utf8('new random VMK')));
+    const wrongRecipientKey = await deriveDeviceEnvelopeWrappingKey(
+      recipient.agreement.privateKey,
+      sender.agreement.publicKey,
+      salt,
+      { ...context, recipientDeviceId: createOpaqueId(runtime) },
+      runtime,
+    );
+    await expect(
+      decryptAesGcm(ciphertext, wrongRecipientKey, nonce, context, runtime),
+    ).rejects.toThrow();
   });
 
   it('derives object-specific keys and authenticates every AAD field', async () => {

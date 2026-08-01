@@ -3,6 +3,7 @@ import { manifestBodyHash, verifyInitialManifest } from '../../../src/domain/syn
 import {
   vaultCreateRequestSchema,
   vaultCreateResponseSchema,
+  manifestChangesResponseSchema,
   type RecoveryRecordV1,
   type VaultManifestV1,
 } from '../../../src/domain/sync/schemas';
@@ -303,4 +304,48 @@ export const handleGetCurrentManifest = async (
     requestId: context.requestId,
     allowedOrigin: context.allowedOrigin,
   });
+};
+
+export const handleGetManifestChanges = async (
+  context: RequestContext,
+  authenticated: AuthenticatedDevice,
+): Promise<Response> => {
+  const rawAfter = new URL(context.request.url).searchParams.get('after');
+  if (rawAfter === null || !/^[1-9][0-9]*$/u.test(rawAfter)) {
+    throw new HttpError(400, 'INVALID_REQUEST', 'Manifest cursor is invalid.');
+  }
+  const after = Number(rawAfter);
+  if (!Number.isSafeInteger(after)) {
+    throw new HttpError(400, 'INVALID_REQUEST', 'Manifest cursor is invalid.');
+  }
+  const currentVersion = await context.env.MIRNA_SYNC_DB.prepare(
+    `SELECT current_manifest_version FROM vaults
+      WHERE vault_id = ?1 AND status = 'active' LIMIT 1`,
+  )
+    .bind(authenticated.vaultId)
+    .first<number>('current_manifest_version');
+  if (currentVersion === null || after > currentVersion) {
+    throw conflict('MANIFEST_CURSOR_INVALID', 'Manifest cursor is ahead of current state.');
+  }
+  const rows = await context.env.MIRNA_SYNC_DB.prepare(
+    `SELECT manifest_version, canonical_manifest
+       FROM vault_manifests
+      WHERE vault_id = ?1
+        AND manifest_version > ?2
+        AND manifest_version <= ?3
+      ORDER BY manifest_version
+      LIMIT 26`,
+  )
+    .bind(authenticated.vaultId, after, currentVersion)
+    .all<{ manifest_version: number; canonical_manifest: string }>();
+  const page = rows.results.slice(0, 25);
+  return jsonResponse(
+    manifestChangesResponseSchema.parse({
+      protocolVersion: 1,
+      manifests: page.map((row) => JSON.parse(row.canonical_manifest) as unknown),
+      nextAfterManifestVersion:
+        rows.results.length > page.length ? (page.at(-1)?.manifest_version ?? null) : null,
+    }),
+    { requestId: context.requestId, allowedOrigin: context.allowedOrigin },
+  );
 };

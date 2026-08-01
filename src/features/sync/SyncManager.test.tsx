@@ -6,6 +6,7 @@ import { ToastProvider } from '@/components/ToastProvider';
 import type { LocalSyncSetup } from '@/db/sync/records';
 import { MorePage } from '@/pages/MorePage';
 import { emptyFinanceData, settings } from '@/tests/factories';
+import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 import { SyncManager } from './SyncManager';
 import type { SyncUiLocalStatus, SyncUiServices } from './ui-services';
 import * as syncUiServices from './ui-services';
@@ -126,6 +127,9 @@ const baseServices = (
   disableLocalDevice: vi.fn(() => Promise.resolve()),
   clearSession: vi.fn(),
   synchronize: vi.fn(() => Promise.resolve({ kind: 'up-to-date' as const, revision: 1 })),
+  renewDevice: vi.fn(() => Promise.resolve()),
+  secureRevokeDevice: vi.fn(() => Promise.resolve()),
+  deleteCloudVault: vi.fn(() => Promise.resolve()),
   resolveConflictGroup: vi.fn(() => Promise.resolve()),
   createEnableLifecycle: unexpected,
   createNewDevicePairingLifecycle: unexpected,
@@ -280,6 +284,93 @@ describe('Phase 1 sync UI', () => {
     );
     await user.click(consentButton);
     await waitFor(() => expect(synchronize).toHaveBeenCalledWith(true, false));
+  });
+
+  it('requires recovery and typed confirmation before secure remote-device revocation', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    const remoteDeviceId = 'DDDDDDDDDDDDDDDDDDDDDD';
+    setup.vault.manifest.devices.push({
+      ...setup.vault.manifest.devices[0],
+      deviceId: remoteDeviceId,
+    });
+    setup.metadata.firstUploadConsent = 'accepted';
+    const secureRevokeDevice = vi.fn(() => Promise.resolve());
+    const services = baseServices(
+      { secureRevokeDevice },
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+      },
+    );
+
+    renderManager(services);
+    const revokeButtons = await screen.findAllByRole('button', { name: /Bezbedno opozovi/i });
+    expect(revokeButtons).toHaveLength(1);
+    await user.click(revokeButtons[0]);
+    expect(screen.getByText(/ne može obrisati čitljive podatke ili stare ključeve/i)).toBeVisible();
+    const confirm = screen.getByRole('button', { name: /Opozovi i rotiraj ključ/i });
+    expect(confirm).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Recovery kod'), 'MR1-AAAA-BBBB-CCCC-DDDD');
+    await user.type(screen.getByLabelText(/Za potvrdu unesite: OPOZOVI UREĐAJ/i), 'OPOZOVI UREĐAJ');
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+
+    await waitFor(() =>
+      expect(secureRevokeDevice).toHaveBeenCalledWith(remoteDeviceId, 'MR1-AAAA-BBBB-CCCC-DDDD'),
+    );
+    expect(screen.queryByLabelText('Recovery kod')).not.toBeInTheDocument();
+  });
+
+  it('requires both recovery and exact confirmation before deleting only the cloud vault', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    setup.metadata.firstUploadConsent = 'accepted';
+    const deleteCloudVault = vi.fn(() => Promise.resolve());
+    const services = baseServices(
+      { deleteCloudVault },
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+      },
+    );
+
+    renderManager(services);
+    expect(await screen.findByText(/Lokalni Mirna finansijski podaci se ne brišu/i)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /Pripremi cloud brisanje/i }));
+    const confirm = screen.getByRole('button', { name: /Trajno obriši cloud trezor/i });
+    expect(confirm).toBeDisabled();
+
+    await user.type(
+      screen.getByLabelText('Recovery kod za cloud brisanje'),
+      'MR1-AAAA-BBBB-CCCC-DDDD',
+    );
+    await user.type(
+      screen.getByLabelText(`Za potvrdu unesite: ${CLOUD_VAULT_DELETE_CONFIRMATION}`),
+      'pogrešna potvrda',
+    );
+    expect(confirm).toBeDisabled();
+    await user.clear(
+      screen.getByLabelText(`Za potvrdu unesite: ${CLOUD_VAULT_DELETE_CONFIRMATION}`),
+    );
+    await user.type(
+      screen.getByLabelText(`Za potvrdu unesite: ${CLOUD_VAULT_DELETE_CONFIRMATION}`),
+      CLOUD_VAULT_DELETE_CONFIRMATION,
+    );
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+
+    await waitFor(() =>
+      expect(deleteCloudVault).toHaveBeenCalledWith(
+        'MR1-AAAA-BBBB-CCCC-DDDD',
+        CLOUD_VAULT_DELETE_CONFIRMATION,
+      ),
+    );
   });
 
   it('does not expose a sync row or construct sync services while the flag is off', () => {

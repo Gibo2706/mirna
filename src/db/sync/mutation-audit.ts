@@ -30,6 +30,11 @@ const syncMutationIntentSchema = z.strictObject({
   entityType: entityTypeSchema,
   entityId: z.string().min(1).max(256),
   commandType: commandTypeSchema,
+  resolvesOperationIds: z
+    .array(z.string().regex(/^[A-Za-z0-9_-]{22}$/u))
+    .min(1)
+    .max(20)
+    .optional(),
   previousValue: z.custom<CanonicalJson>().nullable(),
   value: z.custom<CanonicalJson>().nullable(),
 });
@@ -105,6 +110,7 @@ export class SyncMutationAudit {
     entityType: SyncFinancialEntityType;
     entityId: string;
     command: SyncOperationCommandType;
+    resolvesOperationIds?: readonly string[];
     previousValue: CanonicalJson | null;
     value: CanonicalJson | null;
   }> = [];
@@ -139,6 +145,7 @@ export class SyncMutationAudit {
     entityId: string,
     previousValue: { id: string } | null | undefined,
     value: { id: string } | null,
+    resolvesOperationIds: readonly string[],
   ): Promise<string> {
     if (value?.id && value.id !== entityId) {
       throw new Error('Sync rezolucija ne dozvoljava promenu identiteta entiteta.');
@@ -153,6 +160,7 @@ export class SyncMutationAudit {
       value,
       value === null ? 'delete' : 'upsert',
       true,
+      resolvesOperationIds,
     );
     if (!operationId) throw new Error('Sync rezolucija zahteva aktivan sync outbox.');
     return operationId;
@@ -165,6 +173,7 @@ export class SyncMutationAudit {
     valueInput: unknown,
     action: 'upsert' | 'delete',
     force = false,
+    resolvesOperationIds: readonly string[] = [],
   ): Promise<string | null> {
     if (!this.context) return Promise.resolve(null);
     const entityType = entityTypeSchema.parse(entityTypeInput);
@@ -194,6 +203,9 @@ export class SyncMutationAudit {
       entityType,
       entityId,
       command,
+      ...(resolvesOperationIds.length > 0
+        ? { resolvesOperationIds: [...new Set(resolvesOperationIds)].sort() }
+        : {}),
       previousValue,
       value,
     });
@@ -213,6 +225,9 @@ export class SyncMutationAudit {
         entityType: pending.entityType,
         entityId: pending.entityId,
         commandType: pending.command,
+        ...(pending.resolvesOperationIds
+          ? { resolvesOperationIds: pending.resolvesOperationIds }
+          : {}),
         previousValue: pending.previousValue,
         value: pending.value,
       });

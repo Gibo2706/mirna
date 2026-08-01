@@ -77,7 +77,12 @@ export const encryptedKeyAadSchema = z.strictObject({
   suite: cryptoSuiteSchema,
   vaultId: opaqueIdSchema,
   keyEpoch: z.number().int().positive(),
-  objectType: z.enum(['local-vault-key', 'recovery-vault-key', 'pairing-vault-key']),
+  objectType: z.enum([
+    'local-vault-key',
+    'recovery-vault-key',
+    'pairing-vault-key',
+    'device-key-envelope',
+  ]),
   objectId: opaqueIdSchema,
   creatingDeviceId: opaqueIdSchema,
   recoveryLookupId: opaqueIdSchema.nullable(),
@@ -422,6 +427,146 @@ export const recoveryCompleteResponseSchema = z.strictObject({
   recovered: z.boolean(),
 });
 
+export const deviceKeyEnvelopeSchema = z
+  .strictObject({
+    protocolVersion: protocolVersionSchema,
+    suite: cryptoSuiteSchema,
+    vaultId: opaqueIdSchema,
+    keyEpoch: z.number().int().positive(),
+    senderDeviceId: opaqueIdSchema,
+    recipientDeviceId: opaqueIdSchema,
+    ecdhSalt: base64Url.length(43),
+    parentManifestHash: sha256Schema,
+    encryptedKey: encryptedKeyEnvelopeSchema,
+  })
+  .superRefine((value, context) => {
+    const envelope = value.encryptedKey;
+    if (
+      envelope.protocolVersion !== value.protocolVersion ||
+      envelope.suite !== value.suite ||
+      envelope.vaultId !== value.vaultId ||
+      envelope.keyEpoch !== value.keyEpoch ||
+      envelope.objectId !== envelope.aad.objectId ||
+      envelope.aad.objectType !== 'device-key-envelope' ||
+      envelope.aad.creatingDeviceId !== value.senderDeviceId ||
+      envelope.aad.parentManifestHash !== value.parentManifestHash ||
+      envelope.aad.recoveryLookupId !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['encryptedKey'],
+        message: 'Device key envelope nije vezan za očekivanu epohu i manifest.',
+      });
+    }
+  });
+
+export const deviceRenewRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  newManifest: vaultManifestSchema,
+  sensitiveChallenge: authChallengeSchema,
+  sensitiveSignature: signatureSchema,
+});
+
+export const deviceRenewResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  vaultId: opaqueIdSchema,
+  deviceId: opaqueIdSchema,
+  manifestVersion: z.number().int().positive(),
+  authorizationExpiresAt: timestampSchema,
+  renewed: z.literal(true),
+});
+
+export const secureDeviceRevocationTranscriptSchema = z.strictObject({
+  type: z.literal(SYNC_TRANSCRIPT_TYPES.secureDeviceRevocation),
+  protocolVersion: protocolVersionSchema,
+  suite: cryptoSuiteSchema,
+  purpose: z.literal('secure-device-revocation'),
+  vaultId: opaqueIdSchema,
+  authorizingDeviceId: opaqueIdSchema,
+  revokedDeviceId: opaqueIdSchema,
+  recoveryChallenge: recoveryChallengeSchema,
+  previousManifestVersion: z.number().int().positive(),
+  previousManifestHash: sha256Schema,
+  newManifestHash: sha256Schema,
+  newRecoveryHash: sha256Schema,
+  deviceEnvelopeSetHash: sha256Schema,
+  idempotencyKey: opaqueIdSchema,
+  origin: z.string().url().max(512),
+  method: z.literal('POST'),
+  path: z.string().regex(/^\/v1\/devices\/[A-Za-z0-9_-]{22}\/revoke$/u),
+  issuedAt: timestampSchema,
+  expiresAt: timestampSchema,
+});
+
+export const secureDeviceRevocationRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  transcript: secureDeviceRevocationTranscriptSchema,
+  gateKey: base64Url.length(43),
+  gateProof: sha256Schema,
+  deviceSignature: signatureSchema,
+  recoverySignature: signatureSchema,
+  newManifest: vaultManifestSchema,
+  newRecovery: recoveryRecordSchema,
+  deviceKeyEnvelopes: z.array(deviceKeyEnvelopeSchema).min(1).max(10),
+});
+
+export const secureDeviceRevocationResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  vaultId: opaqueIdSchema,
+  revokedDeviceId: opaqueIdSchema,
+  manifestVersion: z.number().int().positive(),
+  keyEpoch: z.number().int().positive(),
+  revoked: z.literal(true),
+});
+
+export const vaultDeletionTranscriptSchema = z.strictObject({
+  type: z.literal(SYNC_TRANSCRIPT_TYPES.vaultDeletion),
+  protocolVersion: protocolVersionSchema,
+  suite: cryptoSuiteSchema,
+  purpose: z.literal('delete-encrypted-cloud-vault'),
+  vaultId: opaqueIdSchema,
+  authorizingDeviceId: opaqueIdSchema,
+  recoveryChallenge: recoveryChallengeSchema,
+  manifestVersion: z.number().int().positive(),
+  manifestHash: sha256Schema,
+  idempotencyKey: opaqueIdSchema,
+  typedConfirmation: z.literal('DELETE ENCRYPTED CLOUD VAULT'),
+  origin: z.string().url().max(512),
+  method: z.literal('DELETE'),
+  path: z.literal('/v1/vault'),
+  issuedAt: timestampSchema,
+  expiresAt: timestampSchema,
+});
+
+export const vaultDeletionRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  transcript: vaultDeletionTranscriptSchema,
+  gateKey: base64Url.length(43),
+  gateProof: sha256Schema,
+  deviceSignature: signatureSchema,
+  recoverySignature: signatureSchema,
+});
+
+export const vaultDeletionResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  vaultId: opaqueIdSchema,
+  deletionRequestId: opaqueIdSchema,
+  state: z.enum(['pending', 'deleting_r2', 'deleting_d1', 'completed', 'failed']),
+  deleted: z.boolean(),
+  completedAt: timestampSchema.nullable(),
+});
+
+export const deviceKeyEnvelopeResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  envelope: deviceKeyEnvelopeSchema,
+});
+
+export const manifestChangesResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  manifests: z.array(vaultManifestSchema).max(25),
+  nextAfterManifestVersion: z.number().int().positive().nullable(),
+});
+
 export type PublicEcKeyV1 = z.infer<typeof publicEcKeySchema>;
 export type DevicePublicKeysV1 = z.infer<typeof devicePublicKeysSchema>;
 export type ManifestDeviceV1 = z.infer<typeof manifestDeviceSchema>;
@@ -431,6 +576,14 @@ export type EncryptedKeyAadV1 = z.infer<typeof encryptedKeyAadSchema>;
 export type EncryptedKeyEnvelopeV1 = z.infer<typeof encryptedKeyEnvelopeSchema>;
 export type RecoveryRecordV1 = z.infer<typeof recoveryRecordSchema>;
 export type RecoveryBundleV1 = z.infer<typeof recoveryBundleSchema>;
+export type DeviceKeyEnvelopeV1 = z.infer<typeof deviceKeyEnvelopeSchema>;
+export type DeviceRenewRequestV1 = z.infer<typeof deviceRenewRequestSchema>;
+export type SecureDeviceRevocationTranscriptV1 = z.infer<
+  typeof secureDeviceRevocationTranscriptSchema
+>;
+export type SecureDeviceRevocationRequestV1 = z.infer<typeof secureDeviceRevocationRequestSchema>;
+export type VaultDeletionTranscriptV1 = z.infer<typeof vaultDeletionTranscriptSchema>;
+export type VaultDeletionRequestV1 = z.infer<typeof vaultDeletionRequestSchema>;
 export type AuthChallengeV1 = z.infer<typeof authChallengeSchema>;
 export type PairingCandidateV1 = z.infer<typeof pairingCandidateSchema>;
 export type PairingContextV1 = z.infer<typeof pairingContextSchema>;

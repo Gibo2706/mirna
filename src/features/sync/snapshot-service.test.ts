@@ -22,7 +22,9 @@ import {
 import { bytesToBase64Url, clearBytes } from '@/domain/sync/encoding';
 import { createInitialManifest, manifestBodyHash } from '@/domain/sync/manifest';
 import {
+  createBaselineSnapshotEntityStates,
   createEncryptedSnapshot,
+  createSyncFinanceData,
   hashEncryptedSnapshotEnvelope,
   type EncryptedSnapshotArtifactV1,
 } from '@/domain/sync/snapshot';
@@ -150,6 +152,7 @@ const createSetup = async (): Promise<{ setup: LocalSyncSetup; vaultMasterKey: U
 
 class FakeSnapshotApi implements SnapshotSyncApiPort {
   remote?: EncryptedSnapshotArtifactV1;
+  uploadError?: Error;
   readonly uploads: EncryptedSnapshotArtifactV1[] = [];
 
   constructor(private readonly setup: LocalSyncSetup) {}
@@ -180,6 +183,7 @@ class FakeSnapshotApi implements SnapshotSyncApiPort {
   }
 
   async uploadSnapshot(artifact: EncryptedSnapshotArtifactV1): Promise<unknown> {
+    if (this.uploadError) throw this.uploadError;
     const stored = {
       envelope: structuredClone(artifact.envelope),
       ciphertext: artifact.ciphertext.slice(),
@@ -272,6 +276,45 @@ describe('Phase 2 snapshot sync service', () => {
       await hashEncryptedSnapshotEnvelope(api.uploads[0].envelope),
     );
     expect(new TextDecoder().decode(api.uploads[0].ciphertext)).not.toContain('Tekući');
+    const expectedStates = await createBaselineSnapshotEntityStates(
+      createSyncFinanceData(emptyFinanceData()),
+    );
+    expect(
+      await database.syncEntityStates.where('vaultId').equals(material.setup.vault.vaultId).count(),
+    ).toBe(expectedStates.length);
+    clearBytes(material.vaultMasterKey);
+    database.close();
+  });
+
+  it('keeps operation sync available when compaction awaits active-device ACKs', async () => {
+    const name = `mirna-snapshot-ack-gate-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    const database = new FinanceDatabase(name);
+    const material = await createSetup();
+    const repository = new SyncSnapshotRepository(database);
+    await repository.writeSetup(material.setup);
+    await seedFinanceData(database, emptyFinanceData());
+    const api = new FakeSnapshotApi(material.setup);
+    const service = new SnapshotSyncService({
+      api,
+      origin: 'https://mirna.test',
+      repository,
+      now: () => NOW,
+    });
+    await expect(
+      service.synchronize({ allowInitialUpload: true, continuousOperations: true }),
+    ).resolves.toEqual({ kind: 'uploaded', revision: 1 });
+    api.uploadError = new SyncApiError('SNAPSHOT_ACK_PENDING', 409, createOpaqueId());
+
+    await expect(service.synchronize({ forceCompaction: true })).resolves.toEqual({
+      kind: 'up-to-date',
+      revision: 1,
+    });
+    expect((await repository.readSetup())?.metadata).toMatchObject({
+      lastSnapshotRevision: 1,
+      syncBlockReason: undefined,
+      lastErrorCode: undefined,
+    });
     clearBytes(material.vaultMasterKey);
     database.close();
   });

@@ -16,6 +16,8 @@ const EXPECTED_TABLES = [
   'deletion_requests',
   'device_acknowledgements',
   'device_grants',
+  'device_key_envelopes',
+  'device_security_transitions',
   'devices',
   'pairing_envelopes',
   'pairing_requests',
@@ -47,7 +49,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(3);
+    expect(migrationCount).toBe(4);
 
     const snapshotColumns = await env.MIRNA_SYNC_DB.prepare("PRAGMA table_info('snapshots')").all<{
       name: string;
@@ -135,6 +137,8 @@ describe('D1 migration foundation', () => {
       'idx_sync_changes_vault_cursor',
       'idx_sync_changes_vault_device_sequence',
       'idx_device_acknowledgements_vault_snapshot',
+      'idx_device_key_envelopes_recipient_epoch',
+      'idx_device_security_transitions_vault_created',
     ]) {
       expect(names.has(requiredIndex), `${requiredIndex} should exist`).toBe(true);
     }

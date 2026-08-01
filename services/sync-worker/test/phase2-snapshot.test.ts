@@ -6,6 +6,7 @@ import { bytesToBase64Url, utf8 } from '../../../src/domain/sync/encoding';
 import { manifestBodyHash } from '../../../src/domain/sync/manifest';
 import {
   createEncryptedSnapshot,
+  hashEncryptedSnapshotEnvelope,
   type EncryptedSnapshotArtifactV1,
 } from '../../../src/domain/sync/snapshot';
 import { emptyFinanceData } from '../../../src/tests/factories';
@@ -136,6 +137,45 @@ describe('Phase 2 encrypted snapshot transport', () => {
     const object = await env.MIRNA_SYNC_BUCKET.get(stored!.r2_object_key);
     expect(object).not.toBeNull();
     expect(new TextDecoder().decode(await object!.arrayBuffer())).not.toContain('Tekući');
+  });
+
+  it('defers a new snapshot until every active device acknowledges the current revision', async () => {
+    const snapshot = await createSnapshotFixture();
+    expect((await uploadSnapshot(snapshot)).status).toBe(201);
+    const nextArtifact = await createEncryptedSnapshot({
+      data: emptyFinanceData(),
+      vaultId: snapshot.fixture.vaultId,
+      revision: 2,
+      baseRevision: 1,
+      keyEpoch: 1,
+      creatingDeviceId: snapshot.fixture.deviceId,
+      createdAt: new Date().toISOString(),
+      parentManifestHash: await manifestBodyHash(snapshot.fixture.manifest),
+      previousSnapshotHash: await hashEncryptedSnapshotEnvelope(snapshot.artifact.envelope),
+      causalFrontier: { serverCursor: 0, devices: [] },
+      vaultMasterKey: snapshot.fixture.vaultMasterKey,
+      signingPrivateKey: snapshot.fixture.deviceKeys.signing.privateKey,
+      compression: 'none',
+    });
+
+    const deferred = await uploadSnapshot(snapshot, { artifact: nextArtifact });
+    expect(deferred.status).toBe(409);
+    expect(await errorCode(deferred)).toBe('SNAPSHOT_ACK_PENDING');
+
+    await env.MIRNA_SYNC_DB.prepare(
+      `INSERT INTO device_acknowledgements (
+         vault_id, device_id, acknowledged_server_cursor,
+         acknowledged_snapshot_id, acknowledged_snapshot_revision, acknowledged_at
+       ) VALUES (?1, ?2, 0, ?3, 1, ?4)`,
+    )
+      .bind(
+        snapshot.fixture.vaultId,
+        snapshot.fixture.deviceId,
+        snapshot.artifact.envelope.snapshotId,
+        Date.now(),
+      )
+      .run();
+    expect((await uploadSnapshot(snapshot, { artifact: nextArtifact })).status).toBe(201);
   });
 
   it('rejects stale concurrent writers and deletes the losing R2 object', async () => {

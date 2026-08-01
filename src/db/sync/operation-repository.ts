@@ -25,6 +25,7 @@ import {
   type SyncInboxRecord,
   type SyncMetadataRecord,
   type SyncOutboxRecord,
+  type SyncKeyRecord,
 } from './records';
 import { readLocalSyncSetup } from './repository';
 
@@ -206,6 +207,10 @@ export class SyncOperationRepository {
     return this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
   }
 
+  readVaultKey(vaultId: string, keyEpoch: number): Promise<SyncKeyRecord | undefined> {
+    return this.database.syncKeys.where('[vaultId+keyEpoch]').equals([vaultId, keyEpoch]).first();
+  }
+
   pendingLocalOperationCount(vaultId: string): Promise<number> {
     return this.database.syncOutbox.where('vaultId').equals(vaultId).count();
   }
@@ -377,6 +382,9 @@ export class SyncOperationRepository {
             deviceSequence,
             lamportTime: maximumLamport,
             causalFrontier,
+            ...(intent.resolvesOperationIds
+              ? { resolvesOperationIds: intent.resolvesOperationIds }
+              : {}),
             command: {
               type: intent.commandType,
               entityType: intent.entityType,
@@ -666,7 +674,10 @@ export class SyncOperationRepository {
           opened: OpenedRemoteOperation;
           current: SyncEntityStateRecord | null;
           localValue: { id: string } | undefined;
-          matches: boolean;
+          preconditionMatches: boolean;
+          resultMatchesCurrent: boolean;
+          resolvedConflictIds: readonly string[];
+          accepted: boolean;
         }> = [];
         for (const opened of ordered) {
           const { operation } = opened;
@@ -689,32 +700,74 @@ export class SyncOperationRepository {
               );
             }
           }
-          const matches = current
+          const preconditionMatches = current
             ? command.precondition.entityVersion === current.entityVersion &&
               command.precondition.stateHash === current.stateHash &&
               command.precondition.tombstone === current.tombstone
             : command.precondition.entityVersion === 0 &&
               command.precondition.stateHash === null &&
               !command.precondition.tombstone;
-          proposals.push({ opened, current, localValue, matches });
-          workingStates.set(stateId, {
-            id: stateId,
-            vaultId: setup.vault.vaultId,
-            entityType: command.entityType,
-            entityId: command.entityId,
-            entityVersion: command.result.entityVersion,
-            stateHash: command.result.stateHash,
-            tombstone: command.result.tombstone,
-            canonicalTombstone: command.tombstone ? canonicalizeJson(command.tombstone) : undefined,
-            lastOperationId: operation.operationId,
-            lastDeviceId: operation.deviceId,
-            lastDeviceSequence: operation.deviceSequence,
-            lastLamportTime: operation.lamportTime,
-            updatedAt: now,
+          const resultMatchesCurrent = Boolean(
+            current &&
+            command.result.stateHash === current.stateHash &&
+            command.result.tombstone === current.tombstone,
+          );
+          const resolvedConflictIds = operation.resolvesOperationIds
+            ? (
+                await this.database.syncConflicts
+                  .where('[vaultId+resolutionState]')
+                  .equals([setup.vault.vaultId, 'pending'])
+                  .filter(
+                    (conflict) =>
+                      conflict.entityType === command.entityType &&
+                      conflict.entityId === command.entityId &&
+                      operation.resolvesOperationIds!.includes(conflict.remoteOperationId),
+                  )
+                  .toArray()
+              ).map((conflict) => conflict.id)
+            : [];
+          const accepted =
+            preconditionMatches || resultMatchesCurrent || resolvedConflictIds.length > 0;
+          proposals.push({
+            opened,
+            current,
+            localValue,
+            preconditionMatches,
+            resultMatchesCurrent,
+            resolvedConflictIds,
+            accepted,
           });
+          if (accepted) {
+            const preservesNewerEquivalentState =
+              resultMatchesCurrent &&
+              current !== null &&
+              command.result.entityVersion <= current.entityVersion;
+            workingStates.set(
+              stateId,
+              preservesNewerEquivalentState
+                ? current
+                : {
+                    id: stateId,
+                    vaultId: setup.vault.vaultId,
+                    entityType: command.entityType,
+                    entityId: command.entityId,
+                    entityVersion: command.result.entityVersion,
+                    stateHash: command.result.stateHash,
+                    tombstone: command.result.tombstone,
+                    canonicalTombstone: command.tombstone
+                      ? canonicalizeJson(command.tombstone)
+                      : undefined,
+                    lastOperationId: operation.operationId,
+                    lastDeviceId: operation.deviceId,
+                    lastDeviceSequence: operation.deviceSequence,
+                    lastLamportTime: operation.lamportTime,
+                    updatedAt: now,
+                  },
+            );
+          }
         }
 
-        if (proposals.every((proposal) => proposal.matches)) {
+        if (proposals.every((proposal) => proposal.accepted)) {
           for (const { operation } of ordered) {
             const table = entityTable(this.database, operation.command.entityType);
             if (operation.command.value === null) {
@@ -744,6 +797,19 @@ export class SyncOperationRepository {
               (state): state is SyncEntityStateRecord => state !== null,
             ),
           );
+          for (const proposal of proposals) {
+            const { operation } = proposal.opened;
+            for (const conflictId of proposal.resolvedConflictIds) {
+              const conflict = await this.database.syncConflicts.get(conflictId);
+              if (!conflict || conflict.resolutionState !== 'pending') continue;
+              await this.database.syncConflicts.put({
+                ...conflict,
+                resolutionState: 'resolved-custom',
+                resolvedAt: now,
+                resolutionOperationId: operation.operationId,
+              });
+            }
+          }
         } else {
           for (const proposal of proposals) {
             const { operation } = proposal.opened;
@@ -813,11 +879,11 @@ export class SyncOperationRepository {
           if (!inbox) throw new LocalOperationStateError('Primljena operacija nije staged.');
           await this.database.syncInbox.put({
             ...inbox,
-            state: proposals.every((proposal) => proposal.matches) ? 'applied' : 'conflicted',
+            state: proposals.every((proposal) => proposal.accepted) ? 'applied' : 'conflicted',
             processedAt: now,
           });
         }
-        return proposals.every((proposal) => proposal.matches) ? 'applied' : 'conflicted';
+        return proposals.every((proposal) => proposal.accepted) ? 'applied' : 'conflicted';
       },
     );
   }

@@ -43,6 +43,7 @@ interface VaultSnapshotStateRow {
   current_snapshot_revision: number;
   manifest_hash: ArrayBuffer;
   current_snapshot_hash: ArrayBuffer | null;
+  current_snapshot_key_epoch: number | null;
 }
 
 interface StoredSnapshotRow {
@@ -127,7 +128,8 @@ const loadVaultSnapshotState = (
     .prepare(
       `SELECT v.current_key_epoch, v.current_manifest_version,
               v.current_snapshot_id, v.current_snapshot_revision,
-              m.manifest_hash, s.envelope_hash AS current_snapshot_hash
+              m.manifest_hash, s.envelope_hash AS current_snapshot_hash,
+              s.key_epoch AS current_snapshot_key_epoch
          FROM vaults v
          JOIN vault_manifests m
            ON m.vault_id = v.vault_id
@@ -142,6 +144,44 @@ const loadVaultSnapshotState = (
     )
     .bind(vaultId)
     .first<VaultSnapshotStateRow>();
+
+const requireCurrentSnapshotAcknowledged = async (
+  database: D1Database,
+  vaultId: string,
+  state: VaultSnapshotStateRow,
+): Promise<void> => {
+  if (
+    state.current_snapshot_revision === 0 ||
+    state.current_snapshot_key_epoch !== state.current_key_epoch
+  ) {
+    return;
+  }
+  const frontier = await database
+    .prepare(
+      `SELECT COUNT(*) AS active_devices,
+              SUM(CASE WHEN a.device_id IS NOT NULL THEN 1 ELSE 0 END) AS acknowledged_devices
+         FROM devices d
+         LEFT JOIN device_acknowledgements a
+           ON a.vault_id = d.vault_id
+          AND a.device_id = d.device_id
+          AND a.acknowledged_snapshot_id = ?2
+          AND a.acknowledged_snapshot_revision = ?3
+        WHERE d.vault_id = ?1
+          AND d.revoked_at IS NULL`,
+    )
+    .bind(vaultId, state.current_snapshot_id, state.current_snapshot_revision)
+    .first<{ active_devices: number; acknowledged_devices: number }>();
+  if (
+    !frontier ||
+    frontier.active_devices === 0 ||
+    frontier.acknowledged_devices !== frontier.active_devices
+  ) {
+    throw conflict(
+      'SNAPSHOT_ACK_PENDING',
+      'Current snapshot is still awaiting active device acknowledgements.',
+    );
+  }
+};
 
 const assertCurrentSnapshotContext = (
   envelope: EncryptedSnapshotEnvelopeV1,
@@ -390,6 +430,7 @@ export const handleUploadSnapshot = async (
     }
     throw error;
   }
+  await requireCurrentSnapshotAcknowledged(context.env.MIRNA_SYNC_DB, authenticated.vaultId, state);
 
   const objectKey =
     stored?.r2_object_key ??

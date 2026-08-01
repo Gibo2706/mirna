@@ -11,7 +11,8 @@ import {
   randomBytes,
 } from '@/domain/sync/crypto';
 import { clearBytes } from '@/domain/sync/encoding';
-import { createInitialManifest, manifestBodyHash } from '@/domain/sync/manifest';
+import { createInitialManifest, manifestBodyHash, signVaultManifest } from '@/domain/sync/manifest';
+import { unsignedVaultManifestSchema } from '@/domain/sync/schemas';
 import type { Account } from '@/domain/types';
 import { FinanceDatabase } from '../database';
 import {
@@ -20,6 +21,7 @@ import {
   InvalidLocalSyncSetupError,
   readLocalSyncSetup,
   writeLocalSyncSetup,
+  writeRotatedLocalSyncSetup,
 } from './repository';
 import {
   ACTIVE_SYNC_VAULT_RECORD_ID,
@@ -178,6 +180,81 @@ describe('local sync repository', () => {
       crypto.subtle.exportKey('raw', stored!.device.localWrappingKey),
     ).rejects.toBeDefined();
     reopened.close();
+  });
+
+  it('atomically advances one key epoch and retains the prior key only as retired history', async () => {
+    const database = createDatabase();
+    const setup = await createSetup();
+    await writeLocalSyncSetup(setup, database);
+    const occurredAt = '2026-07-31T10:05:00.000Z';
+    const { signature: _signature, ...currentUnsigned } = setup.vault.manifest;
+    void _signature;
+    const manifest = await signVaultManifest(
+      unsignedVaultManifestSchema.parse({
+        ...currentUnsigned,
+        manifestVersion: 2,
+        keyEpoch: 2,
+        previousManifestHash: setup.metadata.lastManifestHash,
+        transition: {
+          transitionId: 'R'.repeat(22),
+          kind: 'rotate-key',
+          authorizationKind: 'device',
+          authorizingDeviceId: setup.device.deviceId,
+          affectedDeviceId: setup.device.deviceId,
+          occurredAt,
+        },
+      }),
+      setup.device.signingPrivateKey,
+    );
+    const manifestHash = await manifestBodyHash(manifest);
+    const nextMasterKey = randomBytes(32);
+    const nextEncryptedKey = await createEncryptedKeyEnvelope(
+      nextMasterKey,
+      setup.device.localWrappingKey,
+      {
+        protocolVersion: SYNC_PROTOCOL_VERSION,
+        suite: SYNC_CRYPTO_SUITE,
+        vaultId: setup.vault.vaultId,
+        keyEpoch: 2,
+        objectType: 'local-vault-key',
+        objectId: 'S'.repeat(22),
+        creatingDeviceId: setup.device.deviceId,
+        recoveryLookupId: null,
+        parentManifestHash: manifestHash,
+      },
+    );
+    clearBytes(nextMasterKey);
+    const rotated: LocalSyncSetup = {
+      ...setup,
+      vault: { ...setup.vault, keyEpoch: 2, manifest, updatedAt: occurredAt },
+      vaultKey: {
+        id: localVaultKeyRecordId(setup.vault.vaultId, 2),
+        vaultId: setup.vault.vaultId,
+        keyEpoch: 2,
+        purpose: 'vault-master-key',
+        encryptedKey: nextEncryptedKey,
+        createdAt: occurredAt,
+      },
+      metadata: {
+        ...setup.metadata,
+        lastManifestHash: manifestHash,
+        pendingKeyRotationSnapshotEpoch: 2,
+      },
+    };
+
+    await writeRotatedLocalSyncSetup(rotated, database);
+
+    expect((await readLocalSyncSetup(database))?.vault.keyEpoch).toBe(2);
+    const keys = (await database.syncKeys.toArray()).sort(
+      (left, right) => left.keyEpoch - right.keyEpoch,
+    );
+    expect(keys).toHaveLength(2);
+    expect(keys[0].retiredAt).toBe(occurredAt);
+    expect(keys[1].retiredAt).toBeUndefined();
+    await expect(writeRotatedLocalSyncSetup(rotated, database)).rejects.toBeInstanceOf(
+      InvalidLocalSyncSetupError,
+    );
+    database.close();
   });
 
   it('rejects extractable private keys before writing any setup record', async () => {

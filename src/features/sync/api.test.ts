@@ -15,8 +15,8 @@ import type { SyncClientConfig } from './config';
 const API_ORIGIN = 'https://mirna-sync-staging.example.workers.dev';
 const APP_ORIGIN = 'https://mirna-staging.example';
 const NOW = '2026-07-31T10:00:00.000Z';
-const LATER = '2026-07-31T10:02:00.000Z';
-const AUTHORIZATION_EXPIRY = '2026-08-30T10:00:00.000Z';
+const LATER = '2099-07-31T10:02:00.000Z';
+const AUTHORIZATION_EXPIRY = '2099-08-30T10:00:00.000Z';
 const opaqueId = (character: string): string => character.repeat(22);
 const hash = (character: string): string => character.repeat(43);
 const signature = (character: string): string => character.repeat(86);
@@ -248,6 +248,21 @@ describe('Mirna sync API transport', () => {
       requestId,
     });
     expect(`${String(caught)} ${JSON.stringify(caught)}`).not.toContain(accessToken);
+    expect(api.hasActiveSession).toBe(false);
+  });
+
+  it('keeps an access token only in memory and stops reusing it at its server expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(sessionResponse());
+    const persistentWrite = vi.spyOn(Storage.prototype, 'setItem');
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock });
+
+    await establishSession(api);
+    expect(api.hasActiveSession).toBe(true);
+    expect(persistentWrite).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date(LATER));
     expect(api.hasActiveSession).toBe(false);
   });
 
