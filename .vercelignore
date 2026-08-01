@@ -2,6 +2,8 @@
 .github/
 .private/
 .vercel/
+.wrangler/
+**/.wrangler/
 node_modules/
 dist/
 coverage/
@@ -19,6 +21,9 @@ mirna-chat-summary-*.md
 docs/
 e2e/
 scripts/
+services/
+SOT.md
+.dev.vars
 src/**/*.test.ts
 src/**/*.test.tsx
 CHANGELOG.md
