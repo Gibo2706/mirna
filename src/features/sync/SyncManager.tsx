@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Field, Input, Textarea } from '@/components/ui/Field';
 import { StatusBadge } from '@/components/ui/StatusBadge';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import type {
   PairingCodePresentation,
   RecoveryCodePresentation,
@@ -808,16 +809,20 @@ const ActivePanel = ({
   const [confirmation, setConfirmation] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [conflictResolution, setConflictResolution] = useState<{
+    mutationGroupId: string;
+    selection: 'local' | 'remote';
+  }>();
   const { setup } = status;
   const authorizationExpired = Date.parse(setup.device.authorizationExpiresAt) <= Date.now();
   const disablePhrase = 'ISKLJUČI OVAJ UREĐAJ';
 
-  const synchronize = async (allowInitialUpload = false) => {
+  const synchronize = async (allowInitialUpload = false, forceCompaction = false) => {
     if (busy) return;
     setBusy(true);
     setError('');
     try {
-      const result = await services.synchronize(allowInitialUpload);
+      const result = await services.synchronize(allowInitialUpload, forceCompaction);
       if (result.kind === 'blocked') {
         setError(
           'Sinhronizacija je bezbedno zaustavljena zbog konflikta ili neočekivanog remote stanja.',
@@ -826,6 +831,14 @@ const ActivePanel = ({
         setError('Prvi upload čeka vašu eksplicitnu saglasnost.');
       } else if (result.kind === 'consent-declined') {
         setError('Prvi upload je odbijen na ovom uređaju.');
+      } else if (result.kind === 'synchronized') {
+        success(
+          result.conflictedGroups > 0
+            ? 'Promene su prenete; jedan konflikt zahteva pregled.'
+            : result.uploadedOperations + result.downloadedOperations > 0
+              ? 'Šifrovane promene su sinhronizovane.'
+              : 'Sinhronizovano.',
+        );
       } else {
         success(
           result.kind === 'uploaded'
@@ -862,6 +875,32 @@ const ActivePanel = ({
     }
   };
 
+  const operationConflictGroups = useMemo(() => {
+    const groups = new Map<string, typeof status.pendingConflicts>();
+    for (const conflict of status.pendingConflicts) {
+      if (!conflict.mutationGroupId) continue;
+      groups.set(conflict.mutationGroupId, [
+        ...(groups.get(conflict.mutationGroupId) ?? []),
+        conflict,
+      ]);
+    }
+    return [...groups.entries()];
+  }, [status]);
+  const snapshotConflicts = status.pendingConflicts.filter(
+    (conflict) => conflict.entityType === 'snapshot',
+  );
+
+  const resolveConflict = async () => {
+    if (!conflictResolution) return;
+    await services.resolveConflictGroup(
+      setup.vault.vaultId,
+      conflictResolution.mutationGroupId,
+      conflictResolution.selection,
+    );
+    success('Rezolucija je sačuvana kao nova lokalna sync operacija.');
+    await onChanged();
+  };
+
   return (
     <div className="grid gap-5">
       <Card className="grid gap-4">
@@ -895,7 +934,24 @@ const ActivePanel = ({
             <dt className="text-xs font-semibold text-muted">Nerešeni konflikti</dt>
             <dd className="mt-1 font-bold">{status.pendingConflictCount}</dd>
           </div>
+          <div className="rounded-xl bg-surface-2 p-3">
+            <dt className="text-xs font-semibold text-muted">Lokalne promene na čekanju</dt>
+            <dd className="mt-1 font-bold">{status.pendingLocalOperationCount}</dd>
+          </div>
         </dl>
+        {navigator.onLine === false ? (
+          <p role="status" className="rounded-xl bg-warning-soft p-3 text-sm text-warning">
+            Nema mreže — promene ostaju na ovom uređaju.
+          </p>
+        ) : status.pendingLocalOperationCount > 0 ? (
+          <p role="status" className="rounded-xl bg-surface-2 p-3 text-sm text-muted">
+            Čekaju {status.pendingLocalOperationCount} lokalne promene.
+          </p>
+        ) : status.pendingConflictCount === 0 && setup.metadata.lastSuccessfulSyncAt ? (
+          <p role="status" className="rounded-xl bg-accent-soft p-3 text-sm text-accent">
+            Sinhronizovano.
+          </p>
+        ) : null}
         {setup.metadata.firstUploadConsent === 'pending' ? (
           <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
             <p>
@@ -917,12 +973,85 @@ const ActivePanel = ({
         <Button
           variant="secondary"
           disabled={busy || Boolean(setup.metadata.syncBlockReason)}
-          onClick={() => void synchronize(false)}
+          onClick={() => void synchronize(false, true)}
         >
           {busy ? <BusyIcon /> : <RefreshCw size={17} aria-hidden="true" />}
           Sinhronizuj sada
         </Button>
       </Card>
+
+      {status.pendingConflictCount > 0 ? (
+        <Card className="grid gap-4 border-warning/30">
+          <div>
+            <SectionTitle>Postoje promene na oba uređaja</SectionTitle>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Mirna nije izabrala poslednju izmenu automatski. Pregledajte predloge i eksplicitno
+              izaberite ishod; rezolucija će postati nova potpisana operacija.
+            </p>
+          </div>
+          {operationConflictGroups.map(([mutationGroupId, conflicts]) => (
+            <div key={mutationGroupId} className="grid gap-3 rounded-xl bg-surface-2 p-3">
+              <div>
+                <p className="text-sm font-bold">
+                  Konfliktna radnja ({conflicts.length}{' '}
+                  {conflicts.length === 1 ? 'entitet' : 'entiteta'})
+                </p>
+                <ul className="mt-2 grid gap-1 text-xs text-muted">
+                  {conflicts.map((conflict) => (
+                    <li key={conflict.id}>
+                      {conflict.entityType}: {truncateOpaqueId(conflict.entityId)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <details className="rounded-xl border bg-surface p-3 text-xs">
+                <summary className="min-h-8 cursor-pointer font-bold">Pregled predloga</summary>
+                <div className="mt-3 grid gap-3">
+                  {conflicts.map((conflict) => (
+                    <div key={conflict.id} className="min-w-0">
+                      <p className="font-bold">{conflict.entityType}</p>
+                      <p className="mt-2 text-muted">Lokalni predlog</p>
+                      <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-background p-2">
+                        {conflict.localCanonicalProposal}
+                      </pre>
+                      <p className="mt-2 text-muted">Predlog drugog uređaja</p>
+                      <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-background p-2">
+                        {conflict.remoteCanonicalProposal}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              </details>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button
+                  variant="secondary"
+                  onClick={() => setConflictResolution({ mutationGroupId, selection: 'local' })}
+                >
+                  Zadrži trenutno lokalno
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => setConflictResolution({ mutationGroupId, selection: 'remote' })}
+                >
+                  Prihvati predlog drugog uređaja
+                </Button>
+              </div>
+            </div>
+          ))}
+          {snapshotConflicts.length > 0 ? (
+            <div className="rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
+              <p className="font-bold">Snapshot konflikt ostaje blokiran.</p>
+              <p>
+                Prvo preuzmite lokalni backup, zatim otkažite ili nastavite tek posle ručnog
+                pregleda. Lokalni podaci nisu prepisani.
+              </p>
+              <Link to="/more/data" className="mt-2 inline-flex min-h-11 items-center font-bold">
+                Otvori backup i izvoz
+              </Link>
+            </div>
+          ) : null}
+        </Card>
+      ) : null}
 
       <Card className="p-0">
         <div className="border-b p-4">
@@ -945,6 +1074,22 @@ const ActivePanel = ({
           ))}
         </ul>
       </Card>
+
+      <ConfirmDialog
+        open={Boolean(conflictResolution)}
+        onOpenChange={(open) => {
+          if (!open) setConflictResolution(undefined);
+        }}
+        title="Potvrdite rezoluciju konflikta"
+        description={
+          conflictResolution?.selection === 'remote'
+            ? 'Trenutne lokalne vrednosti iz ove konfliktne radnje biće zamenjene pregledanim predlogom drugog uređaja. Radnja je atomska.'
+            : 'Trenutne lokalne vrednosti biće zadržane i poslate kao nova potpisana rezolucija.'
+        }
+        confirmLabel="Potvrdi rezoluciju"
+        danger={conflictResolution?.selection === 'remote'}
+        onConfirm={resolveConflict}
+      />
 
       <ExistingDeviceApproval services={services} />
 

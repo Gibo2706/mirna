@@ -135,6 +135,7 @@ const createSetup = async (): Promise<{ setup: LocalSyncSetup; vaultMasterKey: U
         localSchemaVersion: 1,
         firstUploadConsent: 'pending',
         lastServerCursor: 0,
+        lastSnapshotServerCursor: 0,
         lastSnapshotRevision: 0,
         lastSnapshotId: null,
         lastSnapshotHash: null,

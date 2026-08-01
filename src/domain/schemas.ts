@@ -233,6 +233,14 @@ export const appSettingsSchema = z.object({
   updatedAt: timestamp,
 });
 
+export const syncedAppSettingsSchema = appSettingsSchema
+  .omit({
+    appearance: true,
+    lastBackupAt: true,
+    installHintDismissed: true,
+  })
+  .strict();
+
 export const financeDataSchema = z.object({
   accounts: z.array(accountSchema),
   transactions: z.array(transactionSchema),

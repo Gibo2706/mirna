@@ -104,6 +104,7 @@ const syncMetadataRecordSchema = z.strictObject({
   localSchemaVersion: z.literal(1),
   firstUploadConsent: z.enum(['pending', 'accepted', 'declined']),
   lastServerCursor: z.number().int().nonnegative(),
+  lastSnapshotServerCursor: z.number().int().nonnegative(),
   lastSnapshotRevision: z.number().int().nonnegative(),
   lastSnapshotId: opaqueIdSchema.nullable(),
   lastSnapshotHash: z
@@ -375,6 +376,7 @@ const syncTables = (database: FinanceDatabase) => [
   database.syncFrontier,
   database.syncMetadata,
   database.syncCheckpoints,
+  database.syncEntityStates,
 ];
 
 const assertCompatibleExistingVault = async (

@@ -13,11 +13,12 @@ import {
   plannedIncomeSchema,
   presetSchema,
   salaryScenarioSchema,
+  syncedAppSettingsSchema,
   transactionSchema,
   variableBudgetSchema,
 } from '../schemas';
 import type { AppSettings, FinanceData } from '../types';
-import { canonicalBytes } from './canonical';
+import { canonicalBytes, type CanonicalJson } from './canonical';
 import {
   SYNC_CRYPTO_SUITE,
   SYNC_LIMITS,
@@ -44,6 +45,12 @@ import {
   signatureSchema,
   timestampSchema,
 } from './schemas';
+import {
+  hashEntityState,
+  operationTombstoneSchema,
+  SYNC_FINANCIAL_ENTITY_TYPES,
+  type SyncFinancialEntityType,
+} from './operation';
 
 export const SYNC_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 export const SYNC_SNAPSHOT_TYPE = 'mirna-sync-snapshot-v1' as const;
@@ -95,14 +102,6 @@ const strictFinanceDataSchema = z.strictObject({
   salaryScenarios: z.array(salaryScenarioSchema.strict()),
   settings: z.array(appSettingsSchema.strict()).length(1),
 });
-
-export const syncedAppSettingsSchema = appSettingsSchema
-  .omit({
-    appearance: true,
-    lastBackupAt: true,
-    installHintDismissed: true,
-  })
-  .strict();
 
 export const syncFinanceDataSchema = z
   .strictObject({
@@ -164,6 +163,50 @@ export const snapshotCausalFrontierSchema = z
     }
   });
 
+export const snapshotEntityStateSchema = z
+  .strictObject({
+    entityType: z.enum(SYNC_FINANCIAL_ENTITY_TYPES),
+    entityId: z.string().min(1).max(256),
+    entityVersion: positiveSafeInteger,
+    stateHash: sha256Schema,
+    tombstone: z.boolean(),
+    tombstoneMetadata: operationTombstoneSchema.nullable(),
+    lastOperationId: opaqueIdSchema.nullable(),
+    lastDeviceId: opaqueIdSchema.nullable(),
+    lastDeviceSequence: safeNonNegativeInteger,
+    lastLamportTime: safeNonNegativeInteger,
+  })
+  .superRefine((state, context) => {
+    if (state.tombstone !== (state.tombstoneMetadata !== null)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['tombstoneMetadata'],
+        message: 'Tombstone stanje mora imati tačne metapodatke brisanja.',
+      });
+    }
+    if (
+      (state.lastOperationId === null) !== (state.lastDeviceId === null) ||
+      (state.lastOperationId === null) !== (state.lastDeviceSequence === 0) ||
+      (state.lastOperationId === null) !== (state.lastLamportTime === 0)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Poslednji operation metapodaci entity stanja nisu konzistentni.',
+      });
+    }
+  });
+
+export const snapshotEntityStatesSchema = z
+  .array(snapshotEntityStateSchema)
+  .superRefine((states, context) => {
+    if (!isStrictlySortedBy(states, (state) => `${state.entityType}\u0000${state.entityId}`)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Entity stanja moraju biti jedinstvena i sortirana.',
+      });
+    }
+  });
+
 const syncSnapshotBodySchema = z
   .strictObject({
     type: z.literal(SYNC_SNAPSHOT_TYPE),
@@ -180,6 +223,7 @@ const syncSnapshotBodySchema = z
     parentManifestHash: sha256Schema,
     previousSnapshotHash: sha256Schema.nullable(),
     causalFrontier: snapshotCausalFrontierSchema,
+    entityStates: snapshotEntityStatesSchema,
     data: syncFinanceDataSchema,
   })
   .superRefine((snapshot, context) => {
@@ -295,6 +339,7 @@ export const encryptedSnapshotEnvelopeSchema = unsignedEncryptedSnapshotEnvelope
 export type SyncedAppSettingsV1 = z.infer<typeof syncedAppSettingsSchema>;
 export type SyncFinanceDataV1 = z.infer<typeof syncFinanceDataSchema>;
 export type SnapshotCausalFrontierV1 = z.infer<typeof snapshotCausalFrontierSchema>;
+export type SnapshotEntityStateV1 = z.infer<typeof snapshotEntityStateSchema>;
 export type SyncSnapshotBodyV1 = z.infer<typeof syncSnapshotBodySchema>;
 export type SyncSnapshotV1 = z.infer<typeof syncSnapshotSchema>;
 export type SnapshotAadV1 = z.infer<typeof snapshotAadSchema>;
@@ -404,8 +449,105 @@ export const computeSnapshotFrontierHash = (
     runtime,
   );
 
+const snapshotFinanceEntities = (
+  data: SyncFinanceDataV1,
+): ReadonlyArray<readonly [SyncFinancialEntityType, readonly { id: string }[]]> => [
+  ['account', data.accounts],
+  ['transaction', data.transactions],
+  ['category', data.categories],
+  ['planned-income', data.plannedIncomes],
+  ['commitment', data.commitments],
+  ['variable-budget', data.variableBudgets],
+  ['goal', data.goals],
+  ['debt', data.debts],
+  ['debt-payment', data.debtPayments],
+  ['planned-event', data.plannedEvents],
+  ['quick-add-preset', data.presets],
+  ['salary-scenario', data.salaryScenarios],
+  ['settings', data.settings],
+];
+
+export const createBaselineSnapshotEntityStates = async (
+  data: SyncFinanceDataV1,
+  runtime?: CryptoRuntime,
+): Promise<SnapshotEntityStateV1[]> => {
+  const states = await Promise.all(
+    snapshotFinanceEntities(data).flatMap(([entityType, values]) =>
+      values.map(async (value) => ({
+        entityType,
+        entityId: value.id,
+        entityVersion: 1,
+        stateHash: await hashEntityState(
+          {
+            entityType,
+            entityId: value.id,
+            entityVersion: 1,
+            value: value,
+            tombstone: null,
+          },
+          runtime,
+        ),
+        tombstone: false,
+        tombstoneMetadata: null,
+        lastOperationId: null,
+        lastDeviceId: null,
+        lastDeviceSequence: 0,
+        lastLamportTime: 0,
+      })),
+    ),
+  );
+  return snapshotEntityStatesSchema.parse(
+    states.sort(
+      (left, right) =>
+        left.entityType.localeCompare(right.entityType) ||
+        left.entityId.localeCompare(right.entityId),
+    ),
+  );
+};
+
+const assertSnapshotEntityStateIntegrity = async (
+  data: SyncFinanceDataV1,
+  states: readonly SnapshotEntityStateV1[],
+  runtime?: CryptoRuntime,
+): Promise<void> => {
+  const values = new Map<string, CanonicalJson>();
+  for (const [entityType, entities] of snapshotFinanceEntities(data)) {
+    for (const entity of entities) {
+      values.set(`${entityType}\u0000${entity.id}`, entity);
+    }
+  }
+  const liveStateKeys = new Set<string>();
+  for (const state of states) {
+    const key = `${state.entityType}\u0000${state.entityId}`;
+    const value = values.get(key);
+    if (!state.tombstone) {
+      if (!value) throw new Error('Snapshot entity stanje nema odgovarajući živi entitet.');
+      liveStateKeys.add(key);
+    } else if (value) {
+      throw new Error('Snapshot tombstone ne sme imati živu finansijsku vrednost.');
+    }
+    const expectedHash = await hashEntityState(
+      {
+        entityType: state.entityType,
+        entityId: state.entityId,
+        entityVersion: state.entityVersion,
+        value: state.tombstone ? null : (value ?? null),
+        tombstone: state.tombstoneMetadata,
+      },
+      runtime,
+    );
+    if (expectedHash !== state.stateHash) {
+      throw new Error('Snapshot entity state hash nije validan.');
+    }
+  }
+  if (liveStateKeys.size !== values.size) {
+    throw new Error('Snapshot nema entity state za svaku živu finansijsku vrednost.');
+  }
+};
+
 export interface CreateSyncSnapshotInput {
   data: FinanceData;
+  entityStates?: readonly SnapshotEntityStateV1[];
   vaultId: string;
   snapshotId: string;
   revision: number;
@@ -422,6 +564,17 @@ export const createSyncSnapshot = async (
   input: CreateSyncSnapshotInput,
   runtime?: CryptoRuntime,
 ): Promise<SyncSnapshotV1> => {
+  const data = createSyncFinanceData(input.data);
+  const entityStates = input.entityStates
+    ? snapshotEntityStatesSchema.parse(
+        [...input.entityStates].sort(
+          (left, right) =>
+            left.entityType.localeCompare(right.entityType) ||
+            left.entityId.localeCompare(right.entityId),
+        ),
+      )
+    : await createBaselineSnapshotEntityStates(data, runtime);
+  await assertSnapshotEntityStateIntegrity(data, entityStates, runtime);
   const body = syncSnapshotBodySchema.parse({
     type: SYNC_SNAPSHOT_TYPE,
     snapshotSchemaVersion: SYNC_SNAPSHOT_SCHEMA_VERSION,
@@ -437,7 +590,8 @@ export const createSyncSnapshot = async (
     parentManifestHash: input.parentManifestHash,
     previousSnapshotHash: input.previousSnapshotHash,
     causalFrontier: normalizeFrontier(input.causalFrontier),
-    data: createSyncFinanceData(input.data),
+    entityStates,
+    data,
   });
   return syncSnapshotSchema.parse({
     ...body,
@@ -456,6 +610,7 @@ export const parseSyncSnapshot = async (
     throw new Error('Sadržaj snimka nema očekivani integritet.');
   }
   assertSnapshotFinanceIntegrity(parsed.data);
+  await assertSnapshotEntityStateIntegrity(parsed.data, parsed.entityStates, runtime);
   return parsed;
 };
 

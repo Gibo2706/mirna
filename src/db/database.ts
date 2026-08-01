@@ -20,6 +20,7 @@ import type {
   SyncConflictRecord,
   SyncCheckpointRecord,
   SyncDeviceRecord,
+  SyncEntityStateRecord,
   SyncFrontierRecord,
   SyncInboxRecord,
   SyncKeyRecord,
@@ -51,6 +52,7 @@ export class FinanceDatabase extends Dexie {
   syncFrontier!: EntityTable<SyncFrontierRecord, 'id'>;
   syncMetadata!: EntityTable<SyncMetadataRecord, 'id'>;
   syncCheckpoints!: EntityTable<SyncCheckpointRecord, 'id'>;
+  syncEntityStates!: EntityTable<SyncEntityStateRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -295,6 +297,33 @@ export class FinanceDatabase extends Dexie {
             metadata.lastLocalDataHash ??= null;
           });
       });
+
+    this.version(8).stores({
+      syncOutbox:
+        'id, vaultId, &operationId, [vaultId+state], [vaultId+deviceSequence], [vaultId+mutationGroupId+mutationGroupIndex], createdAt',
+      syncInbox:
+        'id, vaultId, &operationId, [vaultId+state], [vaultId+serverCursor], [vaultId+deviceId+deviceSequence], [vaultId+mutationGroupId+mutationGroupIndex], receivedAt',
+      syncEntityStates:
+        'id, vaultId, [vaultId+entityType+entityId], [vaultId+tombstone], updatedAt',
+    });
+
+    this.version(9)
+      .stores({
+        syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
+      })
+      .upgrade(async (transaction) => {
+        await transaction
+          .table<SyncMetadataRecord>('syncMetadata')
+          .toCollection()
+          .modify((metadata) => {
+            metadata.lastSnapshotServerCursor ??= metadata.lastServerCursor ?? 0;
+          });
+      });
+
+    this.version(10).stores({
+      syncConflicts:
+        'id, vaultId, entityId, mutationGroupId, resolutionState, [vaultId+resolutionState], [vaultId+mutationGroupId], detectedAt',
+    });
   }
 }
 

@@ -2,7 +2,11 @@ import QRCode from 'qrcode';
 import { db } from '@/db/database';
 import { probeIndexedDbCryptoKeyPersistence } from '@/db/sync/capability';
 import { disableSyncOnThisDevice, readLocalSyncSetup } from '@/db/sync/repository';
-import type { LocalSyncSetup } from '@/db/sync/records';
+import type { LocalSyncSetup, SyncConflictRecord } from '@/db/sync/records';
+import {
+  SyncConflictRepository,
+  type ConflictResolutionSelection,
+} from '@/db/sync/conflict-repository';
 import { MirnaSyncApi } from './api';
 import { readSyncClientConfig } from './config';
 import {
@@ -17,7 +21,10 @@ import {
   type RecoveryConfirmationValue,
   type RecoveryStartResult,
 } from './lifecycle';
-import { SnapshotSyncService, type SnapshotSyncResult } from './snapshot-service';
+import { SnapshotSyncService } from './snapshot-service';
+import { OperationSyncService } from './operation-service';
+import { ContinuousSyncService, type ContinuousSyncResult } from './continuous-service';
+import { SyncOperationRepository } from '@/db/sync/operation-repository';
 
 type CryptoCapability = Awaited<ReturnType<typeof probeIndexedDbCryptoKeyPersistence>>;
 
@@ -49,6 +56,8 @@ export interface RecoverDeviceLifecyclePort {
 export interface SyncUiLocalStatus {
   readonly setup?: LocalSyncSetup;
   readonly pendingConflictCount: number;
+  readonly pendingLocalOperationCount: number;
+  readonly pendingConflicts: readonly SyncConflictRecord[];
 }
 
 export interface SyncUiServices {
@@ -56,7 +65,15 @@ export interface SyncUiServices {
   readonly loadLocalStatus: () => Promise<SyncUiLocalStatus>;
   readonly disableLocalDevice: () => Promise<void>;
   readonly clearSession: () => void;
-  readonly synchronize: (allowInitialUpload?: boolean) => Promise<SnapshotSyncResult>;
+  readonly resolveConflictGroup: (
+    vaultId: string,
+    mutationGroupId: string,
+    selection: ConflictResolutionSelection,
+  ) => Promise<void>;
+  readonly synchronize: (
+    allowInitialUpload?: boolean,
+    forceCompaction?: boolean,
+  ) => Promise<ContinuousSyncResult>;
   readonly createEnableLifecycle: () => EnableLifecyclePort;
   readonly createNewDevicePairingLifecycle: () => NewDevicePairingLifecyclePort;
   readonly createExistingDevicePairingLifecycle: () => ExistingDevicePairingLifecyclePort;
@@ -97,32 +114,56 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
 
   const api = new MirnaSyncApi(config);
   const snapshotApi = new MirnaSyncApi(config);
+  const operationApi = new MirnaSyncApi(config);
   const dependencies = { api, origin: window.location.origin } as const;
+  const operationRepository = new SyncOperationRepository();
+  const conflictRepository = new SyncConflictRepository();
   const snapshotService = new SnapshotSyncService({
     api: snapshotApi,
     origin: window.location.origin,
+  });
+  const operationService = new OperationSyncService({
+    api: operationApi,
+    origin: window.location.origin,
+    repository: operationRepository,
+  });
+  const continuousService = new ContinuousSyncService({
+    operations: operationService,
+    snapshots: snapshotService,
+    repository: operationRepository,
   });
 
   return {
     probeCapability: probeIndexedDbCryptoKeyPersistence,
     loadLocalStatus: async () => {
       const setup = await readLocalSyncSetup();
-      const pendingConflictCount = setup
+      const pendingConflicts = setup
         ? await db.syncConflicts
             .where('vaultId')
             .equals(setup.vault.vaultId)
             .filter((conflict) => conflict.resolutionState === 'pending')
-            .count()
+            .sortBy('detectedAt')
+        : [];
+      const pendingLocalOperationCount = setup
+        ? await db.syncOutbox.where('vaultId').equals(setup.vault.vaultId).count()
         : 0;
-      return { setup, pendingConflictCount };
+      return {
+        setup,
+        pendingConflictCount: pendingConflicts.length,
+        pendingLocalOperationCount,
+        pendingConflicts,
+      };
     },
     disableLocalDevice: disableSyncOnThisDevice,
     clearSession: () => {
       api.clearSession();
       snapshotApi.clearSession();
+      operationApi.clearSession();
     },
-    synchronize: (allowInitialUpload = false) =>
-      snapshotService.synchronize({ allowInitialUpload }),
+    synchronize: (allowInitialUpload = false, forceCompaction = false) =>
+      continuousService.synchronize({ allowInitialUpload, forceCompaction }),
+    resolveConflictGroup: (vaultId, mutationGroupId, selection) =>
+      conflictRepository.resolveOperationGroup(vaultId, mutationGroupId, selection),
     createEnableLifecycle: () => new EnableSyncLifecycle(dependencies),
     createNewDevicePairingLifecycle: () => new NewDevicePairingLifecycle(dependencies),
     createExistingDevicePairingLifecycle: () => new ExistingDevicePairingLifecycle(dependencies),

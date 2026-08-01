@@ -47,7 +47,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(2);
+    expect(migrationCount).toBe(3);
 
     const snapshotColumns = await env.MIRNA_SYNC_DB.prepare("PRAGMA table_info('snapshots')").all<{
       name: string;
@@ -68,6 +68,18 @@ describe('D1 migration foundation', () => {
           AND name = 'require_current_vault_pointer_before_snapshot_commit'`,
     ).first<string>('name');
     expect(snapshotCommitTrigger).toBe('require_current_vault_pointer_before_snapshot_commit');
+
+    const changeColumns = await env.MIRNA_SYNC_DB.prepare("PRAGMA table_info('sync_changes')").all<{
+      name: string;
+    }>();
+    expect(changeColumns.results.map((column) => column.name)).toContain('canonical_envelope');
+
+    const acknowledgementColumns = await env.MIRNA_SYNC_DB.prepare(
+      "PRAGMA table_info('device_acknowledgements')",
+    ).all<{ name: string }>();
+    expect(acknowledgementColumns.results.map((column) => column.name)).toContain(
+      'causal_frontier_hash',
+    );
   });
 
   it('contains no plaintext financial-content columns and enforces foreign keys', async () => {
@@ -122,6 +134,7 @@ describe('D1 migration foundation', () => {
       'idx_snapshots_vault_state_revision',
       'idx_sync_changes_vault_cursor',
       'idx_sync_changes_vault_device_sequence',
+      'idx_device_acknowledgements_vault_snapshot',
     ]) {
       expect(names.has(requiredIndex), `${requiredIndex} should exist`).toBe(true);
     }

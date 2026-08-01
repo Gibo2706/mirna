@@ -29,6 +29,7 @@
     "MIRNA_MAX_SNAPSHOT_BYTES": "8388608",
     "MIRNA_MAX_OPERATION_BYTES": "65536",
     "MIRNA_MAX_OPERATIONS_PER_BATCH": "100",
+    "MIRNA_MAX_OPERATIONS_PER_VAULT": "10000",
     "MIRNA_MAX_RETAINED_SNAPSHOTS": "3",
     "MIRNA_ORPHAN_LIFETIME_SECONDS": "3600",
     "MIRNA_MAX_RECOVERY_ATTEMPTS": "5",
@@ -83,6 +84,7 @@
         "MIRNA_MAX_SNAPSHOT_BYTES": "8388608",
         "MIRNA_MAX_OPERATION_BYTES": "65536",
         "MIRNA_MAX_OPERATIONS_PER_BATCH": "100",
+        "MIRNA_MAX_OPERATIONS_PER_VAULT": "10000",
         "MIRNA_MAX_RETAINED_SNAPSHOTS": "3",
         "MIRNA_ORPHAN_LIFETIME_SECONDS": "3600",
         "MIRNA_MAX_RECOVERY_ATTEMPTS": "5",
@@ -137,6 +139,11 @@
           "name": "MIRNA_SNAPSHOT_UPLOAD_RATE_LIMITER",
           "namespace_id": "1009",
           "simple": { "limit": 10, "period": 60 },
+        },
+        {
+          "name": "MIRNA_OPERATION_WRITE_RATE_LIMITER",
+          "namespace_id": "1010",
+          "simple": { "limit": 120, "period": 60 },
         },
       ],
       "d1_databases": [

@@ -2,6 +2,7 @@ import { authenticateRequest, handleAuthChallenge, handleAuthSession } from './a
 import type { RequestContext } from './context';
 import { HttpError } from './errors';
 import { handleHealth } from './health';
+import { handleAcknowledgeChanges, handleGetChanges, handleUploadOperation } from './operations';
 import {
   handleApprovePairing,
   handleCancelPairing,
@@ -31,7 +32,8 @@ export const allowedMethodsForPath = (pathname: string): readonly string[] | nul
   if (
     pathname === '/v1/health' ||
     pathname === '/v1/vault/manifest' ||
-    pathname === '/v1/snapshots/current'
+    pathname === '/v1/snapshots/current' ||
+    pathname === '/v1/changes'
   ) {
     return ['GET'];
   }
@@ -40,6 +42,8 @@ export const allowedMethodsForPath = (pathname: string): readonly string[] | nul
     pathname === '/v1/vaults' ||
     pathname === '/v1/auth/challenge' ||
     pathname === '/v1/auth/session' ||
+    pathname === '/v1/operations' ||
+    pathname === '/v1/acks' ||
     pathname === '/v1/pairings' ||
     pathname === '/v1/recovery/challenge' ||
     pathname === '/v1/recovery/bundle' ||
@@ -70,6 +74,9 @@ export const routeRequest = async (context: RequestContext): Promise<Response> =
   if (pathname === '/v1/recovery/challenge') return handleRecoveryChallenge(context);
   if (pathname === '/v1/recovery/bundle') return handleFetchRecoveryBundle(context);
   if (pathname === '/v1/recovery/snapshot') return handleFetchRecoverySnapshot(context);
+  if (pathname === '/v1/operations') return handleUploadOperation(context);
+  if (pathname === '/v1/changes') return handleGetChanges(context);
+  if (pathname === '/v1/acks') return handleAcknowledgeChanges(context);
   if (pathname === '/v1/vault/manifest') {
     return handleGetCurrentManifest(context, await authenticateRequest(context));
   }

@@ -25,6 +25,7 @@ export interface WorkerLimits {
   maxSnapshotBytes: number;
   maxRetainedSnapshots: number;
   orphanLifetimeMs: number;
+  maxOperationsPerVault: number;
 }
 
 export const readWorkerLimits = (env: Env): WorkerLimits => ({
@@ -71,4 +72,10 @@ export const readWorkerLimits = (env: Env): WorkerLimits => ({
   maxRetainedSnapshots: parseBoundedInteger(env.MIRNA_MAX_RETAINED_SNAPSHOTS, 3, 1, 10),
   orphanLifetimeMs:
     parseBoundedInteger(env.MIRNA_ORPHAN_LIFETIME_SECONDS, 3_600, 60, 86_400) * 1_000,
+  maxOperationsPerVault: parseBoundedInteger(
+    env.MIRNA_MAX_OPERATIONS_PER_VAULT,
+    10_000,
+    100,
+    100_000,
+  ),
 });

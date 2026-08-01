@@ -15,6 +15,13 @@ import {
   type SyncMetadataRecord,
 } from './records';
 import type { SnapshotCausalFrontierV1 } from '@/domain/sync/snapshot';
+import {
+  createBaselineSnapshotEntityStates,
+  createSyncFinanceData,
+  snapshotEntityStatesSchema,
+  type SnapshotEntityStateV1,
+} from '@/domain/sync/snapshot';
+import { operationTombstoneSchema } from '@/domain/sync/operation';
 
 export class LocalSnapshotRaceError extends Error {
   constructor() {
@@ -27,6 +34,7 @@ export type SnapshotMetadataChanges = Pick<
   SyncMetadataRecord,
   | 'firstUploadConsent'
   | 'lastServerCursor'
+  | 'lastSnapshotServerCursor'
   | 'lastSnapshotRevision'
   | 'lastSnapshotId'
   | 'lastSnapshotHash'
@@ -83,6 +91,40 @@ export class SyncSnapshotRepository {
     };
   }
 
+  async readEntityStatesForSnapshot(
+    vaultId: string,
+    data: FinanceData,
+  ): Promise<SnapshotEntityStateV1[]> {
+    const baseline = await createBaselineSnapshotEntityStates(createSyncFinanceData(data));
+    const states = new Map(
+      baseline.map((state) => [`${state.entityType}\u0000${state.entityId}`, state] as const),
+    );
+    const stored = await this.database.syncEntityStates.where('vaultId').equals(vaultId).toArray();
+    for (const state of stored) {
+      states.set(`${state.entityType}\u0000${state.entityId}`, {
+        entityType: state.entityType,
+        entityId: state.entityId,
+        entityVersion: state.entityVersion,
+        stateHash: state.stateHash,
+        tombstone: state.tombstone,
+        tombstoneMetadata: state.canonicalTombstone
+          ? operationTombstoneSchema.parse(JSON.parse(state.canonicalTombstone) as unknown)
+          : null,
+        lastOperationId: state.lastOperationId,
+        lastDeviceId: state.lastDeviceId,
+        lastDeviceSequence: state.lastDeviceSequence,
+        lastLamportTime: state.lastLamportTime,
+      });
+    }
+    return snapshotEntityStatesSchema.parse(
+      [...states.values()].sort(
+        (left, right) =>
+          left.entityType.localeCompare(right.entityType) ||
+          left.entityId.localeCompare(right.entityId),
+      ),
+    );
+  }
+
   async writeSafetyCheckpoint(
     setup: LocalSyncSetup,
     data: FinanceData,
@@ -120,11 +162,14 @@ export class SyncSnapshotRepository {
     setup: LocalSyncSetup,
     data: FinanceData,
     changes: SnapshotMetadataChanges,
+    entityStates?: readonly SnapshotEntityStateV1[],
   ): Promise<void> {
     const validated = validateFinanceData(data);
+    const snapshotStates =
+      entityStates ?? (await createBaselineSnapshotEntityStates(createSyncFinanceData(validated)));
     await this.database.transaction(
       'rw',
-      [...financeTables(this.database), this.database.syncMetadata],
+      [...financeTables(this.database), this.database.syncMetadata, this.database.syncEntityStates],
       async () => {
         const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
         if (
@@ -136,7 +181,104 @@ export class SyncSnapshotRepository {
           throw new LocalSnapshotRaceError();
         }
         await replaceFinanceDataInTransaction(this.database, validated);
+        await this.database.syncEntityStates.clear();
+        await this.database.syncEntityStates.bulkPut(
+          snapshotStates.map((state) => ({
+            id: `${setup.vault.vaultId}:${state.entityType}:${state.entityId}`,
+            vaultId: setup.vault.vaultId,
+            entityType: state.entityType,
+            entityId: state.entityId,
+            entityVersion: state.entityVersion,
+            stateHash: state.stateHash,
+            tombstone: state.tombstone,
+            canonicalTombstone: state.tombstoneMetadata
+              ? canonicalizeJson(state.tombstoneMetadata)
+              : undefined,
+            lastOperationId: state.lastOperationId,
+            lastDeviceId: state.lastDeviceId,
+            lastDeviceSequence: state.lastDeviceSequence,
+            lastLamportTime: state.lastLamportTime,
+            updatedAt: changes.lastSyncAt ?? new Date().toISOString(),
+          })),
+        );
         await this.database.syncMetadata.put({ ...current, ...changes });
+      },
+    );
+  }
+
+  async acceptCompactionSnapshot(
+    setup: LocalSyncSetup,
+    changes: SnapshotMetadataChanges,
+    causalFrontier: SnapshotCausalFrontierV1,
+    entityStates: readonly SnapshotEntityStateV1[],
+  ): Promise<boolean> {
+    return this.database.transaction(
+      'rw',
+      [
+        this.database.syncMetadata,
+        this.database.syncFrontier,
+        this.database.syncInbox,
+        this.database.syncEntityStates,
+        this.database.syncConflicts,
+      ],
+      async () => {
+        const currentMetadata = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
+        if (
+          !currentMetadata ||
+          currentMetadata.vaultId !== setup.vault.vaultId ||
+          currentMetadata.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
+          currentMetadata.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          causalFrontier.serverCursor > currentMetadata.lastServerCursor
+        ) {
+          return false;
+        }
+        const unresolvedConflict = await this.database.syncConflicts
+          .where('[vaultId+resolutionState]')
+          .equals([setup.vault.vaultId, 'pending'])
+          .first();
+        if (unresolvedConflict) return false;
+
+        for (const device of causalFrontier.devices) {
+          const localFrontier = await this.database.syncFrontier.get(
+            `${setup.vault.vaultId}:${device.deviceId}`,
+          );
+          if (
+            localFrontier?.lastDeviceSequence === device.deviceSequence &&
+            localFrontier.lastOperationHash === device.lastOperationHash
+          ) {
+            continue;
+          }
+          const referenced = await this.database.syncInbox
+            .where('[vaultId+deviceId+deviceSequence]')
+            .equals([setup.vault.vaultId, device.deviceId, device.deviceSequence])
+            .first();
+          if (
+            referenced?.operationHash !== device.lastOperationHash ||
+            referenced.state !== 'applied'
+          ) {
+            return false;
+          }
+        }
+
+        for (const state of entityStates) {
+          const localState = await this.database.syncEntityStates.get(
+            `${setup.vault.vaultId}:${state.entityType}:${state.entityId}`,
+          );
+          if (!localState || localState.entityVersion < state.entityVersion) return false;
+          if (
+            localState.entityVersion === state.entityVersion &&
+            (localState.stateHash !== state.stateHash || localState.tombstone !== state.tombstone)
+          ) {
+            return false;
+          }
+          if (state.lastOperationId) {
+            const accepted = await this.database.syncInbox.get(state.lastOperationId);
+            if (accepted?.state !== 'applied') return false;
+          }
+        }
+
+        await this.database.syncMetadata.put({ ...currentMetadata, ...changes });
+        return true;
       },
     );
   }

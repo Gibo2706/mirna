@@ -1,4 +1,5 @@
 import type { EncryptedKeyEnvelopeV1, VaultManifestV1 } from '@/domain/sync/schemas';
+import type { SyncFinancialEntityType, SyncOperationCommandType } from '@/domain/sync/operation';
 import type { FinanceData } from '@/domain/types';
 
 export const ACTIVE_SYNC_VAULT_RECORD_ID = 'active-sync-vault' as const;
@@ -60,14 +61,33 @@ export interface SyncOutboxRecord {
   deviceId: string;
   deviceSequence: number;
   keyEpoch: number;
+  mutationGroupId: string;
+  mutationGroupIndex: number;
+  mutationGroupSize: number;
   state: 'intent' | 'encrypted' | 'uploading' | 'failed';
-  entityType: string;
+  entityType: SyncFinancialEntityType;
   entityId: string;
-  command: string;
+  command: SyncOperationCommandType;
   canonicalPayload: string;
   encryptedEnvelope?: string;
   attemptCount: number;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface SyncEntityStateRecord {
+  id: string;
+  vaultId: string;
+  entityType: SyncFinancialEntityType;
+  entityId: string;
+  entityVersion: number;
+  stateHash: string;
+  tombstone: boolean;
+  canonicalTombstone?: string;
+  lastOperationId: string | null;
+  lastDeviceId: string | null;
+  lastDeviceSequence: number;
+  lastLamportTime: number;
   updatedAt: string;
 }
 
@@ -76,6 +96,12 @@ export interface SyncInboxRecord {
   vaultId: string;
   operationId: string;
   serverCursor: number;
+  deviceId?: string;
+  deviceSequence?: number;
+  operationHash?: string;
+  mutationGroupId?: string;
+  mutationGroupIndex?: number;
+  mutationGroupSize?: number;
   state: 'received' | 'applied' | 'conflicted' | 'rejected';
   encryptedEnvelope: string;
   receivedAt: string;
@@ -90,6 +116,9 @@ export interface SyncConflictRecord {
   entityId: string;
   localOperationId: string;
   remoteOperationId: string;
+  mutationGroupId?: string;
+  mutationGroupIndex?: number;
+  mutationGroupSize?: number;
   localCanonicalProposal: string;
   remoteCanonicalProposal: string;
   causalMetadata: string;
@@ -115,6 +144,7 @@ export interface SyncMetadataRecord {
   localSchemaVersion: 1;
   firstUploadConsent: 'pending' | 'accepted' | 'declined';
   lastServerCursor: number;
+  lastSnapshotServerCursor: number;
   lastSnapshotRevision: number;
   lastSnapshotId: string | null;
   lastSnapshotHash: string | null;

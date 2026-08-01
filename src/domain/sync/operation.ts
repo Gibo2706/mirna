@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import {
   accountSchema,
-  appSettingsSchema,
   categorySchema,
   commitmentSchema,
   debtPaymentSchema,
@@ -11,6 +10,7 @@ import {
   plannedIncomeSchema,
   presetSchema,
   salaryScenarioSchema,
+  syncedAppSettingsSchema,
   transactionSchema,
   variableBudgetSchema,
 } from '../schemas';
@@ -21,8 +21,18 @@ import {
   SYNC_PROTOCOL_VERSION,
   SYNC_TRANSCRIPT_TYPES,
 } from './constants';
-import { hashDomainSeparatedCanonical, sha256, type CryptoRuntime } from './crypto';
-import { base64UrlToBytes, bytesToBase64Url } from './encoding';
+import {
+  decryptAesGcm,
+  deriveObjectEncryptionKey,
+  encryptAesGcm,
+  hashDomainSeparatedCanonical,
+  randomBytes,
+  sha256,
+  signDomainSeparatedCanonical,
+  verifyDomainSeparatedCanonicalSignature,
+  type CryptoRuntime,
+} from './crypto';
+import { base64UrlToBytes, bytesToBase64Url, clearBytes, decodeUtf8 } from './encoding';
 import {
   aesGcmNonceSchema,
   cryptoSuiteSchema,
@@ -35,6 +45,8 @@ import {
 
 export const SYNC_OPERATION_DOMAIN = 'MIRNA-E2EE-V1/sync-operation' as const;
 export const SYNC_ENTITY_STATE_DOMAIN = 'MIRNA-E2EE-V1/sync-entity-state' as const;
+export const SYNC_OPERATION_ENVELOPE_SIGNATURE_DOMAIN =
+  'MIRNA-E2EE-V1/operation-envelope-signature' as const;
 
 export const SYNC_FINANCIAL_ENTITY_TYPES = [
   'account',
@@ -80,6 +92,7 @@ export const SYNC_OPERATION_COMMAND_TYPES = [
   'salary-scenario.upsert',
   'salary-scenario.delete',
   'settings.upsert',
+  'settings.delete',
 ] as const;
 
 export type SyncOperationCommandType = (typeof SYNC_OPERATION_COMMAND_TYPES)[number];
@@ -207,6 +220,7 @@ const COMMAND_DESCRIPTORS = {
   'salary-scenario.upsert': { entityType: 'salary-scenario', action: 'upsert' },
   'salary-scenario.delete': { entityType: 'salary-scenario', action: 'delete' },
   'settings.upsert': { entityType: 'settings', action: 'upsert' },
+  'settings.delete': { entityType: 'settings', action: 'delete' },
 } as const satisfies Record<SyncOperationCommandType, CommandDescriptor>;
 
 const ENTITY_SCHEMAS = {
@@ -222,7 +236,7 @@ const ENTITY_SCHEMAS = {
   'planned-event': plannedEventSchema.strict(),
   'quick-add-preset': presetSchema.strict(),
   'salary-scenario': salaryScenarioSchema.strict(),
-  settings: appSettingsSchema.strict(),
+  settings: syncedAppSettingsSchema,
 } as const satisfies Record<SyncFinancialEntityType, z.ZodType>;
 
 export const syncCommandSchema = z
@@ -284,8 +298,7 @@ export const syncCommandSchema = z
       command.value !== null ||
       command.tombstone === null ||
       !command.result.tombstone ||
-      command.precondition.entityVersion === 0 ||
-      command.precondition.tombstone
+      command.precondition.entityVersion === 0
     ) {
       context.addIssue({
         code: 'custom',
@@ -306,6 +319,9 @@ export const syncOperationSchema = z
     suite: cryptoSuiteSchema,
     vaultId: opaqueIdSchema,
     operationId: opaqueIdSchema,
+    mutationGroupId: opaqueIdSchema,
+    mutationGroupIndex: z.number().int().nonnegative().max(999),
+    mutationGroupSize: z.number().int().positive().max(1_000),
     deviceId: opaqueIdSchema,
     deviceSequence: positiveSafeSequenceSchema,
     lamportTime: positiveSafeSequenceSchema,
@@ -316,6 +332,13 @@ export const syncOperationSchema = z
     createdAt: timestampSchema,
   })
   .superRefine((operation, context) => {
+    if (operation.mutationGroupIndex >= operation.mutationGroupSize) {
+      context.addIssue({
+        code: 'custom',
+        path: ['mutationGroupIndex'],
+        message: 'Indeks operacije mora biti unutar mutation grupe.',
+      });
+    }
     const ownPredecessor = operation.causalFrontier.find(
       (entry) => entry.deviceId === operation.deviceId,
     );
@@ -401,10 +424,44 @@ export const acceptedOperationEnvelopeSchema = operationEnvelopeSchema.extend({
   serverCursor: positiveSafeSequenceSchema,
 });
 
+export const operationUploadRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  envelope: operationEnvelopeSchema,
+});
+
+export const operationUploadResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  operationId: opaqueIdSchema,
+  serverCursor: positiveSafeSequenceSchema,
+  accepted: z.literal(true),
+});
+
+export const operationChangesResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  changes: z.array(acceptedOperationEnvelopeSchema).max(SYNC_LIMITS.maxOperationsPerBatch),
+  nextCursor: safeSequenceSchema,
+  hasMore: z.boolean(),
+});
+
+export const deviceAcknowledgementRequestSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  acknowledgedServerCursor: safeSequenceSchema,
+  causalFrontierHash: sha256Schema,
+  acknowledgedSnapshotId: opaqueIdSchema.nullable(),
+  acknowledgedSnapshotRevision: safeSequenceSchema,
+});
+
+export const deviceAcknowledgementResponseSchema = z.strictObject({
+  protocolVersion: protocolVersionSchema,
+  acknowledgedServerCursor: safeSequenceSchema,
+  accepted: z.literal(true),
+});
+
 export type OperationEnvelopeAadV1 = z.infer<typeof operationEnvelopeAadSchema>;
 export type UnsignedOperationEnvelopeV1 = z.infer<typeof unsignedOperationEnvelopeSchema>;
 export type OperationEnvelopeV1 = z.infer<typeof operationEnvelopeSchema>;
 export type AcceptedOperationEnvelopeV1 = z.infer<typeof acceptedOperationEnvelopeSchema>;
+export type OperationChangesResponseV1 = z.infer<typeof operationChangesResponseSchema>;
 
 export const parseSyncOperation = (value: unknown): SyncOperationV1 => {
   const parsed = syncOperationSchema.parse(value);
@@ -520,6 +577,134 @@ export const assertOperationResultStateHash = async (
   const operation = parseSyncOperation(operationInput);
   if ((await operationResultStateHash(operation, runtime)) !== operation.command.result.stateHash) {
     throw new Error('Resulting state hash operacije nije validan.');
+  }
+};
+
+export const createEncryptedOperation = async (
+  input: {
+    operation: SyncOperationV1;
+    vaultMasterKey: Uint8Array;
+    signingPrivateKey: CryptoKey;
+  },
+  runtime?: CryptoRuntime,
+): Promise<OperationEnvelopeV1> => {
+  const operation = parseSyncOperation(input.operation);
+  const plaintext = canonicalBytes(operation);
+  const ciphertextLength = plaintext.byteLength + 16;
+  const aad = operationEnvelopeAadSchema.parse({
+    type: 'mirna-operation-envelope-aad-v1',
+    protocolVersion: operation.protocolVersion,
+    suite: operation.suite,
+    vaultId: operation.vaultId,
+    operationId: operation.operationId,
+    deviceId: operation.deviceId,
+    deviceSequence: operation.deviceSequence,
+    keyEpoch: operation.keyEpoch,
+    ciphertextLength,
+  });
+  const nonce = randomBytes(SYNC_LIMITS.aesGcmNonceBytes, runtime);
+  const key = await deriveObjectEncryptionKey(
+    input.vaultMasterKey,
+    {
+      vaultId: operation.vaultId,
+      keyEpoch: operation.keyEpoch,
+      objectType: 'operation',
+      objectId: operation.operationId,
+      purpose: 'operation',
+    },
+    runtime,
+  );
+  let ciphertext: Uint8Array | undefined;
+  try {
+    ciphertext = await encryptAesGcm(plaintext, key, nonce, aad, runtime);
+    const unsigned = unsignedOperationEnvelopeSchema.parse({
+      type: SYNC_TRANSCRIPT_TYPES.operationEnvelope,
+      protocolVersion: operation.protocolVersion,
+      suite: operation.suite,
+      vaultId: operation.vaultId,
+      operationId: operation.operationId,
+      deviceId: operation.deviceId,
+      deviceSequence: operation.deviceSequence,
+      keyEpoch: operation.keyEpoch,
+      ciphertextLength: ciphertext.byteLength,
+      nonce: bytesToBase64Url(nonce),
+      aad,
+      ciphertext: bytesToBase64Url(ciphertext),
+      ciphertextHash: bytesToBase64Url(await sha256(ciphertext, runtime)),
+    });
+    return operationEnvelopeSchema.parse({
+      ...unsigned,
+      signature: await signDomainSeparatedCanonical(
+        SYNC_OPERATION_ENVELOPE_SIGNATURE_DOMAIN,
+        unsigned,
+        input.signingPrivateKey,
+        runtime,
+      ),
+    });
+  } finally {
+    clearBytes(plaintext, nonce);
+    if (ciphertext) clearBytes(ciphertext);
+  }
+};
+
+export const openEncryptedOperation = async (
+  input: {
+    envelope: OperationEnvelopeV1;
+    vaultMasterKey: Uint8Array;
+    signingPublicKey: CryptoKey;
+    expected: {
+      vaultId: string;
+      keyEpoch: number;
+      deviceId: string;
+    };
+  },
+  runtime?: CryptoRuntime,
+): Promise<SyncOperationV1> => {
+  const envelope = parseOperationEnvelope(input.envelope);
+  if (
+    envelope.vaultId !== input.expected.vaultId ||
+    envelope.keyEpoch !== input.expected.keyEpoch ||
+    envelope.deviceId !== input.expected.deviceId
+  ) {
+    throw new Error('Envelope operacije ne odgovara očekivanom sync kontekstu.');
+  }
+  await assertOperationCiphertextHash(envelope, runtime);
+  if (
+    !(await verifyDomainSeparatedCanonicalSignature(
+      SYNC_OPERATION_ENVELOPE_SIGNATURE_DOMAIN,
+      operationEnvelopeSignatureBody(envelope),
+      envelope.signature,
+      input.signingPublicKey,
+      runtime,
+    ))
+  ) {
+    throw new Error('Potpis envelope-a operacije nije validan.');
+  }
+  const ciphertext = base64UrlToBytes(envelope.ciphertext);
+  const nonce = base64UrlToBytes(envelope.nonce);
+  const key = await deriveObjectEncryptionKey(
+    input.vaultMasterKey,
+    {
+      vaultId: envelope.vaultId,
+      keyEpoch: envelope.keyEpoch,
+      objectType: 'operation',
+      objectId: envelope.operationId,
+      purpose: 'operation',
+    },
+    runtime,
+  );
+  let plaintext: Uint8Array | undefined;
+  try {
+    plaintext = await decryptAesGcm(ciphertext, key, nonce, envelope.aad, runtime);
+    const operation = parseSyncOperation(
+      JSON.parse(decodeUtf8(new Uint8Array(plaintext))) as unknown,
+    );
+    assertOperationEnvelopeMatches(envelope, operation);
+    await assertOperationResultStateHash(operation, runtime);
+    return operation;
+  } finally {
+    clearBytes(ciphertext, nonce);
+    if (plaintext) clearBytes(plaintext);
   }
 };
 

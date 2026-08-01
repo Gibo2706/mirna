@@ -429,6 +429,7 @@ const createLocalSetup = async (input: {
       localSchemaVersion: 1,
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
+      lastSnapshotServerCursor: 0,
       lastSnapshotRevision: 0,
       lastSnapshotId: input.snapshotCommitId ?? null,
       lastSnapshotHash: null,

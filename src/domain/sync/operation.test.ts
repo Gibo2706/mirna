@@ -2,15 +2,17 @@
 import { describe, expect, it } from 'vitest';
 import type { CanonicalJson } from './canonical';
 import { SYNC_CRYPTO_SUITE, SYNC_PROTOCOL_VERSION } from './constants';
-import { sha256 } from './crypto';
-import { bytesToBase64Url } from './encoding';
+import { generateDeviceKeyPairs, randomBytes, sha256 } from './crypto';
+import { base64UrlToBytes, bytesToBase64Url } from './encoding';
 import {
   assertOperationCiphertextHash,
   assertOperationEnvelopeMatches,
   assertOperationResultStateHash,
+  createEncryptedOperation,
   hashEntityState,
   hashSyncOperation,
   nextLamportTime,
+  openEncryptedOperation,
   operationResultStateHash,
   operationEnvelopeSignatureBody,
   parseOperationEnvelope,
@@ -152,8 +154,6 @@ const entityValues: Record<SyncFinancialEntityType, Record<string, unknown>> = {
     baseMonthlyIncome: 100_000,
     currency: 'RSD',
     locale: 'sr-Latn-RS',
-    appearance: 'system',
-    installHintDismissed: false,
     createdAt: timestamp,
     updatedAt: timestamp,
   },
@@ -171,6 +171,9 @@ const operationFor = (
     ...protocolOperationDefaults,
     vaultId: opaque('V'),
     operationId: opaque('O'),
+    mutationGroupId: opaque('G'),
+    mutationGroupIndex: 0,
+    mutationGroupSize: 1,
     deviceId: opaque('D'),
     deviceSequence: 1,
     lamportTime: 1,
@@ -196,6 +199,9 @@ const deleteOperation = (): SyncOperationV1 =>
     ...protocolOperationDefaults,
     vaultId: opaque('V'),
     operationId: opaque('X'),
+    mutationGroupId: opaque('G'),
+    mutationGroupIndex: 0,
+    mutationGroupSize: 1,
     deviceId: opaque('D'),
     deviceSequence: 2,
     lamportTime: 2,
@@ -236,8 +242,7 @@ describe('SyncOperationV1 strict command model', () => {
   );
 
   it('has no wildcard or arbitrary-patch command and permits deletion only where defined', () => {
-    expect(SYNC_OPERATION_COMMAND_TYPES).toHaveLength(25);
-    expect(SYNC_OPERATION_COMMAND_TYPES).not.toContain('settings.delete');
+    expect(SYNC_OPERATION_COMMAND_TYPES).toHaveLength(26);
     expect(
       SYNC_OPERATION_COMMAND_TYPES.some((command) => /patch|eval|script|table/iu.test(command)),
     ).toBe(false);
@@ -469,5 +474,80 @@ describe('signed encrypted operation envelope metadata', () => {
         operationId: opaque('Q'),
       }),
     ).toThrow(/ne odgovara/u);
+  });
+
+  it('encrypts, signs and opens an operation while rejecting key, signature and ciphertext tampering', async () => {
+    const provisional = operationFor('account');
+    const operation = parseSyncOperation({
+      ...provisional,
+      command: {
+        ...provisional.command,
+        result: {
+          ...provisional.command.result,
+          stateHash: await operationResultStateHash(provisional),
+        },
+      },
+    });
+    const deviceKeys = await generateDeviceKeyPairs();
+    const vaultMasterKey = randomBytes(32);
+    const envelope = await createEncryptedOperation({
+      operation,
+      vaultMasterKey,
+      signingPrivateKey: deviceKeys.signing.privateKey,
+    });
+
+    await expect(
+      openEncryptedOperation({
+        envelope,
+        vaultMasterKey,
+        signingPublicKey: deviceKeys.signing.publicKey,
+        expected: {
+          vaultId: operation.vaultId,
+          keyEpoch: operation.keyEpoch,
+          deviceId: operation.deviceId,
+        },
+      }),
+    ).resolves.toEqual(operation);
+
+    const changedCiphertext = base64UrlToBytes(envelope.ciphertext);
+    changedCiphertext[0] = (changedCiphertext[0] ?? 0) ^ 1;
+    await expect(
+      openEncryptedOperation({
+        envelope: { ...envelope, ciphertext: bytesToBase64Url(changedCiphertext) },
+        vaultMasterKey,
+        signingPublicKey: deviceKeys.signing.publicKey,
+        expected: {
+          vaultId: operation.vaultId,
+          keyEpoch: operation.keyEpoch,
+          deviceId: operation.deviceId,
+        },
+      }),
+    ).rejects.toThrow(/Hash šifrata/u);
+
+    const otherDeviceKeys = await generateDeviceKeyPairs();
+    await expect(
+      openEncryptedOperation({
+        envelope,
+        vaultMasterKey,
+        signingPublicKey: otherDeviceKeys.signing.publicKey,
+        expected: {
+          vaultId: operation.vaultId,
+          keyEpoch: operation.keyEpoch,
+          deviceId: operation.deviceId,
+        },
+      }),
+    ).rejects.toThrow(/Potpis/u);
+    await expect(
+      openEncryptedOperation({
+        envelope,
+        vaultMasterKey: randomBytes(32),
+        signingPublicKey: deviceKeys.signing.publicKey,
+        expected: {
+          vaultId: operation.vaultId,
+          keyEpoch: operation.keyEpoch,
+          deviceId: operation.deviceId,
+        },
+      }),
+    ).rejects.toThrow();
   });
 });

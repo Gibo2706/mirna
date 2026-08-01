@@ -2,6 +2,16 @@ import { canonicalizeJson } from '@/domain/sync/canonical';
 import { SYNC_LIMITS, SYNC_PROTOCOL_VERSION } from '@/domain/sync/constants';
 import { base64UrlToBytes, bytesToBase64Url, decodeUtf8, utf8 } from '@/domain/sync/encoding';
 import {
+  deviceAcknowledgementRequestSchema,
+  deviceAcknowledgementResponseSchema,
+  operationChangesResponseSchema,
+  operationEnvelopeSchema,
+  operationUploadRequestSchema,
+  operationUploadResponseSchema,
+  type OperationChangesResponseV1,
+  type OperationEnvelopeV1,
+} from '@/domain/sync/operation';
+import {
   authChallengeRequestSchema,
   authChallengeSchema,
   authSessionRequestSchema,
@@ -41,6 +51,7 @@ const MIN_TIMEOUT_MS = 1;
 const MAX_TIMEOUT_MS = 60_000;
 const DEFAULT_RESPONSE_LIMIT_BYTES = 256 * 1_024;
 const RECOVERY_RESPONSE_LIMIT_BYTES = 2 * 1_024 * 1_024;
+const OPERATION_RESPONSE_LIMIT_BYTES = 2 * 1_024 * 1_024;
 const ERROR_RESPONSE_LIMIT_BYTES = 32 * 1_024;
 const ACCESS_TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const SNAPSHOT_ENVELOPE_HEADER = 'X-Mirna-Snapshot-Envelope';
@@ -106,6 +117,14 @@ const REMOTE_ERROR_CODES = new Set([
   'ORIGIN_MISMATCH',
   'ORIGIN_NOT_ALLOWED',
   'ORIGIN_REQUIRED',
+  'OPERATION_CIPHERTEXT_INVALID',
+  'OPERATION_CONTEXT_MISMATCH',
+  'OPERATION_ID_REUSED',
+  'OPERATION_KEY_EPOCH_CONFLICT',
+  'OPERATION_SEQUENCE_CONFLICT',
+  'OPERATION_SIGNATURE_INVALID',
+  'OPERATION_STATE_CHANGED',
+  'OPERATION_STATE_UNAVAILABLE',
   'PAIRING_ALREADY_FINALIZED',
   'PAIRING_CONTEXT_MISMATCH',
   'PAIRING_CREATE_CONFLICT',
@@ -153,6 +172,8 @@ const REMOTE_ERROR_CODES = new Set([
   'SNAPSHOT_TOO_LARGE',
   'UNSUPPORTED_CONTENT_TYPE',
   'VAULT_ALREADY_EXISTS',
+  'ACK_CONTEXT_CONFLICT',
+  'ACK_ROLLBACK_DETECTED',
 ]);
 
 const ERROR_MESSAGES: Readonly<Record<string, string>> = {
@@ -364,6 +385,9 @@ export const SYNC_PHASE_ONE_ROUTES = Object.freeze({
   recoveryBundle: '/v1/recovery/bundle',
   recoverySnapshot: '/v1/recovery/snapshot',
   currentSnapshot: '/v1/snapshots/current',
+  operations: '/v1/operations',
+  changes: '/v1/changes',
+  acknowledgements: '/v1/acks',
 });
 
 export class MirnaSyncApi {
@@ -647,6 +671,63 @@ export class MirnaSyncApi {
         path: SYNC_PHASE_ONE_ROUTES.currentSnapshot,
         authenticated: true,
       },
+      options,
+    );
+  }
+
+  async uploadOperation(
+    envelope: OperationEnvelopeV1,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof operationUploadResponseSchema>> {
+    return this.#post(
+      SYNC_PHASE_ONE_ROUTES.operations,
+      operationUploadRequestSchema,
+      operationUploadResponseSchema,
+      { protocolVersion: SYNC_PROTOCOL_VERSION, envelope: operationEnvelopeSchema.parse(envelope) },
+      [200, 201],
+      true,
+      options,
+    );
+  }
+
+  async getChanges(
+    after: number,
+    limit = SYNC_LIMITS.maxOperationsPerBatch,
+    options?: SyncRequestOptions,
+  ): Promise<OperationChangesResponseV1> {
+    if (
+      !Number.isSafeInteger(after) ||
+      after < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > SYNC_LIMITS.maxOperationsPerBatch
+    ) {
+      throw new SyncApiError('INVALID_CLIENT_REQUEST');
+    }
+    return this.#request(
+      {
+        method: 'GET',
+        path: `${SYNC_PHASE_ONE_ROUTES.changes}?after=${after}&limit=${limit}`,
+        responseSchema: operationChangesResponseSchema,
+        expectedStatuses: [200],
+        authenticated: true,
+        responseLimitBytes: OPERATION_RESPONSE_LIMIT_BYTES,
+      },
+      options,
+    );
+  }
+
+  async acknowledgeChanges(
+    input: z.input<typeof deviceAcknowledgementRequestSchema>,
+    options?: SyncRequestOptions,
+  ): Promise<z.output<typeof deviceAcknowledgementResponseSchema>> {
+    return this.#post(
+      SYNC_PHASE_ONE_ROUTES.acknowledgements,
+      deviceAcknowledgementRequestSchema,
+      deviceAcknowledgementResponseSchema,
+      input,
+      [200],
+      true,
       options,
     );
   }

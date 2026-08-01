@@ -97,6 +97,7 @@ const localSetup = (): LocalSyncSetup => {
       localSchemaVersion: 1,
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
+      lastSnapshotServerCursor: 0,
       lastSnapshotRevision: 0,
       lastSnapshotId: null,
       lastSnapshotHash: null,
@@ -114,13 +115,18 @@ const unexpected = (): never => {
 
 const baseServices = (
   overrides: Partial<SyncUiServices> = {},
-  initialStatus: SyncUiLocalStatus = { pendingConflictCount: 0 },
+  initialStatus: SyncUiLocalStatus = {
+    pendingConflictCount: 0,
+    pendingLocalOperationCount: 0,
+    pendingConflicts: [],
+  },
 ): SyncUiServices => ({
   probeCapability: vi.fn(() => Promise.resolve(supportedCapability)),
   loadLocalStatus: vi.fn(() => Promise.resolve(initialStatus)),
   disableLocalDevice: vi.fn(() => Promise.resolve()),
   clearSession: vi.fn(),
   synchronize: vi.fn(() => Promise.resolve({ kind: 'up-to-date' as const, revision: 1 })),
+  resolveConflictGroup: vi.fn(() => Promise.resolve()),
   createEnableLifecycle: unexpected,
   createNewDevicePairingLifecycle: unexpected,
   createExistingDevicePairingLifecycle: unexpected,
@@ -148,11 +154,20 @@ afterEach(() => {
 describe('Phase 1 sync UI', () => {
   it('requires recovery group verification and a separate explicit activation', async () => {
     const user = userEvent.setup();
-    let status: SyncUiLocalStatus = { pendingConflictCount: 0 };
+    let status: SyncUiLocalStatus = {
+      pendingConflictCount: 0,
+      pendingLocalOperationCount: 0,
+      pendingConflicts: [],
+    };
     const confirmRecoveryCode = vi.fn(() => Promise.resolve());
     const activate = vi.fn(() => {
       const setup = localSetup();
-      status = { setup, pendingConflictCount: 0 };
+      status = {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+      };
       return Promise.resolve(setup);
     });
     const services = baseServices({
@@ -246,7 +261,15 @@ describe('Phase 1 sync UI', () => {
           : { kind: 'awaiting-upload-consent' as const, revision: 0 as const },
       ),
     );
-    const services = baseServices({ synchronize }, { setup, pendingConflictCount: 0 });
+    const services = baseServices(
+      { synchronize },
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+      },
+    );
 
     renderManager(services);
     const consentButton = await screen.findByRole('button', {
@@ -256,7 +279,7 @@ describe('Phase 1 sync UI', () => {
       /server ne dobija čitljive finansijske podatke/i,
     );
     await user.click(consentButton);
-    await waitFor(() => expect(synchronize).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(synchronize).toHaveBeenCalledWith(true, false));
   });
 
   it('does not expose a sync row or construct sync services while the flag is off', () => {

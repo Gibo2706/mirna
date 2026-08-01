@@ -305,4 +305,17 @@ describe('SyncSnapshotV1 client primitives', () => {
     tampered.data.transactions[0].description = 'Promenjen sadržaj';
     await expect(parseSyncSnapshot(tampered)).rejects.toThrow('nema očekivani integritet');
   });
+
+  it('rejects tampered per-entity state even with a recomputed snapshot content hash', async () => {
+    const snapshot = await createSyncSnapshot(snapshotInput());
+    const tampered = structuredClone(snapshot);
+    tampered.entityStates[0].stateHash = bytesToBase64Url(fixed(32, 211));
+    const { contentIntegrityHash, ...body } = tampered;
+    void contentIntegrityHash;
+    tampered.contentIntegrityHash = await computeSnapshotContentHash(body);
+
+    await expect(parseSyncSnapshot(tampered)).rejects.toThrow(
+      'Snapshot entity state hash nije validan',
+    );
+  });
 });

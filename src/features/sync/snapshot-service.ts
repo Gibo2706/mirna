@@ -61,6 +61,8 @@ export type SnapshotSyncResult =
 
 export interface SnapshotSyncOptions {
   readonly allowInitialUpload?: boolean;
+  readonly continuousOperations?: boolean;
+  readonly forceCompaction?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -132,6 +134,7 @@ const metadataChanges = (
 ): SnapshotMetadataChanges => ({
   firstUploadConsent: metadata.firstUploadConsent,
   lastServerCursor: metadata.lastServerCursor,
+  lastSnapshotServerCursor: metadata.lastSnapshotServerCursor,
   lastSnapshotRevision: metadata.lastSnapshotRevision,
   lastSnapshotId: metadata.lastSnapshotId,
   lastSnapshotHash: metadata.lastSnapshotHash,
@@ -358,10 +361,31 @@ export class SnapshotSyncService {
       }
       const data = await this.#repository.readFinanceData();
       const localDataHash = await computeSyncFinanceDataHash(data);
+      if (options.forceCompaction) {
+        if (setup.metadata.firstUploadConsent !== 'accepted') {
+          throw new SnapshotSyncError(
+            'upload-consent-required',
+            'Prvi upload zahteva eksplicitnu saglasnost.',
+          );
+        }
+        return this.#upload(setup, vaultMasterKey, options, false);
+      }
       if (
         setup.metadata.lastLocalDataHash !== null &&
         localDataHash !== setup.metadata.lastLocalDataHash
       ) {
+        if (options.continuousOperations && !options.forceCompaction) {
+          const syncedAt = this.#now().toISOString();
+          await this.#repository.updateMetadata(
+            setup.vault.vaultId,
+            setup.metadata.lastSnapshotRevision,
+            metadataChanges(setup.metadata, {
+              lastSyncAt: syncedAt,
+              lastErrorCode: undefined,
+            }),
+          );
+          return { kind: 'up-to-date', revision: envelope.revision };
+        }
         if (setup.metadata.firstUploadConsent !== 'accepted') {
           throw new SnapshotSyncError(
             'upload-consent-required',
@@ -413,7 +437,7 @@ export class SnapshotSyncService {
     const localIsDirty =
       setup.metadata.lastLocalDataHash !== null &&
       localDataHash !== setup.metadata.lastLocalDataHash;
-    if (localIsDirty) {
+    if (localIsDirty && !options.continuousOperations) {
       if (!localDataHash) {
         return this.#block(setup, 'integrity-failure', 'LOCAL_FINANCE_STATE_MISSING');
       }
@@ -465,6 +489,46 @@ export class SnapshotSyncService {
     });
     const acceptedDataHash = await computeSyncFinanceDataHash(ready);
     const syncedAt = this.#now().toISOString();
+    if (options.continuousOperations && localData) {
+      const accepted = await this.#repository.acceptCompactionSnapshot(
+        setup,
+        metadataChanges(setup.metadata, {
+          firstUploadConsent: 'accepted',
+          lastServerCursor: Math.max(
+            setup.metadata.lastServerCursor,
+            snapshot.causalFrontier.serverCursor,
+          ),
+          lastSnapshotServerCursor: snapshot.causalFrontier.serverCursor,
+          lastSnapshotRevision: envelope.revision,
+          lastSnapshotId: envelope.snapshotId,
+          lastSnapshotHash: remoteHash,
+          lastSnapshotContentHash: snapshot.contentIntegrityHash,
+          lastLocalDataHash: localDataHash,
+          lastSyncAt: syncedAt,
+          lastSuccessfulSyncAt: syncedAt,
+          lastErrorCode: undefined,
+          syncBlockReason: undefined,
+        }),
+        snapshot.causalFrontier,
+        snapshot.entityStates,
+      );
+      if (accepted) return { kind: 'downloaded', revision: envelope.revision };
+      if (localDataHash) {
+        await this.#repository.recordSnapshotConflict({
+          setup,
+          remoteSnapshotId: envelope.snapshotId,
+          remoteRevision: envelope.revision,
+          remoteHash,
+          localDataHash,
+          detectedAt: syncedAt,
+        });
+      }
+      return {
+        kind: 'blocked',
+        revision: setup.metadata.lastSnapshotRevision,
+        reason: 'local-remote-conflict',
+      };
+    }
     if (localData) await this.#repository.writeSafetyCheckpoint(setup, localData, syncedAt);
     await this.#repository.applyRemoteSnapshot(
       setup,
@@ -472,6 +536,7 @@ export class SnapshotSyncService {
       metadataChanges(setup.metadata, {
         firstUploadConsent: 'accepted',
         lastServerCursor: snapshot.causalFrontier.serverCursor,
+        lastSnapshotServerCursor: snapshot.causalFrontier.serverCursor,
         lastSnapshotRevision: envelope.revision,
         lastSnapshotId: envelope.snapshotId,
         lastSnapshotHash: remoteHash,
@@ -482,6 +547,7 @@ export class SnapshotSyncService {
         lastErrorCode: undefined,
         syncBlockReason: undefined,
       }),
+      snapshot.entityStates,
     );
     return { kind: 'downloaded', revision: envelope.revision };
   }
@@ -502,10 +568,15 @@ export class SnapshotSyncService {
       this.#repository.readFinanceData(),
       this.#repository.readCausalFrontier(setup.vault.vaultId),
     ]);
+    const entityStates = await this.#repository.readEntityStatesForSnapshot(
+      setup.vault.vaultId,
+      data,
+    );
     const dataHash = await computeSyncFinanceDataHash(data);
     const createdAt = this.#now().toISOString();
     const artifact = await createEncryptedSnapshot({
       data,
+      entityStates,
       vaultId: setup.vault.vaultId,
       revision: setup.metadata.lastSnapshotRevision + 1,
       baseRevision: setup.metadata.lastSnapshotRevision,
@@ -543,6 +614,7 @@ export class SnapshotSyncService {
         metadataChanges(setup.metadata, {
           firstUploadConsent: 'accepted',
           lastServerCursor: causalFrontier.serverCursor,
+          lastSnapshotServerCursor: causalFrontier.serverCursor,
           lastSnapshotRevision: artifact.envelope.revision,
           lastSnapshotId: artifact.envelope.snapshotId,
           lastSnapshotHash: snapshotHash,
