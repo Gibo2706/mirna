@@ -48,6 +48,28 @@ const clientEventSchema = z.strictObject({
       'CONFIGURATION_ERROR',
     ])
     .optional(),
+  accountingCategory: z
+    .enum([
+      'SERVICE_QUOTA_EXHAUSTED',
+      'VAULT_QUOTA_EXCEEDED',
+      'SERVICE_MAINTENANCE',
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'USAGE_RESERVATION_UNDERESTIMATED',
+      'USAGE_SETTLEMENT_FAILED',
+      'D1_STORAGE_LIMIT_REACHED',
+    ])
+    .optional(),
+  reservationPhase: z.enum(['request-reservation', 'route-reservation', 'settlement']).optional(),
+  route: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,63}$/u)
+    .optional(),
+  businessCommitted: z.boolean().optional(),
+  serviceFlagsChanged: z.boolean().optional(),
+  workerBuild: z
+    .string()
+    .regex(/^(?:[0-9a-f]{7,64}|local|replace-at-deploy|unknown)$/u)
+    .optional(),
   severity: z.enum(['info', 'error']),
 });
 
@@ -221,6 +243,16 @@ export const handleBetaDiagnosticEvent = async (context: RequestContext): Promis
       safeCode: event.safeCode ?? 'NONE',
       verificationAttemptId: event.verificationAttemptId ?? 'NONE',
       verificationReason: event.verificationReason ?? 'NONE',
+      ...(event.accountingCategory ? { accountingCategory: event.accountingCategory } : {}),
+      ...(event.reservationPhase ? { reservationPhase: event.reservationPhase } : {}),
+      ...(event.route ? { route: event.route } : {}),
+      ...(event.businessCommitted !== undefined
+        ? { businessCommitted: event.businessCommitted }
+        : {}),
+      ...(event.serviceFlagsChanged !== undefined
+        ? { serviceFlagsChanged: event.serviceFlagsChanged }
+        : {}),
+      ...(event.workerBuild ? { clientWorkerBuild: event.workerBuild } : {}),
     },
   });
   return jsonResponse(

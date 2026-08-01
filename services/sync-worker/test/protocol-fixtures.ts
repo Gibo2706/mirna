@@ -171,13 +171,16 @@ export const createInitialVaultFixture = async (
   };
 };
 
-export const registerInitialVault = async (fixture: InitialVaultFixture): Promise<Response> =>
-  postCanonical('/v1/vaults', {
+export const registerInitialVault = async (fixture: InitialVaultFixture): Promise<Response> => {
+  const request = canonicalRequest('/v1/vaults', {
     protocolVersion: SYNC_PROTOCOL_VERSION,
     suite: SYNC_CRYPTO_SUITE,
     manifest: fixture.manifest,
     recovery: fixture.recovery,
   });
+  request.headers.set('Idempotency-Key', fixture.manifest.transition.transitionId);
+  return SELF.fetch(request);
+};
 
 export const parseVaultCreateResponse = async (response: Response) =>
   vaultCreateResponseSchema.parse(await response.json());

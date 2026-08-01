@@ -5,6 +5,13 @@ import {
   waitOnExecutionContext,
 } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { estimateScheduledCleanupUsage } from '../src/budget';
+import {
+  planScheduledCleanup,
+  scheduledCleanupEstimateInput,
+  scheduledCleanupHasWork,
+  type ScheduledCleanupPlan,
+} from '../src/cleanup';
 import worker from '../src/index';
 import {
   bytes,
@@ -254,6 +261,72 @@ const runCron = async (scheduledTime = NOW): Promise<void> => {
 };
 
 describe('scheduled cleanup', () => {
+  it('skips empty work across repeated daily runs without self-exhaustion', async () => {
+    await env.MIRNA_SYNC_DB.prepare(
+      'UPDATE resource_totals SET r2_reconciled_at = ?1 WHERE singleton_id = 1',
+    )
+      .bind(NOW)
+      .run();
+
+    expect(scheduledCleanupHasWork(await planScheduledCleanup(env, NOW))).toBe(false);
+    for (let run = 0; run < 24; run += 1) {
+      await runCron(NOW + run);
+    }
+
+    expect(
+      await scalar(
+        `SELECT COUNT(*) AS count FROM usage_reservations
+          WHERE route_key = 'scheduled-cleanup'`,
+      ),
+    ).toBe(0);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT accounting_fault, maintenance_mode, accept_writes
+           FROM service_flags WHERE singleton_id = 1`,
+      ).first(),
+    ).toEqual({ accounting_fault: 0, maintenance_mode: 0, accept_writes: 1 });
+  });
+
+  it('scales one-item and maximum-batch reservations from inspected work', () => {
+    const plan = (overrides: Partial<ScheduledCleanupPlan>): ScheduledCleanupPlan => ({
+      inspectedRows: 0,
+      authChallenges: 0,
+      recoveryChallenges: 0,
+      accessSessions: 0,
+      pairingEnvelopes: 0,
+      pairingRequests: 0,
+      snapshots: 0,
+      syncChanges: 0,
+      deletionRequests: 0,
+      resumedDeletionRequests: 0,
+      staleDeletionRequests: 0,
+      retainedDeletionRequests: 0,
+      betaDiagnosticEvents: 0,
+      reconcileR2: false,
+      ...overrides,
+    });
+    const empty = plan({});
+    const oneItem = plan({ authChallenges: 1 });
+    const maximumConfiguredBatch = plan({
+      authChallenges: 1_000,
+      snapshots: 10,
+      deletionRequests: 3,
+      resumedDeletionRequests: 3,
+      reconcileR2: true,
+    });
+
+    expect(scheduledCleanupHasWork(empty)).toBe(false);
+    expect(scheduledCleanupHasWork(oneItem)).toBe(true);
+    const oneUsage = estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(oneItem));
+    const maximumUsage = estimateScheduledCleanupUsage(
+      scheduledCleanupEstimateInput(maximumConfiguredBatch),
+    );
+    expect(oneUsage.d1RowsRead).toBeLessThan(maximumUsage.d1RowsRead);
+    expect(oneUsage.d1RowsWritten).toBeLessThan(maximumUsage.d1RowsWritten);
+    expect(maximumUsage.d1RowsWritten).toBeLessThan(40_000);
+    expect(maximumUsage).toMatchObject({ workerRequests: 0, r2ClassB: 0 });
+  });
+
   it('removes only eligible D1/R2 data in bounded, idempotent batches', async () => {
     await seedExpiredData();
 

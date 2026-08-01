@@ -6,12 +6,31 @@ export type VerificationReason =
   | 'SITEVERIFY_UNAVAILABLE'
   | 'CONFIGURATION_ERROR';
 
+export type AccountingCategory =
+  | 'SERVICE_QUOTA_EXHAUSTED'
+  | 'VAULT_QUOTA_EXCEEDED'
+  | 'SERVICE_MAINTENANCE'
+  | 'USAGE_ACCOUNTING_UNAVAILABLE'
+  | 'USAGE_RESERVATION_UNDERESTIMATED'
+  | 'USAGE_SETTLEMENT_FAILED'
+  | 'D1_STORAGE_LIMIT_REACHED';
+
+export interface AccountingFailureDetails {
+  readonly category: AccountingCategory;
+  readonly phase: 'request-reservation' | 'route-reservation' | 'settlement';
+  readonly route: string;
+  readonly businessCommitted: boolean;
+  readonly serviceFlagsChanged: boolean;
+  readonly workerBuild: string;
+}
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
     readonly verificationReason?: VerificationReason,
+    readonly accounting?: AccountingFailureDetails,
   ) {
     super(message);
     this.name = 'HttpError';

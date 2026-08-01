@@ -1,5 +1,5 @@
 import type { Env } from './env';
-import type { VerificationReason } from './errors';
+import type { AccountingFailureDetails, VerificationReason } from './errors';
 
 export const SYNC_PROTOCOL_VERSION = 1 as const;
 
@@ -22,6 +22,7 @@ export interface PublicError {
     message: string;
     requestId: string;
     verificationReason?: VerificationReason;
+    accounting?: AccountingFailureDetails;
   };
   protocolVersion: typeof SYNC_PROTOCOL_VERSION;
 }
@@ -82,7 +83,7 @@ const applySecurityHeaders = (
     headers.set('Access-Control-Allow-Origin', allowedOrigin);
     headers.set(
       'Access-Control-Expose-Headers',
-      'Content-Length, X-Mirna-Protocol-Version, X-Mirna-Snapshot-Envelope, X-Request-Id',
+      'Content-Length, X-Mirna-Accounting-Status, X-Mirna-Protocol-Version, X-Mirna-Snapshot-Envelope, X-Request-Id',
     );
   }
 };
@@ -146,6 +147,7 @@ export const errorResponse = (
     allowedOrigin?: string | null;
     headers?: HeadersInit;
     verificationReason?: VerificationReason;
+    accounting?: AccountingFailureDetails;
   },
 ): Response =>
   jsonResponse(
@@ -155,6 +157,7 @@ export const errorResponse = (
         message,
         requestId: options.requestId,
         ...(options.verificationReason ? { verificationReason: options.verificationReason } : {}),
+        ...(options.accounting ? { accounting: options.accounting } : {}),
       },
       protocolVersion: SYNC_PROTOCOL_VERSION,
     } satisfies PublicError,

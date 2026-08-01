@@ -11,8 +11,9 @@ import { timingSafeEqual } from '../../../src/domain/sync/encoding';
 import type { AuthenticatedDevice } from './auth';
 import { assertFreshDeviceAuthorization } from './authorization';
 import type { RequestContext } from './context';
-import { observeD1Metadata } from './budget';
+import { assertNewVaultCreationAllowed, observeD1Metadata } from './budget';
 import { STAGING_BUDGETS } from './config/staging-budgets';
+import { recordBetaDiagnostic } from './diagnostics';
 import { conflict, HttpError, notFound } from './errors';
 import { jsonResponse } from './http';
 import { readWorkerLimits } from './limits';
@@ -155,6 +156,35 @@ const createResponse = (
     },
   );
 
+const completeVaultCreate = async (
+  context: RequestContext,
+  manifest: VaultManifestV1,
+  manifestHash: string,
+  created: boolean,
+): Promise<Response> => {
+  context.businessCommit = {
+    kind: 'vault-create',
+    committed: true,
+    reconciled: !created,
+  };
+  const initialDevice = manifest.devices[0];
+  await recordBetaDiagnostic(context, {
+    eventType: 'request_error',
+    severity: 'info',
+    category: created ? 'vault_create_business_committed' : 'vault_create_reconciled',
+    action: 'mirna_vault_create',
+    requestId: context.requestId,
+    vaultId: manifest.vaultId,
+    deviceId: initialDevice?.deviceId,
+    details: {
+      businessCommitted: true,
+      reconciled: !created,
+      route: 'vault-create',
+    },
+  });
+  return createResponse(context, manifest, manifestHash, created);
+};
+
 export const handleCreateVault = async (context: RequestContext): Promise<Response> => {
   await requireTurnstile(context, 'mirna_vault_create');
   const input = await readCanonicalJson(context.request, vaultCreateRequestSchema);
@@ -167,14 +197,22 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
   await verifyInitialManifest(input.manifest);
   const manifestHash = await manifestBodyHash(input.manifest);
   assertInitialRecoveryBinding(input.manifest, input.recovery, manifestHash);
+  const idempotencyKey = context.request.headers.get('Idempotency-Key');
+  if (idempotencyKey !== null && idempotencyKey !== input.manifest.transition.transitionId) {
+    throw conflict(
+      'VAULT_CREATION_IDEMPOTENCY_REUSED',
+      'Vault creation idempotency identity does not match the canonical request.',
+    );
+  }
 
   const existing = await findExistingVault(context.env.MIRNA_SYNC_DB, input.manifest.vaultId);
   if (existing) {
     if (isExactVaultRetry(existing, input.manifest, input.recovery, manifestHash)) {
-      return createResponse(context, input.manifest, manifestHash, false);
+      return completeVaultCreate(context, input.manifest, manifestHash, false);
     }
     throw conflict('VAULT_ALREADY_EXISTS', 'Vault identifier is already registered.');
   }
+  await assertNewVaultCreationAllowed(context);
   const limits = readWorkerLimits(context.env);
   assertFreshDeviceAuthorization(input.manifest, Date.now(), limits);
 
@@ -273,7 +311,7 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
     const raced = await findExistingVault(context.env.MIRNA_SYNC_DB, input.manifest.vaultId);
     if (raced) {
       if (isExactVaultRetry(raced, input.manifest, input.recovery, manifestHash)) {
-        return createResponse(context, input.manifest, manifestHash, false);
+        return completeVaultCreate(context, input.manifest, manifestHash, false);
       }
       throw conflict('VAULT_ALREADY_EXISTS', 'Vault identifier is already registered.');
     }
@@ -284,16 +322,12 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
       (vaultCount ?? STAGING_BUDGETS.resources.activeVaults) >=
       STAGING_BUDGETS.resources.activeVaults
     ) {
-      throw new HttpError(
-        503,
-        'SERVICE_BUDGET_EXHAUSTED',
-        'Staging synchronization is temporarily paused.',
-      );
+      throw new HttpError(503, 'SERVICE_QUOTA_EXHAUSTED', 'Staging service quota is exhausted.');
     }
     throw new Error('Vault transaction failed.');
   }
 
-  return createResponse(context, input.manifest, manifestHash, true);
+  return completeVaultCreate(context, input.manifest, manifestHash, true);
 };
 
 export const handleGetCurrentManifest = async (

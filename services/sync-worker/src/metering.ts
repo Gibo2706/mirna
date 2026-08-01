@@ -33,6 +33,8 @@ export class RouteUsageMeter {
   #exact = true;
   #sizeAfter = 0;
 
+  constructor(private readonly trackAccounting = false) {}
+
   snapshot(): Readonly<{ usage: MeteredUsage; exact: boolean; sizeAfter: number }> {
     return { usage: { ...this.#usage }, exact: this.#exact, sizeAfter: this.#sizeAfter };
   }
@@ -104,7 +106,10 @@ export class RouteUsageMeter {
   #wrapDatabase(database: D1Database): D1Database {
     const wrapped: D1Database = {
       prepare: (query: string) =>
-        this.#wrapStatement(database.prepare(query), !ACCOUNTING_SQL.test(query)),
+        this.#wrapStatement(
+          database.prepare(query),
+          this.trackAccounting || !ACCOUNTING_SQL.test(query),
+        ),
       batch: async <T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> => {
         const entries = statements.map((statement) => {
           const candidate = statement as Partial<MeteredStatement>;
@@ -120,7 +125,7 @@ export class RouteUsageMeter {
         return results;
       },
       exec: async (query: string) => {
-        if (!ACCOUNTING_SQL.test(query)) this.#exact = false;
+        if (this.trackAccounting || !ACCOUNTING_SQL.test(query)) this.#exact = false;
         return database.exec(query);
       },
       withSession: (constraintOrBookmark) => {

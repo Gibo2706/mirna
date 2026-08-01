@@ -84,8 +84,11 @@ describe('staging usage budgets', () => {
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.find((result) => result.status === 'rejected');
     expect(rejected?.status === 'rejected' ? code(rejected.reason) : undefined).toBe(
-      'SERVICE_BUDGET_EXHAUSTED',
+      'SERVICE_QUOTA_EXHAUSTED',
     );
+
+    const fulfilledIndex = results.findIndex((result) => result.status === 'fulfilled');
+    await configured.settle(fulfilledIndex === 0 ? first : second);
   });
 
   it('releases an unused failed-route reservation while retaining ledger overhead', async () => {
@@ -123,7 +126,34 @@ describe('staging usage budgets', () => {
     expect(overhead).toEqual({ state: 'committed', committed_worker_requests: 1 });
   });
 
-  it('keeps a crashed reservation conservative and recovers it after expiry', async () => {
+  it('retains the conservative reservation when exact provider metadata is unavailable', async () => {
+    const configured = new UsageBudgetController();
+    const request = context('/v1/operations', 'POST');
+    await configured.reserveRoute(request);
+    const meter = new RouteUsageMeter();
+    request.usageMeter = meter;
+    request.env = meter.wrapEnvironment(env);
+    await request.env.MIRNA_SYNC_DB.prepare('SELECT vault_id FROM vaults LIMIT 1').raw();
+
+    await configured.settle(request);
+
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT measurement_exact, committed_d1_rows_read, reserved_d1_rows_read,
+                settlement_failure_code
+           FROM usage_reservations WHERE reservation_id = ?1`,
+      )
+        .bind(`${request.requestId}:route`)
+        .first(),
+    ).toEqual({
+      measurement_exact: 0,
+      committed_d1_rows_read: 8_192,
+      reserved_d1_rows_read: 8_192,
+      settlement_failure_code: null,
+    });
+  });
+
+  it('keeps a crashed reservation conservative and requires explicit reconciliation', async () => {
     const start = Date.parse('2026-08-01T10:00:00.000Z');
     const configured = new UsageBudgetController(STAGING_BUDGETS, () => start);
     const request = context('/v1/operations', 'POST');
@@ -140,12 +170,39 @@ describe('staging usage budgets', () => {
     await runBudgetWindowMaintenance(env, start + 60 * 60 * 1_000 + 1);
     expect(
       await env.MIRNA_SYNC_DB.prepare(
-        `SELECT state, committed_d1_rows_read
+        `SELECT state, committed_d1_rows_read, settlement_failure_code
            FROM usage_reservations WHERE reservation_id = ?1`,
       )
         .bind(reservationId)
-        .first<{ state: string; committed_d1_rows_read: number }>(),
-    ).toEqual({ state: 'committed', committed_d1_rows_read: 8_192 });
+        .first<{
+          state: string;
+          committed_d1_rows_read: number;
+          settlement_failure_code: string;
+        }>(),
+    ).toEqual({
+      state: 'reserved',
+      committed_d1_rows_read: 0,
+      settlement_failure_code: 'STALE_RESERVATION_REQUIRES_RECONCILIATION',
+    });
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT accounting_fault FROM service_flags WHERE singleton_id = 1',
+      ).first<number>('accounting_fault'),
+    ).toBe(1);
+    await env.MIRNA_SYNC_DB.batch([
+      env.MIRNA_SYNC_DB.prepare(
+        `UPDATE usage_reservations
+            SET state = 'committed', committed_d1_rows_read = reserved_d1_rows_read,
+                committed_d1_rows_written = reserved_d1_rows_written, settled_at = ?2
+          WHERE reservation_id = ?1`,
+      ).bind(reservationId, start + 60 * 60 * 1_000 + 2),
+      env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+                accounting_fault_at = NULL
+          WHERE singleton_id = 1`,
+      ),
+    ]);
   });
 
   it('expires only buckets outside the maintained rolling window after delayed cleanup', async () => {
@@ -212,13 +269,67 @@ describe('staging usage budgets', () => {
     const configured = new UsageBudgetController();
     await expect(configured.reserveRoute(context('/v1/operations', 'POST'))).rejects.toMatchObject({
       status: 503,
-      code: 'SERVICE_BUDGET_EXHAUSTED',
+      code: 'SERVICE_MAINTENANCE',
     });
     await env.MIRNA_SYNC_DB.prepare(
       `UPDATE service_flags SET accept_writes = 1, updated_at = ?1 WHERE singleton_id = 1`,
     )
       .bind(Date.now())
       .run();
+  });
+
+  it('persists exact underestimation evidence without pretending the provider quota is exhausted', async () => {
+    const now = Date.parse('2026-08-01T15:00:00.000Z');
+    const configured = new UsageBudgetController(STAGING_BUDGETS, () => now, {
+      'vault-create': {
+        workerRequests: 0,
+        d1RowsRead: 0,
+        d1RowsWritten: 0,
+        r2ClassA: 0,
+        r2ClassB: 0,
+      },
+    });
+    const request = context('/v1/vaults', 'POST');
+    await configured.reserveRoute(request);
+    const meter = new RouteUsageMeter();
+    request.usageMeter = meter;
+    request.env = meter.wrapEnvironment(env);
+    request.businessCommit = { kind: 'vault-create', committed: true, reconciled: false };
+    await request.env.MIRNA_SYNC_DB.prepare('SELECT vault_id FROM vaults LIMIT 1').all();
+
+    await expect(configured.settle(request)).rejects.toMatchObject({
+      code: 'USAGE_RESERVATION_UNDERESTIMATED',
+      accounting: {
+        businessCommitted: true,
+        serviceFlagsChanged: true,
+      },
+    });
+    const reservation = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT state, measurement_exact, measured_d1_rows_read,
+              settlement_failure_code, business_committed
+         FROM usage_reservations WHERE reservation_id = ?1`,
+    )
+      .bind(`${request.requestId}:route`)
+      .first<Record<string, number | string>>();
+    expect(reservation).toMatchObject({
+      state: 'committed',
+      measurement_exact: 1,
+      settlement_failure_code: 'USAGE_RESERVATION_UNDERESTIMATED',
+      business_committed: 1,
+    });
+    expect(Number(reservation?.measured_d1_rows_read)).toBeGreaterThan(0);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT accounting_fault, maintenance_mode, accept_writes
+           FROM service_flags WHERE singleton_id = 1`,
+      ).first<Record<string, number>>(),
+    ).toEqual({ accounting_fault: 1, maintenance_mode: 0, accept_writes: 1 });
+    await env.MIRNA_SYNC_DB.prepare(
+      `UPDATE service_flags
+          SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+              accounting_fault_at = NULL
+        WHERE singleton_id = 1`,
+    ).run();
   });
 
   it('reserves temporary R2 bytes once, rejects the next vault object, and releases exactly once', async () => {

@@ -37,6 +37,8 @@
     "sync:dev": "wrangler dev --config services/sync-worker/wrangler.jsonc",
     "sync:deploy:staging": "wrangler deploy --env staging --config services/sync-worker/wrangler.jsonc",
     "sync:logs": "node scripts/query-sync-beta-logs.mjs",
+    "sync:budget:diagnose": "node scripts/sync-budget-accounting.mjs diagnose",
+    "sync:budget:repair": "node scripts/sync-budget-accounting.mjs repair",
     "docs:assets": "node scripts/generate-readme-assets.mjs",
     "public:check": "node scripts/public-repo-check.mjs",
     "public:history": "node scripts/public-history-check.mjs",

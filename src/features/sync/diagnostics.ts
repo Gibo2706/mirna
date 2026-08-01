@@ -20,6 +20,16 @@ const VERIFICATION_REASONS = new Set([
   'SITEVERIFY_UNAVAILABLE',
   'CONFIGURATION_ERROR',
 ]);
+const ACCOUNTING_CATEGORIES = new Set([
+  'SERVICE_QUOTA_EXHAUSTED',
+  'VAULT_QUOTA_EXCEEDED',
+  'SERVICE_MAINTENANCE',
+  'USAGE_ACCOUNTING_UNAVAILABLE',
+  'USAGE_RESERVATION_UNDERESTIMATED',
+  'USAGE_SETTLEMENT_FAILED',
+  'D1_STORAGE_LIMIT_REACHED',
+]);
+const RESERVATION_PHASES = new Set(['request-reservation', 'route-reservation', 'settlement']);
 
 export const BETA_DIAGNOSTIC_EVENT_TYPES = [
   'turnstile_script_loading',
@@ -46,6 +56,12 @@ export interface BetaDiagnosticEventInput {
   readonly safeCode?: string;
   readonly verificationReason?: string;
   readonly verificationAttemptId?: string;
+  readonly accountingCategory?: string;
+  readonly reservationPhase?: string;
+  readonly route?: string;
+  readonly businessCommitted?: boolean;
+  readonly serviceFlagsChanged?: boolean;
+  readonly workerBuild?: string;
   readonly build?: string;
   readonly online?: boolean;
 }
@@ -92,6 +108,18 @@ const safeEvent = (input: BetaDiagnosticEventInput): SyncBetaDiagnosticEventReco
       ? input.verificationReason
       : undefined,
   verificationAttemptId: boundedValue(input.verificationAttemptId, VERIFICATION_ATTEMPT_ID),
+  accountingCategory:
+    input.accountingCategory && ACCOUNTING_CATEGORIES.has(input.accountingCategory)
+      ? input.accountingCategory
+      : undefined,
+  reservationPhase:
+    input.reservationPhase && RESERVATION_PHASES.has(input.reservationPhase)
+      ? input.reservationPhase
+      : undefined,
+  route: boundedValue(input.route, /^[a-z][a-z0-9-]{0,63}$/u),
+  businessCommitted: input.businessCommitted,
+  serviceFlagsChanged: input.serviceFlagsChanged,
+  workerBuild: input.workerBuild?.slice(0, 64),
   build: input.build?.slice(0, 64) ?? APPLICATION_VERSION,
   online: input.online ?? navigator.onLine,
 });
@@ -190,6 +218,18 @@ export class BetaDiagnosticsService {
       if (event.verificationAttemptId !== undefined) {
         payload.verificationAttemptId = event.verificationAttemptId;
       }
+      if (event.accountingCategory !== undefined) {
+        payload.accountingCategory = event.accountingCategory;
+      }
+      if (event.reservationPhase !== undefined) payload.reservationPhase = event.reservationPhase;
+      if (event.route !== undefined) payload.route = event.route;
+      if (event.businessCommitted !== undefined) {
+        payload.businessCommitted = event.businessCommitted;
+      }
+      if (event.serviceFlagsChanged !== undefined) {
+        payload.serviceFlagsChanged = event.serviceFlagsChanged;
+      }
+      if (event.workerBuild !== undefined) payload.workerBuild = event.workerBuild;
       if (event.build !== undefined) payload.build = event.build;
       if (event.online !== undefined) payload.online = event.online;
       const body = canonicalizeJson(payload);

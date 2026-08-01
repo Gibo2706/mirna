@@ -145,9 +145,29 @@ A staging deployment is a separate intentional step. It must use `--env staging`
 must keep automatic provisioning disabled, and must not be connected to real
 Mirna finance data.
 
+## Budget diagnosis and repair
+
+The staging accounting tools are intentionally separated:
+
+```sh
+npm run sync:budget:diagnose -- --env staging --since 6h
+npm run sync:budget:repair -- --env staging --request <REQUEST_ID> --apply
+```
+
+Diagnosis is read-only. Both commands write a mode-`0600`, ignored evidence
+snapshot under `.private/sync-budget-evidence/`. Repair accepts only staging,
+requires one exact Request ID and `--apply`, refuses unresolved non-target
+incidents or reached hard limits, reconciles only exact stale measurements,
+rebuilds existing daily/rolling totals from settled reservations, and restores
+service flags only after those checks. Add `--business-committed` only when the
+inspected business rows prove that the protected operation committed. The tool
+never reads request bodies, financial rows, recovery envelopes, keys or tokens.
+
 ## Cleanup and storage safety
 
-The cron runs every five minutes. Each expired-metadata category uses one
+The cron runs once per hour at minute 7. It first inspects a bounded work set,
+skips the expensive route reservation when no cleanup is pending, and reserves
+only the inspected batch. Each expired-metadata category uses one
 indexed `DELETE … LIMIT` statement capped by
 `MIRNA_EPHEMERAL_CLEANUP_BATCH_SIZE` (1,000 in staging). Snapshot cleanup stays
 separately capped at 10 objects because each object needs D1 claim/delete work

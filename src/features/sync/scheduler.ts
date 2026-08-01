@@ -46,7 +46,16 @@ export const useSnapshotSyncScheduler = (input: {
       } catch (error) {
         const budgetPause =
           error instanceof SyncApiError &&
-          (error.code === 'SERVICE_BUDGET_EXHAUSTED' || error.code === 'VAULT_QUOTA_EXCEEDED');
+          [
+            'SERVICE_BUDGET_EXHAUSTED',
+            'SERVICE_QUOTA_EXHAUSTED',
+            'VAULT_QUOTA_EXCEEDED',
+            'SERVICE_MAINTENANCE',
+            'USAGE_ACCOUNTING_UNAVAILABLE',
+            'USAGE_RESERVATION_UNDERESTIMATED',
+            'USAGE_SETTLEMENT_FAILED',
+            'D1_STORAGE_LIMIT_REACHED',
+          ].includes(error.code);
         const index = Math.min(failedAttempts, BACKOFF_MS.length - 1);
         nextAllowedAt =
           Date.now() + withJitter(budgetPause ? BUDGET_BACKOFF_MS : BACKOFF_MS[index]);

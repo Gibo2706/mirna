@@ -1,10 +1,12 @@
 import type { StagingBudgets, MeteredUsage, UsageCeilings } from './config/staging-budgets';
 import { STAGING_BUDGETS, ZERO_USAGE } from './config/staging-budgets';
 import type { RequestContext } from './context';
+import { recordBetaDiagnostic } from './diagnostics';
 import type { Env } from './env';
+import type { AccountingCategory, AccountingFailureDetails } from './errors';
 import { HttpError } from './errors';
 
-export type BudgetAccess = 'read' | 'write' | 'new-vault' | 'pairing';
+export type BudgetAccess = 'read' | 'diagnostic' | 'write' | 'new-vault' | 'pairing';
 export type R2Operation = 'put' | 'list' | 'copy' | 'get' | 'head' | 'delete';
 export type R2OperationClass = 'A' | 'B' | 'free';
 
@@ -38,6 +40,7 @@ interface ReservationRow {
   readonly reservation_id: string;
   readonly scope_type: 'global' | 'vault';
   readonly scope_id: string;
+  readonly route_key: string;
   readonly created_at: number;
   readonly reserved_worker_requests: number;
   readonly reserved_d1_rows_read: number;
@@ -54,14 +57,6 @@ const LEDGER_OVERHEAD: MeteredUsage = Object.freeze({
   r2ClassA: 0,
   r2ClassB: 0,
 });
-const SCHEDULED_CLEANUP_USAGE: MeteredUsage = Object.freeze({
-  workerRequests: 0,
-  d1RowsRead: 100_000,
-  d1RowsWritten: 20_000,
-  r2ClassA: 7,
-  r2ClassB: 0,
-});
-
 const usage = (
   d1RowsRead: number,
   d1RowsWritten: number,
@@ -69,16 +64,71 @@ const usage = (
   r2ClassB = 0,
 ): MeteredUsage => ({ workerRequests: 0, d1RowsRead, d1RowsWritten, r2ClassA, r2ClassB });
 
+/**
+ * The previous 512/32 estimate was disproved by the real Android genesis path.
+ * This bound covers the five-row genesis batch, exact-retry lookup, two bounded
+ * Turnstile diagnostics and a documented margin. A focused metering test keeps
+ * the executable maximum below it.
+ */
+export const VAULT_CREATE_ROUTE_USAGE: MeteredUsage = Object.freeze(usage(2_048, 128));
+
+export interface ScheduledCleanupEstimateInput {
+  readonly expiredUsageBuckets: number;
+  readonly inspectedRows: number;
+  readonly ordinaryRows: number;
+  readonly snapshotRows: number;
+  readonly deletionRequests: number;
+  readonly reconcileR2: boolean;
+}
+
+/**
+ * Reserves from the inspected bounded work set, not from every category's
+ * maximum at once. Per-item factors cover indexed selection, claim/delete
+ * writes and accounting-trigger/index amplification; settlement still records
+ * the exact provider metadata and releases the margin.
+ */
+export const estimateScheduledCleanupUsage = (
+  input: ScheduledCleanupEstimateInput,
+): MeteredUsage => {
+  for (const value of [
+    input.expiredUsageBuckets,
+    input.inspectedRows,
+    input.ordinaryRows,
+    input.snapshotRows,
+    input.deletionRequests,
+  ]) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error('Scheduled cleanup estimate is invalid.');
+    }
+  }
+  return Object.freeze(
+    usage(
+      512 +
+        input.expiredUsageBuckets * 32 +
+        input.inspectedRows * 4 +
+        input.ordinaryRows * 32 +
+        input.snapshotRows * 256 +
+        input.deletionRequests * 512,
+      64 +
+        input.expiredUsageBuckets * 12 +
+        input.ordinaryRows * 12 +
+        input.snapshotRows * 64 +
+        input.deletionRequests * 128,
+      (input.reconcileR2 ? 1 : 0) + input.deletionRequests * 100,
+    ),
+  );
+};
+
 const routeBudget = (request: Request): RouteBudget => {
   const path = new URL(request.url).pathname;
   const method = request.method;
   if (method === 'OPTIONS') return { key: 'preflight', access: 'read', usage: ZERO_USAGE };
   if (path === '/v1/health') return { key: 'health', access: 'read', usage: usage(4, 0, 0, 1) };
   if (method === 'POST' && path === '/v1/diagnostics/events') {
-    return { key: 'beta-diagnostics', access: 'write', usage: usage(2_048, 32) };
+    return { key: 'beta-diagnostics', access: 'diagnostic', usage: usage(2_048, 32) };
   }
   if (method === 'POST' && path === '/v1/vaults') {
-    return { key: 'vault-create', access: 'new-vault', usage: usage(512, 32) };
+    return { key: 'vault-create', access: 'new-vault', usage: VAULT_CREATE_ROUTE_USAGE };
   }
   if (method === 'POST' && path === '/v1/pairings') {
     return { key: 'pairing-create', access: 'pairing', usage: usage(512, 16) };
@@ -141,42 +191,121 @@ const dailyLimit = (ceilings: UsageCeilings, key: keyof MeteredUsage): number =>
 const flagCondition = (access: BudgetAccess): string => {
   switch (access) {
     case 'read':
+    case 'diagnostic':
       return '1 = 1';
     case 'write':
-      return 'f.maintenance_mode = 0 AND f.accept_writes = 1';
+      return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accounting_fault = 0';
     case 'new-vault':
+      // Exact retries must reach the idempotent handler while an accounting
+      // fault is active. The handler refuses a genuinely new vault afterward.
       return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accept_new_vaults = 1';
     case 'pairing':
-      return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accept_pairings = 1';
+      return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accept_pairings = 1 AND f.accounting_fault = 0';
   }
 };
 
+const safeBuild = (env: Env): string =>
+  /^(?:[0-9a-f]{7,64}|local|replace-at-deploy)$/u.test(env.MIRNA_BUILD_COMMIT)
+    ? env.MIRNA_BUILD_COMMIT
+    : 'unknown';
+
+const accountingDetails = (
+  context: RequestContext,
+  category: AccountingCategory,
+  phase: AccountingFailureDetails['phase'],
+  route: string,
+  serviceFlagsChanged = false,
+): AccountingFailureDetails => ({
+  category,
+  phase,
+  route,
+  businessCommitted: context.businessCommit?.committed === true,
+  serviceFlagsChanged,
+  workerBuild: safeBuild(context.accountingEnv ?? context.env),
+});
+
+const accountingError = (
+  context: RequestContext,
+  status: number,
+  category: AccountingCategory,
+  message: string,
+  phase: AccountingFailureDetails['phase'],
+  route: string,
+  serviceFlagsChanged = false,
+): HttpError =>
+  new HttpError(
+    status,
+    category,
+    message,
+    undefined,
+    accountingDetails(context, category, phase, route, serviceFlagsChanged),
+  );
+
 const classifyReservationFailure = async (
-  env: Env,
+  context: RequestContext,
   scopeType: 'global' | 'vault',
   access: BudgetAccess,
   budgets: StagingBudgets,
+  phase: AccountingFailureDetails['phase'],
+  route: string,
 ): Promise<HttpError> => {
+  const env = context.accountingEnv ?? context.env;
   try {
     const state = await env.MIRNA_SYNC_DB.prepare(
-      `SELECT accept_new_vaults, accept_pairings, accept_writes, maintenance_mode
+      `SELECT accept_new_vaults, accept_pairings, accept_writes, maintenance_mode,
+              accounting_fault, state_reason
          FROM service_flags WHERE singleton_id = 1`,
     ).first<{
       accept_new_vaults: number;
       accept_pairings: number;
       accept_writes: number;
       maintenance_mode: number;
+      accounting_fault: number;
+      state_reason: string;
     }>();
+    if (!state) {
+      return accountingError(
+        context,
+        503,
+        'USAGE_ACCOUNTING_UNAVAILABLE',
+        'Staging usage accounting is unavailable.',
+        phase,
+        route,
+      );
+    }
+    if (state.state_reason === 'D1_STORAGE_LIMIT_REACHED') {
+      return accountingError(
+        context,
+        503,
+        'D1_STORAGE_LIMIT_REACHED',
+        'Staging database storage limit is reached.',
+        phase,
+        route,
+      );
+    }
+    if (state.accounting_fault === 1 && !['read', 'diagnostic', 'new-vault'].includes(access)) {
+      return accountingError(
+        context,
+        503,
+        'USAGE_ACCOUNTING_UNAVAILABLE',
+        'Staging usage accounting requires reconciliation.',
+        phase,
+        route,
+      );
+    }
     const disabled =
-      !state ||
-      (access !== 'read' && (state.maintenance_mode !== 0 || state.accept_writes !== 1)) ||
+      (!['read', 'diagnostic'].includes(access) &&
+        (state.maintenance_mode !== 0 || state.accept_writes !== 1)) ||
       (access === 'new-vault' && state.accept_new_vaults !== 1) ||
       (access === 'pairing' && state.accept_pairings !== 1);
     if (disabled) {
-      return new HttpError(
+      return accountingError(
+        context,
         503,
-        'SERVICE_BUDGET_EXHAUSTED',
-        'Staging synchronization is temporarily paused.',
+        'SERVICE_MAINTENANCE',
+        'Staging synchronization is in maintenance mode.',
+        phase,
+        route,
       );
     }
     const d1Bytes = await env.MIRNA_SYNC_DB.prepare(
@@ -186,25 +315,41 @@ const classifyReservationFailure = async (
       access !== 'read' &&
       (d1Bytes ?? budgets.resources.d1StorageBytes) >= budgets.resources.d1StorageBytes
     ) {
-      return new HttpError(
+      return accountingError(
+        context,
         503,
-        'SERVICE_BUDGET_EXHAUSTED',
-        'Staging synchronization is temporarily paused.',
+        'D1_STORAGE_LIMIT_REACHED',
+        'Staging database storage limit is reached.',
+        phase,
+        route,
       );
     }
   } catch {
-    return new HttpError(
+    return accountingError(
+      context,
       503,
-      'SERVICE_BUDGET_EXHAUSTED',
-      'Staging synchronization is temporarily paused.',
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      phase,
+      route,
     );
   }
   return scopeType === 'vault'
-    ? new HttpError(429, 'VAULT_QUOTA_EXCEEDED', 'Vault staging quota is exhausted.')
-    : new HttpError(
+    ? accountingError(
+        context,
+        429,
+        'VAULT_QUOTA_EXCEEDED',
+        'Vault staging quota is exhausted.',
+        phase,
+        route,
+      )
+    : accountingError(
+        context,
         503,
-        'SERVICE_BUDGET_EXHAUSTED',
-        'Staging synchronization is temporarily paused.',
+        'SERVICE_QUOTA_EXHAUSTED',
+        'Staging service quota is exhausted.',
+        phase,
+        route,
       );
 };
 
@@ -222,24 +367,26 @@ const reserve = async (
   now: number,
 ): Promise<void> => {
   const reservationId = `${context.requestId}:${input.suffix}`;
+  const phase = input.suffix === 'request' ? 'request-reservation' : 'route-reservation';
   const reservationIds = (context.budgetReservationIds ??= []);
   if (reservationIds.includes(reservationId)) return;
+  const accountingEnv = context.accountingEnv ?? context.env;
   const day = utcDay(now);
   const ceilings = input.scopeType === 'global' ? budgets.global : budgets.perVault;
   let results: D1Result<unknown>[];
   try {
-    results = await context.env.MIRNA_SYNC_DB.batch([
-      context.env.MIRNA_SYNC_DB.prepare(
+    results = await accountingEnv.MIRNA_SYNC_DB.batch([
+      accountingEnv.MIRNA_SYNC_DB.prepare(
         `INSERT INTO usage_daily_buckets (scope_type, scope_id, utc_day, updated_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (scope_type, scope_id, utc_day) DO NOTHING`,
       ).bind(input.scopeType, input.scopeId, day, now),
-      context.env.MIRNA_SYNC_DB.prepare(
+      accountingEnv.MIRNA_SYNC_DB.prepare(
         `INSERT INTO usage_rolling_totals (scope_type, scope_id, refreshed_at)
          VALUES (?1, ?2, ?3)
          ON CONFLICT (scope_type, scope_id) DO NOTHING`,
       ).bind(input.scopeType, input.scopeId, now),
-      context.env.MIRNA_SYNC_DB.prepare(
+      accountingEnv.MIRNA_SYNC_DB.prepare(
         `INSERT INTO usage_reservations (
            reservation_id, scope_type, scope_id, route_key, state,
            reserved_worker_requests, reserved_d1_rows_read, reserved_d1_rows_written,
@@ -253,7 +400,7 @@ const reserve = async (
            JOIN resource_totals resources ON resources.singleton_id = 1
           WHERE d.scope_type = ?2 AND d.scope_id = ?3 AND d.utc_day = ?11
             AND ${flagCondition(input.access)}
-            AND (?23 = 'read' OR resources.d1_storage_bytes < ?22)
+            AND (?23 IN ('read', 'diagnostic') OR resources.d1_storage_bytes < ?22)
             AND r.worker_requests + ?6 <= ?12
             AND r.d1_rows_read + ?7 <= ?13
             AND r.d1_rows_written + ?8 <= ?14
@@ -289,7 +436,7 @@ const reserve = async (
         budgets.resources.d1StorageBytes,
         input.access,
       ),
-      context.env.MIRNA_SYNC_DB.prepare(
+      accountingEnv.MIRNA_SYNC_DB.prepare(
         `UPDATE usage_daily_buckets
             SET worker_requests = worker_requests + ?5,
                 d1_rows_read = d1_rows_read + ?6,
@@ -311,7 +458,7 @@ const reserve = async (
         input.usage.r2ClassB,
         reservationId,
       ),
-      context.env.MIRNA_SYNC_DB.prepare(
+      accountingEnv.MIRNA_SYNC_DB.prepare(
         `UPDATE usage_rolling_totals
             SET worker_requests = worker_requests + ?4,
                 d1_rows_read = d1_rows_read + ?5,
@@ -334,22 +481,53 @@ const reserve = async (
       ),
     ]);
   } catch {
-    throw new HttpError(
+    throw accountingError(
+      context,
       503,
-      'SERVICE_BUDGET_EXHAUSTED',
+      'USAGE_ACCOUNTING_UNAVAILABLE',
       'Staging usage accounting is unavailable.',
+      phase,
+      input.routeKey,
     );
   }
   if (results[2]?.meta.changes !== 1) {
-    throw await classifyReservationFailure(context.env, input.scopeType, input.access, budgets);
+    throw await classifyReservationFailure(
+      context,
+      input.scopeType,
+      input.access,
+      budgets,
+      phase,
+      input.routeKey,
+    );
   }
   reservationIds.push(reservationId);
+};
+
+const markAccountingFault = async (
+  context: RequestContext,
+  category: 'USAGE_RESERVATION_UNDERESTIMATED' | 'USAGE_SETTLEMENT_FAILED',
+  now: number,
+): Promise<boolean> => {
+  try {
+    const result = await (context.accountingEnv ?? context.env).MIRNA_SYNC_DB.prepare(
+      `UPDATE service_flags
+          SET accounting_fault = 1, state_reason = ?1, state_request_id = ?2,
+              accounting_fault_at = COALESCE(accounting_fault_at, ?3), updated_at = ?3
+        WHERE singleton_id = 1`,
+    )
+      .bind(category, context.requestId, now)
+      .run();
+    return result.meta.changes === 1;
+  } catch {
+    return false;
+  }
 };
 
 export class UsageBudgetController {
   constructor(
     private readonly budgets: StagingBudgets = STAGING_BUDGETS,
     private readonly now: () => number = Date.now,
+    private readonly routeUsageOverrides: Readonly<Partial<Record<string, MeteredUsage>>> = {},
   ) {}
 
   async reserveRequest(context: RequestContext): Promise<void> {
@@ -371,6 +549,7 @@ export class UsageBudgetController {
   async reserveRoute(context: RequestContext): Promise<void> {
     const route = routeBudget(context.request);
     if (route.usage === ZERO_USAGE) return;
+    const estimatedUsage = this.routeUsageOverrides[route.key] ?? route.usage;
     await reserve(
       context,
       {
@@ -379,14 +558,17 @@ export class UsageBudgetController {
         scopeId: 'service',
         routeKey: route.key,
         access: route.access,
-        usage: route.usage,
+        usage: estimatedUsage,
       },
       this.budgets,
       this.now(),
     );
   }
 
-  async reserveScheduledCleanup(context: RequestContext): Promise<void> {
+  async reserveScheduledCleanup(
+    context: RequestContext,
+    estimatedUsage: MeteredUsage,
+  ): Promise<void> {
     await reserve(
       context,
       {
@@ -395,7 +577,7 @@ export class UsageBudgetController {
         scopeId: 'service',
         routeKey: 'scheduled-cleanup',
         access: 'write',
-        usage: SCHEDULED_CLEANUP_USAGE,
+        usage: estimatedUsage,
       },
       this.budgets,
       this.now(),
@@ -423,15 +605,17 @@ export class UsageBudgetController {
     const reservationIds = context.budgetReservationIds ?? [];
     if (reservationIds.length === 0) return;
     const now = this.now();
+    const accountingEnv = context.accountingEnv ?? context.env;
+    let activeRoute = 'request-ledger-overhead';
     try {
       const observed = context.usageMeter?.snapshot();
       if (observed && observed.sizeAfter > 0) {
-        await observeD1Size(context.env, observed.sizeAfter, this.budgets);
+        await observeD1Size(accountingEnv, observed.sizeAfter, this.budgets);
       }
       const rows = await Promise.all(
         reservationIds.map((reservationId) =>
-          context.env.MIRNA_SYNC_DB.prepare(
-            `SELECT reservation_id, scope_type, scope_id, created_at,
+          accountingEnv.MIRNA_SYNC_DB.prepare(
+            `SELECT reservation_id, scope_type, scope_id, route_key, created_at,
                     reserved_worker_requests, reserved_d1_rows_read,
                     reserved_d1_rows_written, reserved_r2_class_a, reserved_r2_class_b
                FROM usage_reservations
@@ -444,22 +628,24 @@ export class UsageBudgetController {
       if (rows.some((row) => row === null)) throw new Error('reservation disappeared');
 
       const statements: D1PreparedStatement[] = [];
+      let underestimated = false;
       for (const row of rows as ReservationRow[]) {
+        activeRoute = row.route_key;
         const isRequestOverhead = row.reservation_id.endsWith(':request');
         const isVault = row.scope_type === 'vault';
-        const actual: MeteredUsage =
-          isRequestOverhead || !observed?.exact
-            ? {
-                workerRequests: row.reserved_worker_requests,
-                d1RowsRead: row.reserved_d1_rows_read,
-                d1RowsWritten: row.reserved_d1_rows_written,
-                r2ClassA: row.reserved_r2_class_a,
-                r2ClassB: row.reserved_r2_class_b,
-              }
-            : {
-                ...observed.usage,
-                workerRequests: isVault ? 1 : 0,
-              };
+        const measurementExact = !isRequestOverhead && observed?.exact === true;
+        const actual: MeteredUsage = !measurementExact
+          ? {
+              workerRequests: row.reserved_worker_requests,
+              d1RowsRead: row.reserved_d1_rows_read,
+              d1RowsWritten: row.reserved_d1_rows_written,
+              r2ClassA: row.reserved_r2_class_a,
+              r2ClassB: row.reserved_r2_class_b,
+            }
+          : {
+              ...observed.usage,
+              workerRequests: isVault ? 1 : 0,
+            };
         const reserved: MeteredUsage = {
           workerRequests: row.reserved_worker_requests,
           d1RowsRead: row.reserved_d1_rows_read,
@@ -468,66 +654,65 @@ export class UsageBudgetController {
           r2ClassB: row.reserved_r2_class_b,
         };
         const values = Object.keys(reserved) as (keyof MeteredUsage)[];
-        if (values.some((key) => actual[key] > reserved[key] || actual[key] < 0)) {
-          await context.env.MIRNA_SYNC_DB.prepare(
-            `UPDATE service_flags
-                SET accept_new_vaults = 0, accept_pairings = 0,
-                    accept_writes = 0, maintenance_mode = 1, updated_at = ?1
-              WHERE singleton_id = 1`,
-          )
-            .bind(now)
-            .run();
-          throw new Error('route exceeded its conservative reservation');
-        }
+        const rowUnderestimated =
+          measurementExact && values.some((key) => actual[key] > reserved[key] || actual[key] < 0);
+        underestimated ||= rowUnderestimated;
         const released: MeteredUsage = {
-          workerRequests: reserved.workerRequests - actual.workerRequests,
-          d1RowsRead: reserved.d1RowsRead - actual.d1RowsRead,
-          d1RowsWritten: reserved.d1RowsWritten - actual.d1RowsWritten,
-          r2ClassA: reserved.r2ClassA - actual.r2ClassA,
-          r2ClassB: reserved.r2ClassB - actual.r2ClassB,
+          workerRequests: Math.max(0, reserved.workerRequests - actual.workerRequests),
+          d1RowsRead: Math.max(0, reserved.d1RowsRead - actual.d1RowsRead),
+          d1RowsWritten: Math.max(0, reserved.d1RowsWritten - actual.d1RowsWritten),
+          r2ClassA: Math.max(0, reserved.r2ClassA - actual.r2ClassA),
+          r2ClassB: Math.max(0, reserved.r2ClassB - actual.r2ClassB),
+        };
+        const adjustment: MeteredUsage = {
+          workerRequests: actual.workerRequests - reserved.workerRequests,
+          d1RowsRead: actual.d1RowsRead - reserved.d1RowsRead,
+          d1RowsWritten: actual.d1RowsWritten - reserved.d1RowsWritten,
+          r2ClassA: actual.r2ClassA - reserved.r2ClassA,
+          r2ClassB: actual.r2ClassB - reserved.r2ClassB,
         };
         const day = utcDay(row.created_at);
         statements.push(
-          context.env.MIRNA_SYNC_DB.prepare(
+          accountingEnv.MIRNA_SYNC_DB.prepare(
             `UPDATE usage_daily_buckets
-                SET worker_requests = worker_requests - ?4,
-                    d1_rows_read = d1_rows_read - ?5,
-                    d1_rows_written = d1_rows_written - ?6,
-                    r2_class_a = r2_class_a - ?7,
-                    r2_class_b = r2_class_b - ?8,
+                SET worker_requests = worker_requests + ?4,
+                    d1_rows_read = d1_rows_read + ?5,
+                    d1_rows_written = d1_rows_written + ?6,
+                    r2_class_a = r2_class_a + ?7,
+                    r2_class_b = r2_class_b + ?8,
                     updated_at = ?9
               WHERE scope_type = ?1 AND scope_id = ?2 AND utc_day = ?3`,
           ).bind(
             row.scope_type,
             row.scope_id,
             day,
-            released.workerRequests,
-            released.d1RowsRead,
-            released.d1RowsWritten,
-            released.r2ClassA,
-            released.r2ClassB,
+            adjustment.workerRequests,
+            adjustment.d1RowsRead,
+            adjustment.d1RowsWritten,
+            adjustment.r2ClassA,
+            adjustment.r2ClassB,
             now,
           ),
-          context.env.MIRNA_SYNC_DB.prepare(
+          accountingEnv.MIRNA_SYNC_DB.prepare(
             `UPDATE usage_rolling_totals
-                SET worker_requests = worker_requests - ?3,
-                    d1_rows_read = d1_rows_read - ?4,
-                    d1_rows_written = d1_rows_written - ?5,
-                    r2_class_a = r2_class_a - ?6,
-                    r2_class_b = r2_class_b - ?7,
+                SET worker_requests = worker_requests + ?3,
+                    d1_rows_read = d1_rows_read + ?4,
+                    d1_rows_written = d1_rows_written + ?5,
+                    r2_class_a = r2_class_a + ?6,
+                    r2_class_b = r2_class_b + ?7,
                     refreshed_at = ?8
               WHERE scope_type = ?1 AND scope_id = ?2`,
           ).bind(
             row.scope_type,
             row.scope_id,
-            released.workerRequests,
-            released.d1RowsRead,
-            released.d1RowsWritten,
-            released.r2ClassA,
-            released.r2ClassB,
+            adjustment.workerRequests,
+            adjustment.d1RowsRead,
+            adjustment.d1RowsWritten,
+            adjustment.r2ClassA,
+            adjustment.r2ClassB,
             now,
           ),
-          context.env.MIRNA_SYNC_DB.prepare(
+          accountingEnv.MIRNA_SYNC_DB.prepare(
             `UPDATE usage_reservations
                 SET state = CASE
                       WHEN ?3 + ?4 + ?5 + ?6 + ?7 = 0 THEN 'released'
@@ -543,6 +728,14 @@ export class UsageBudgetController {
                     released_d1_rows_written = ?10,
                     released_r2_class_a = ?11,
                     released_r2_class_b = ?12,
+                    measurement_exact = ?13,
+                    measured_worker_requests = ?3,
+                    measured_d1_rows_read = ?4,
+                    measured_d1_rows_written = ?5,
+                    measured_r2_class_a = ?6,
+                    measured_r2_class_b = ?7,
+                    settlement_failure_code = ?14,
+                    business_committed = ?15,
                     settled_at = ?2
               WHERE reservation_id = ?1 AND state = 'reserved'`,
           ).bind(
@@ -558,16 +751,79 @@ export class UsageBudgetController {
             released.d1RowsWritten,
             released.r2ClassA,
             released.r2ClassB,
+            measurementExact ? 1 : 0,
+            rowUnderestimated ? 'USAGE_RESERVATION_UNDERESTIMATED' : null,
+            context.businessCommit?.committed === true ? 1 : 0,
           ),
         );
       }
-      const results = await context.env.MIRNA_SYNC_DB.batch(statements);
+      if (underestimated) {
+        statements.push(
+          accountingEnv.MIRNA_SYNC_DB.prepare(
+            `UPDATE service_flags
+                SET accounting_fault = 1,
+                    state_reason = 'USAGE_RESERVATION_UNDERESTIMATED',
+                    state_request_id = ?1,
+                    accounting_fault_at = COALESCE(accounting_fault_at, ?2),
+                    updated_at = ?2
+              WHERE singleton_id = 1`,
+          ).bind(context.requestId, now),
+        );
+      }
+      const results = await accountingEnv.MIRNA_SYNC_DB.batch(statements);
       if (results.some((result) => result.meta.changes !== 1)) throw new Error('settlement failed');
-    } catch {
-      throw new HttpError(
+      if (underestimated) {
+        await recordBetaDiagnostic(
+          { ...context, env: accountingEnv },
+          {
+            eventType: 'request_error',
+            severity: 'error',
+            category: 'budget_underestimation_detected',
+            requestId: context.requestId,
+            details: {
+              accountingCategory: 'USAGE_RESERVATION_UNDERESTIMATED',
+              businessCommitted: context.businessCommit?.committed === true,
+              route: activeRoute,
+              serviceFlagsChanged: true,
+            },
+          },
+        );
+        throw accountingError(
+          context,
+          503,
+          'USAGE_RESERVATION_UNDERESTIMATED',
+          'Staging usage reservation was underestimated.',
+          'settlement',
+          activeRoute,
+          true,
+        );
+      }
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      const flagsChanged = await markAccountingFault(context, 'USAGE_SETTLEMENT_FAILED', now);
+      await recordBetaDiagnostic(
+        { ...context, env: accountingEnv },
+        {
+          eventType: 'request_error',
+          severity: 'error',
+          category: 'budget_settlement_failed',
+          requestId: context.requestId,
+          details: {
+            accountingCategory: 'USAGE_SETTLEMENT_FAILED',
+            businessCommitted: context.businessCommit?.committed === true,
+            route: activeRoute,
+            serviceFlagsChanged: flagsChanged,
+          },
+        },
+      );
+      throw accountingError(
+        context,
         503,
-        'SERVICE_BUDGET_EXHAUSTED',
+        'USAGE_SETTLEMENT_FAILED',
         'Staging usage accounting is unavailable.',
+        'settlement',
+        activeRoute,
+        flagsChanged,
       );
     }
   }
@@ -581,11 +837,80 @@ export const reserveVaultUsage = (context: RequestContext, vaultId: string): Pro
 export const writesEnabled = async (env: Env): Promise<boolean> => {
   try {
     const row = await env.MIRNA_SYNC_DB.prepare(
-      `SELECT accept_writes, maintenance_mode FROM service_flags WHERE singleton_id = 1`,
-    ).first<{ accept_writes: number; maintenance_mode: number }>();
-    return row?.accept_writes === 1 && row.maintenance_mode === 0;
+      `SELECT accept_writes, maintenance_mode, accounting_fault
+         FROM service_flags WHERE singleton_id = 1`,
+    ).first<{ accept_writes: number; maintenance_mode: number; accounting_fault: number }>();
+    return row?.accept_writes === 1 && row.maintenance_mode === 0 && row.accounting_fault === 0;
   } catch {
     return false;
+  }
+};
+
+/** Allows an exact already-committed retry, while refusing new side effects. */
+export const assertNewVaultCreationAllowed = async (context: RequestContext): Promise<void> => {
+  const env = context.accountingEnv ?? context.env;
+  let state: {
+    accept_new_vaults: number;
+    accept_writes: number;
+    maintenance_mode: number;
+    accounting_fault: number;
+    state_reason: string;
+  } | null;
+  try {
+    state = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT accept_new_vaults, accept_writes, maintenance_mode,
+              accounting_fault, state_reason
+         FROM service_flags WHERE singleton_id = 1`,
+    ).first();
+  } catch {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      'route-reservation',
+      'vault-create',
+    );
+  }
+  if (!state) {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      'route-reservation',
+      'vault-create',
+    );
+  }
+  if (state.state_reason === 'D1_STORAGE_LIMIT_REACHED') {
+    throw accountingError(
+      context,
+      503,
+      'D1_STORAGE_LIMIT_REACHED',
+      'Staging database storage limit is reached.',
+      'route-reservation',
+      'vault-create',
+    );
+  }
+  if (state.accounting_fault === 1) {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting requires reconciliation.',
+      'route-reservation',
+      'vault-create',
+    );
+  }
+  if (state.maintenance_mode !== 0 || state.accept_writes !== 1 || state.accept_new_vaults !== 1) {
+    throw accountingError(
+      context,
+      503,
+      'SERVICE_MAINTENANCE',
+      'Staging synchronization is in maintenance mode.',
+      'route-reservation',
+      'vault-create',
+    );
   }
 };
 
@@ -602,7 +927,9 @@ const observeD1Size = async (
     ).bind(sizeAfter, Date.now()),
     env.MIRNA_SYNC_DB.prepare(
       `UPDATE service_flags
-          SET accept_new_vaults = 0, accept_writes = 0, updated_at = ?2
+          SET accept_new_vaults = 0, accept_writes = 0,
+              state_reason = 'D1_STORAGE_LIMIT_REACHED', state_request_id = NULL,
+              updated_at = ?2
         WHERE singleton_id = 1 AND ?1 >= ?3`,
     ).bind(sizeAfter, Date.now(), budgets.resources.d1StorageBytes),
   ]);
@@ -679,7 +1006,7 @@ export const reserveR2Object = async (
            JOIN vault_resource_totals v ON v.vault_id = ?2
            JOIN service_flags f ON f.singleton_id = 1
           WHERE g.singleton_id = 1
-            AND f.maintenance_mode = 0 AND f.accept_writes = 1
+            AND f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accounting_fault = 0
             AND g.r2_stored_bytes + ?4 <= ?7
             AND g.r2_object_count + 1 <= ?8
             AND v.r2_stored_bytes + ?4 <= ?9
@@ -720,7 +1047,7 @@ export const reserveR2Object = async (
   } catch {
     throw new HttpError(
       503,
-      'SERVICE_BUDGET_EXHAUSTED',
+      'USAGE_ACCOUNTING_UNAVAILABLE',
       'Staging storage accounting is unavailable.',
     );
   }
@@ -752,11 +1079,7 @@ export const reserveR2Object = async (
     totals.global_bytes + input.ciphertextBytes > budgets.resources.r2StoredBytes ||
     totals.global_objects + 1 > budgets.resources.r2ObjectCount
   ) {
-    throw new HttpError(
-      503,
-      'SERVICE_BUDGET_EXHAUSTED',
-      'Staging synchronization is temporarily paused.',
-    );
+    throw new HttpError(503, 'SERVICE_QUOTA_EXHAUSTED', 'Staging service quota is exhausted.');
   }
   throw new HttpError(429, 'VAULT_QUOTA_EXCEEDED', 'Vault staging quota is exhausted.');
 };
@@ -774,7 +1097,7 @@ export const commitR2Object = async (env: Env, objectKey: string): Promise<void>
     if (existing?.state !== 'committed') {
       throw new HttpError(
         503,
-        'SERVICE_BUDGET_EXHAUSTED',
+        'USAGE_SETTLEMENT_FAILED',
         'Staging storage accounting is unavailable.',
       );
     }
@@ -818,7 +1141,7 @@ export const releaseR2Object = async (env: Env, objectKey: string): Promise<void
   if (results[0]?.meta.changes === 1 && results.some((result) => result.meta.changes !== 1)) {
     throw new HttpError(
       503,
-      'SERVICE_BUDGET_EXHAUSTED',
+      'USAGE_SETTLEMENT_FAILED',
       'Staging storage accounting is unavailable.',
     );
   }
@@ -866,7 +1189,7 @@ export const releaseVaultR2Inventory = async (env: Env, vaultId: string): Promis
   ) {
     throw new HttpError(
       503,
-      'SERVICE_BUDGET_EXHAUSTED',
+      'USAGE_SETTLEMENT_FAILED',
       'Staging storage accounting is unavailable.',
     );
   }
@@ -925,14 +1248,24 @@ export const runBudgetWindowMaintenance = async (
   await env.MIRNA_SYNC_DB.batch([
     env.MIRNA_SYNC_DB.prepare(
       `UPDATE usage_reservations
-          SET state = 'committed',
-              committed_worker_requests = reserved_worker_requests,
-              committed_d1_rows_read = reserved_d1_rows_read,
-              committed_d1_rows_written = reserved_d1_rows_written,
-              committed_r2_class_a = reserved_r2_class_a,
-              committed_r2_class_b = reserved_r2_class_b,
-              settled_at = ?1
+          SET settlement_failure_code = COALESCE(
+                settlement_failure_code,
+                'STALE_RESERVATION_REQUIRES_RECONCILIATION'
+              )
         WHERE state = 'reserved' AND created_at < ?2`,
+    ).bind(scheduledTime, scheduledTime - 60 * 60 * 1_000),
+    env.MIRNA_SYNC_DB.prepare(
+      `UPDATE service_flags
+          SET accounting_fault = 1,
+              state_reason = 'STALE_RESERVATION_REQUIRES_RECONCILIATION',
+              state_request_id = NULL,
+              accounting_fault_at = COALESCE(accounting_fault_at, ?1),
+              updated_at = ?1
+        WHERE singleton_id = 1
+          AND EXISTS (
+            SELECT 1 FROM usage_reservations
+             WHERE state = 'reserved' AND created_at < ?2
+          )`,
     ).bind(scheduledTime, scheduledTime - 60 * 60 * 1_000),
     env.MIRNA_SYNC_DB.prepare(
       `DELETE FROM usage_reservations

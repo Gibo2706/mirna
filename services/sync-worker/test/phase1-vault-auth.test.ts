@@ -4,7 +4,14 @@ import { describe, expect, it } from 'vitest';
 import { SYNC_PROTOCOL_VERSION } from '../../../src/domain/sync/constants';
 import { bytesToHex } from '../../../src/domain/sync/encoding';
 import { authSessionResponseSchema } from '../../../src/domain/sync/schemas';
+import { UsageBudgetController, VAULT_CREATE_ROUTE_USAGE } from '../src/budget';
+import { STAGING_BUDGETS, ZERO_USAGE } from '../src/config/staging-budgets';
+import type { RequestContext } from '../src/context';
+import { recordBetaDiagnostic } from '../src/diagnostics';
+import { RouteUsageMeter } from '../src/metering';
+import { handleCreateVault } from '../src/vaults';
 import {
+  canonicalRequest,
   createAccessSession,
   createInitialVaultFixture,
   issueChallenge,
@@ -17,12 +24,138 @@ import {
   TEST_ORIGIN,
 } from './protocol-fixtures';
 
+const vaultCreateBody = (fixture: Awaited<ReturnType<typeof createInitialVaultFixture>>) => ({
+  protocolVersion: 1,
+  suite: fixture.manifest.suite,
+  manifest: fixture.manifest,
+  recovery: fixture.recovery,
+});
+
+const vaultCreateContext = (
+  fixture: Awaited<ReturnType<typeof createInitialVaultFixture>>,
+): RequestContext => {
+  const request = canonicalRequest('/v1/vaults', vaultCreateBody(fixture));
+  request.headers.set('Idempotency-Key', fixture.manifest.transition.transitionId);
+  request.headers.set('X-Mirna-Support-Id', 'MIRNA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AA');
+  return {
+    request,
+    env,
+    accountingEnv: env,
+    requestId: crypto.randomUUID(),
+    allowedOrigin: TEST_ORIGIN,
+    budgetReservationIds: [],
+  };
+};
+
 const errorCode = async (response: Response): Promise<string | undefined> => {
   const body = await response.json<{ error?: { code?: string } }>();
   return body.error?.code;
 };
 
 describe('Phase 1 vault initialization', () => {
+  it('keeps the measured maximum create path inside its conservative route reservation', async () => {
+    const fixture = await createInitialVaultFixture();
+    const context = vaultCreateContext(fixture);
+    const controller = new UsageBudgetController();
+    await controller.reserveRequest(context);
+    await controller.reserveRoute(context);
+    const meter = new RouteUsageMeter();
+    context.usageMeter = meter;
+    const localMeteredEnv = meter.wrapEnvironment(env);
+    const stagingMeteredEnv = Object.create(localMeteredEnv) as typeof env;
+    Object.defineProperty(stagingMeteredEnv, 'MIRNA_ENVIRONMENT', { value: 'staging' });
+
+    context.env = stagingMeteredEnv;
+    for (const category of ['siteverify-started', 'verified', 'vault_create_business_committed']) {
+      await recordBetaDiagnostic(context, {
+        eventType:
+          category === 'vault_create_business_committed'
+            ? 'request_error'
+            : 'turnstile_siteverify_result',
+        severity: 'info',
+        category,
+        action: 'mirna_vault_create',
+        requestId: context.requestId,
+        vaultId: fixture.vaultId,
+        deviceId: fixture.deviceId,
+      });
+    }
+    context.env = localMeteredEnv;
+
+    expect((await handleCreateVault(context)).status).toBe(201);
+    await controller.settle(context);
+
+    const accounting = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT measurement_exact, reserved_d1_rows_read, reserved_d1_rows_written,
+              measured_d1_rows_read, measured_d1_rows_written
+         FROM usage_reservations WHERE reservation_id = ?1`,
+    )
+      .bind(`${context.requestId}:route`)
+      .first<Record<string, number>>();
+    expect(accounting?.measurement_exact).toBe(1);
+    expect(accounting?.reserved_d1_rows_read).toBe(VAULT_CREATE_ROUTE_USAGE.d1RowsRead);
+    expect(accounting?.reserved_d1_rows_written).toBe(VAULT_CREATE_ROUTE_USAGE.d1RowsWritten);
+    expect(accounting?.measured_d1_rows_read).toBeLessThanOrEqual(
+      VAULT_CREATE_ROUTE_USAGE.d1RowsRead,
+    );
+    expect(accounting?.measured_d1_rows_written).toBeLessThanOrEqual(
+      VAULT_CREATE_ROUTE_USAGE.d1RowsWritten,
+    );
+  });
+
+  it('reconciles one committed vault after an intentionally failed settlement', async () => {
+    const fixture = await createInitialVaultFixture();
+    const context = vaultCreateContext(fixture);
+    const controller = new UsageBudgetController(STAGING_BUDGETS, Date.now, {
+      'vault-create': ZERO_USAGE,
+    });
+
+    try {
+      await controller.reserveRoute(context);
+      const meter = new RouteUsageMeter();
+      context.usageMeter = meter;
+      context.env = meter.wrapEnvironment(env);
+
+      expect((await handleCreateVault(context)).status).toBe(201);
+      expect(context.businessCommit).toMatchObject({ committed: true, reconciled: false });
+      await expect(controller.settle(context)).rejects.toMatchObject({
+        code: 'USAGE_RESERVATION_UNDERESTIMATED',
+        accounting: { businessCommitted: true, phase: 'settlement', route: 'vault-create' },
+      });
+
+      const retried = await registerInitialVault(fixture);
+      expect(retried.status).toBe(200);
+      expect(await parseVaultCreateResponse(retried)).toMatchObject({
+        vaultId: fixture.vaultId,
+        created: false,
+      });
+      const counts = await env.MIRNA_SYNC_DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM vaults WHERE vault_id = ?1) AS vaults,
+           (SELECT COUNT(*) FROM devices WHERE vault_id = ?1) AS devices,
+           (SELECT COUNT(*) FROM vault_manifests WHERE vault_id = ?1) AS manifests,
+           (SELECT COUNT(*) FROM recovery_records WHERE vault_id = ?1) AS recovery_records,
+           (SELECT COUNT(*) FROM device_grants WHERE vault_id = ?1) AS grants`,
+      )
+        .bind(fixture.vaultId)
+        .first<Record<string, number>>();
+      expect(counts).toEqual({
+        vaults: 1,
+        devices: 1,
+        manifests: 1,
+        recovery_records: 1,
+        grants: 1,
+      });
+    } finally {
+      await env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+                accounting_fault_at = NULL
+          WHERE singleton_id = 1`,
+      ).run();
+    }
+  });
+
   it('creates the initial vault atomically and treats an exact retry as idempotent', async () => {
     const fixture = await createInitialVaultFixture();
 

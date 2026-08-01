@@ -68,6 +68,25 @@ const SUPPORT_ID = /^MIRNA-(?:[0-9A-HJKMNP-TV-Z]{4}-){6}[0-9A-HJKMNP-TV-Z]{2}$/u
 const SUPPORT_ID_WAIT_MS = 500;
 const SNAPSHOT_ENVELOPE_HEADER = 'X-Mirna-Snapshot-Envelope';
 
+const accountingFailureSchema = z.strictObject({
+  category: z.enum([
+    'SERVICE_QUOTA_EXHAUSTED',
+    'VAULT_QUOTA_EXCEEDED',
+    'SERVICE_MAINTENANCE',
+    'USAGE_ACCOUNTING_UNAVAILABLE',
+    'USAGE_RESERVATION_UNDERESTIMATED',
+    'USAGE_SETTLEMENT_FAILED',
+    'D1_STORAGE_LIMIT_REACHED',
+  ]),
+  phase: z.enum(['request-reservation', 'route-reservation', 'settlement']),
+  route: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  businessCommitted: z.boolean(),
+  serviceFlagsChanged: z.boolean(),
+  workerBuild: z.string().regex(/^(?:[0-9a-f]{7,64}|local|replace-at-deploy|unknown)$/u),
+});
+
+export type AccountingFailure = z.output<typeof accountingFailureSchema>;
+
 const publicErrorSchema = z.strictObject({
   protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
   error: z.strictObject({
@@ -84,6 +103,7 @@ const publicErrorSchema = z.strictObject({
         'CONFIGURATION_ERROR',
       ])
       .optional(),
+    accounting: accountingFailureSchema.optional(),
   }),
 });
 
@@ -203,6 +223,12 @@ const REMOTE_ERROR_CODES = new Set([
   'SECURE_REVOCATION_STATE_CHANGED',
   'SECURITY_TRANSITION_ID_REUSED',
   'SERVICE_BUDGET_EXHAUSTED',
+  'SERVICE_QUOTA_EXHAUSTED',
+  'SERVICE_MAINTENANCE',
+  'USAGE_ACCOUNTING_UNAVAILABLE',
+  'USAGE_RESERVATION_UNDERESTIMATED',
+  'USAGE_SETTLEMENT_FAILED',
+  'D1_STORAGE_LIMIT_REACHED',
   'SIGNATURE_INVALID',
   'STALE_JOB_RETRY_REQUIRED',
   'STORAGE_QUOTA_REACHED',
@@ -220,6 +246,7 @@ const REMOTE_ERROR_CODES = new Set([
   'SNAPSHOT_TOO_LARGE',
   'UNSUPPORTED_CONTENT_TYPE',
   'VAULT_ALREADY_EXISTS',
+  'VAULT_CREATION_IDEMPOTENCY_REUSED',
   'VAULT_QUOTA_EXCEEDED',
   'ACK_CONTEXT_CONFLICT',
   'ACK_ROLLBACK_DETECTED',
@@ -258,6 +285,17 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
     'Cloudflare nije prihvatio proveru. Pokušajte ponovo ili kopirajte dijagnostiku.',
   SERVICE_BUDGET_EXHAUSTED:
     'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.',
+  SERVICE_QUOTA_EXHAUSTED:
+    'Beta servis je dostigao postavljeno ograničenje korišćenja. Lokalne promene ostaju sačuvane.',
+  SERVICE_MAINTENANCE: 'Beta sinhronizacija je privremeno zaustavljena radi provere servisa.',
+  USAGE_ACCOUNTING_UNAVAILABLE:
+    'Beta servis trenutno ne može pouzdano da izmeri potrošnju. Sinhronizacija je zaustavljena pre novih promena.',
+  USAGE_RESERVATION_UNDERESTIMATED:
+    'Beta servis je otkrio grešku u proceni potrošnje. Kopirajte Request ID i Support ID.',
+  USAGE_SETTLEMENT_FAILED:
+    'Beta servis nije uspeo da poravna izmerenu potrošnju. Kopirajte Request ID i Support ID.',
+  D1_STORAGE_LIMIT_REACHED:
+    'Beta baza je dostigla postavljeno ograničenje prostora. Lokalne promene ostaju sačuvane.',
   VAULT_QUOTA_EXCEEDED:
     'Beta sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
   REMOTE_ERROR: 'Zahtev za sinhronizaciju nije uspeo.',
@@ -282,6 +320,7 @@ export class SyncApiError extends Error {
     readonly status: number | null = null,
     readonly requestId: string | null = null,
     readonly verificationReason: VerificationReason | null = null,
+    readonly accounting: AccountingFailure | null = null,
   ) {
     super(
       verificationReason
@@ -585,6 +624,7 @@ export class MirnaSyncApi {
       false,
       options,
       'mirna_vault_create',
+      { 'Idempotency-Key': input.manifest.transition.transitionId },
     );
   }
 
@@ -1132,6 +1172,7 @@ export class MirnaSyncApi {
     authenticated: boolean,
     options: SyncRequestOptions | undefined,
     action: TurnstileAction,
+    additionalHeaders?: HeadersInit,
   ): Promise<ResponseBody> {
     this.#assertEnabled();
     if (!this.#turnstile) throw new SyncApiError('TURNSTILE_REQUIRED');
@@ -1141,6 +1182,9 @@ export class MirnaSyncApi {
     }
     this.#turnstile.markServerVerifying?.();
     try {
+      const protectedHeaders = new Headers(additionalHeaders);
+      protectedHeaders.set('X-Mirna-Turnstile-Token', verification.token);
+      protectedHeaders.set('X-Mirna-Verification-Attempt-Id', verification.verificationAttemptId);
       const result = await this.#request(
         {
           method: 'POST',
@@ -1149,10 +1193,7 @@ export class MirnaSyncApi {
           expectedStatuses,
           body: serializeRequest(requestSchema, input),
           authenticated,
-          headers: {
-            'X-Mirna-Turnstile-Token': verification.token,
-            'X-Mirna-Verification-Attempt-Id': verification.verificationAttemptId,
-          },
+          headers: protectedHeaders,
         },
         options,
       );
@@ -1247,6 +1288,12 @@ export class MirnaSyncApi {
         requestId: error.requestId ?? undefined,
         safeCode: error.code,
         verificationReason: error.verificationReason ?? undefined,
+        accountingCategory: error.accounting?.category,
+        reservationPhase: error.accounting?.phase,
+        route: error.accounting?.route,
+        businessCommitted: error.accounting?.businessCommitted,
+        serviceFlagsChanged: error.accounting?.serviceFlagsChanged,
+        workerBuild: error.accounting?.workerBuild,
         online: navigator.onLine,
       });
     } catch {
@@ -1287,6 +1334,7 @@ export class MirnaSyncApi {
       response.status,
       remote.error.requestId,
       remote.error.verificationReason ?? null,
+      remote.error.accounting ?? null,
     );
   }
 

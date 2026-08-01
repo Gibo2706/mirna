@@ -140,6 +140,36 @@ afterEach(() => {
 });
 
 describe('Mirna sync API transport', () => {
+  it.each([
+    [
+      'SERVICE_QUOTA_EXHAUSTED',
+      'Beta servis je dostigao postavljeno ograničenje korišćenja. Lokalne promene ostaju sačuvane.',
+    ],
+    [
+      'VAULT_QUOTA_EXCEEDED',
+      'Beta sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
+    ],
+    ['SERVICE_MAINTENANCE', 'Beta sinhronizacija je privremeno zaustavljena radi provere servisa.'],
+    [
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Beta servis trenutno ne može pouzdano da izmeri potrošnju. Sinhronizacija je zaustavljena pre novih promena.',
+    ],
+    [
+      'USAGE_RESERVATION_UNDERESTIMATED',
+      'Beta servis je otkrio grešku u proceni potrošnje. Kopirajte Request ID i Support ID.',
+    ],
+    [
+      'USAGE_SETTLEMENT_FAILED',
+      'Beta servis nije uspeo da poravna izmerenu potrošnju. Kopirajte Request ID i Support ID.',
+    ],
+    [
+      'D1_STORAGE_LIMIT_REACHED',
+      'Beta baza je dostigla postavljeno ograničenje prostora. Lokalne promene ostaju sačuvane.',
+    ],
+  ])('maps %s to its dedicated safe Serbian message', (code, message) => {
+    expect(new SyncApiError(code).message).toBe(message);
+  });
+
   it('performs no fetch or persistent write while the feature is disabled', async () => {
     const fetchMock = vi.fn<typeof fetch>();
     const localWrite = vi.spyOn(Storage.prototype, 'setItem');

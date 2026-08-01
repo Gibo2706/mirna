@@ -307,6 +307,19 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           Poslednja greška: {latestError?.safeCode ?? latestError?.eventType ?? 'nema'}
           {latestError?.verificationReason ? ` — ${latestError.verificationReason}` : ''}
         </p>
+        {latestError?.accountingCategory ? (
+          <p>
+            Accounting: {latestError.accountingCategory}; faza{' '}
+            {latestError.reservationPhase ?? 'nije zabeležena'}; ruta{' '}
+            {latestError.route ?? 'nije zabeležena'}
+          </p>
+        ) : null}
+        {latestError?.accountingCategory ? (
+          <p>
+            Poslovni upis: {latestError.businessCommitted ? 'commitovan' : 'nije commitovan'};
+            service flags: {latestError.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
+          </p>
+        ) : null}
         <p>Klijentska faza: {latestTurnstile?.eventType ?? 'nije zabeležena'}</p>
         <p>Vreme: {formatDateTime(latestTurnstile?.createdAt)}</p>
         <p>Klijentski build: {latestTurnstile?.build ?? APPLICATION_VERSION}</p>
@@ -329,6 +342,18 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
               <dl className="mt-2 grid min-w-0 gap-1 text-muted">
                 {event.safeCode ? <div>Kod: {event.safeCode}</div> : null}
                 {event.verificationReason ? <div>Razlog: {event.verificationReason}</div> : null}
+                {event.accountingCategory ? (
+                  <div>Accounting kategorija: {event.accountingCategory}</div>
+                ) : null}
+                {event.reservationPhase ? <div>Faza: {event.reservationPhase}</div> : null}
+                {event.route ? <div>Ruta: {event.route}</div> : null}
+                {event.accountingCategory ? (
+                  <div>
+                    Poslovni upis: {event.businessCommitted ? 'commitovan' : 'nije commitovan'};
+                    flagovi: {event.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
+                  </div>
+                ) : null}
+                {event.workerBuild ? <div>Worker build: {event.workerBuild}</div> : null}
                 {event.requestId ? (
                   <div className="min-w-0">
                     Request ID:{' '}
@@ -560,7 +585,11 @@ const EnablePanel = ({
           (caught.code.startsWith('TURNSTILE_') ||
             caught.code.startsWith('HUMAN_VERIFICATION_') ||
             caught.code === 'NETWORK_FAILURE' ||
-            caught.code === 'REQUEST_TIMEOUT'),
+            caught.code === 'REQUEST_TIMEOUT' ||
+            caught.code === 'USAGE_ACCOUNTING_UNAVAILABLE' ||
+            caught.code === 'USAGE_RESERVATION_UNDERESTIMATED' ||
+            caught.code === 'USAGE_SETTLEMENT_FAILED' ||
+            caught.code === 'SERVICE_MAINTENANCE'),
       );
       setError(safeErrorMessage(caught));
     } finally {

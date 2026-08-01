@@ -15,7 +15,9 @@ const pauseForInventoryMismatch = async (env: Env, now: number): Promise<void> =
   await env.MIRNA_SYNC_DB.prepare(
     `UPDATE service_flags
         SET accept_new_vaults = 0, accept_pairings = 0,
-            accept_writes = 0, maintenance_mode = 1, updated_at = ?1
+            accept_writes = 0, maintenance_mode = 1,
+            state_reason = 'R2_INVENTORY_MISMATCH', state_request_id = NULL,
+            updated_at = ?1
       WHERE singleton_id = 1`,
   )
     .bind(now)

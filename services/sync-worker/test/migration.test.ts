@@ -58,7 +58,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(9);
+    expect(migrationCount).toBe(10);
 
     const reservationColumns = await env.MIRNA_SYNC_DB.prepare(
       "PRAGMA table_info('usage_reservations')",
@@ -68,6 +68,12 @@ describe('D1 migration foundation', () => {
         'committed_d1_rows_read',
         'released_d1_rows_read',
         'released_r2_class_a',
+        'measurement_exact',
+        'measured_d1_rows_written',
+        'settlement_failure_code',
+        'business_committed',
+        'reconciled_at',
+        'reconciliation_code',
       ]),
     );
 
@@ -168,6 +174,7 @@ describe('D1 migration foundation', () => {
       'idx_beta_diagnostics_request',
       'idx_beta_diagnostics_vault_created',
       'idx_beta_diagnostics_expiry',
+      'idx_usage_reservations_failure',
     ]) {
       expect(names.has(requiredIndex), `${requiredIndex} should exist`).toBe(true);
     }
