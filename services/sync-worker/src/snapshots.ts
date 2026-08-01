@@ -19,6 +19,7 @@ import {
   type EncryptedSnapshotEnvelopeV1,
 } from '../../../src/domain/sync/snapshot';
 import { authenticateRequest, type AuthenticatedDevice } from './auth';
+import { commitR2Object, observeD1Metadata, releaseR2Object, reserveR2Object } from './budget';
 import type { RequestContext } from './context';
 import { conflict, forbidden, HttpError } from './errors';
 import { binaryResponse, jsonResponse } from './http';
@@ -283,6 +284,7 @@ const committedRetry = async (
   if (!stored.canonical_commit_response) {
     throw new HttpError(503, 'SNAPSHOT_STATE_UNAVAILABLE', 'Snapshot state is unavailable.');
   }
+  await commitR2Object(context.env, stored.r2_object_key);
   const object = await context.env.MIRNA_SYNC_BUCKET.head(stored.r2_object_key);
   if (
     !object ||
@@ -361,7 +363,12 @@ const markOrphanAndDelete = async (
     .bind(envelope.vaultId, envelope.snapshotId, now)
     .run()
     .catch(() => undefined);
-  await context.env.MIRNA_SYNC_BUCKET.delete(objectKey).catch(() => undefined);
+  try {
+    await context.env.MIRNA_SYNC_BUCKET.delete(objectKey);
+    await releaseR2Object(context.env, objectKey);
+  } catch {
+    // Keep the inventory reservation if deletion cannot be proven.
+  }
 };
 
 const revisionConflictResponse = async (context: RequestContext, vaultId: string) => {
@@ -463,6 +470,13 @@ export const handleUploadSnapshot = async (
     }
   }
 
+  await reserveR2Object(context.env, {
+    objectKey,
+    vaultId: authenticated.vaultId,
+    objectType: 'snapshot',
+    ciphertextBytes: envelope.ciphertextLength,
+  });
+
   let object: R2Object;
   try {
     object = await context.env.MIRNA_SYNC_BUCKET.put(objectKey, context.request.body, {
@@ -471,7 +485,12 @@ export const handleUploadSnapshot = async (
       customMetadata: { protocol: '1', snapshot: snapshotId },
     });
   } catch {
-    await context.env.MIRNA_SYNC_BUCKET.delete(objectKey).catch(() => undefined);
+    try {
+      await context.env.MIRNA_SYNC_BUCKET.delete(objectKey);
+      await releaseR2Object(context.env, objectKey);
+    } catch {
+      // A failed/uncertain delete remains charged until scheduled reconciliation.
+    }
     throw new HttpError(503, 'SNAPSHOT_STORAGE_UNAVAILABLE', 'Snapshot storage is unavailable.');
   }
   if (
@@ -560,7 +579,12 @@ export const handleUploadSnapshot = async (
       assertExactStoredSnapshot(raced, envelope, canonicalEnvelope, envelopeHash, idempotencyHash);
       if (raced.state === 'committed') return committedRetry(context, raced);
     }
-    await context.env.MIRNA_SYNC_BUCKET.delete(objectKey).catch(() => undefined);
+    try {
+      await context.env.MIRNA_SYNC_BUCKET.delete(objectKey);
+      await releaseR2Object(context.env, objectKey);
+    } catch {
+      // Keep conservative inventory when deletion cannot be confirmed.
+    }
     throw new HttpError(503, 'SNAPSHOT_COMMIT_UNAVAILABLE', 'Snapshot commit is unavailable.');
   }
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
@@ -577,6 +601,9 @@ export const handleUploadSnapshot = async (
     await markOrphanAndDelete(context, envelope, objectKey);
     return revisionConflictResponse(context, authenticated.vaultId);
   }
+
+  await observeD1Metadata(context.env, results);
+  await commitR2Object(context.env, objectKey);
 
   return jsonResponse(commitBody, {
     status: 201,

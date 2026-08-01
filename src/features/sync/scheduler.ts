@@ -1,9 +1,11 @@
 import { useEffect } from 'react';
 import { MIRNA_SYNC_LOCAL_MUTATION_EVENT } from '@/db/sync/mutation-audit';
+import { SyncApiError } from './api';
 
 const BASE_INTERVAL_MS = 45_000;
 const VISIBILITY_DEBOUNCE_MS = 750;
 const BACKOFF_MS = [5_000, 15_000, 60_000, 5 * 60_000] as const;
+const BUDGET_BACKOFF_MS = 6 * 60 * 60 * 1_000;
 
 const withJitter = (milliseconds: number): number => {
   const value = crypto.getRandomValues(new Uint16Array(1))[0] ?? 0;
@@ -41,9 +43,13 @@ export const useSnapshotSyncScheduler = (input: {
         await synchronize();
         failedAttempts = 0;
         nextAllowedAt = 0;
-      } catch {
+      } catch (error) {
+        const budgetPause =
+          error instanceof SyncApiError &&
+          (error.code === 'SERVICE_BUDGET_EXHAUSTED' || error.code === 'VAULT_QUOTA_EXCEEDED');
         const index = Math.min(failedAttempts, BACKOFF_MS.length - 1);
-        nextAllowedAt = Date.now() + withJitter(BACKOFF_MS[index]);
+        nextAllowedAt =
+          Date.now() + withJitter(budgetPause ? BUDGET_BACKOFF_MS : BACKOFF_MS[index]);
         failedAttempts += 1;
       } finally {
         inFlight = false;

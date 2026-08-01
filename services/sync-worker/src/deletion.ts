@@ -13,6 +13,7 @@ import {
 import { authenticateRequest } from './auth';
 import type { RequestContext } from './context';
 import type { Env } from './env';
+import { releaseVaultR2Inventory } from './budget';
 import { conflict, forbidden, HttpError } from './errors';
 import { jsonResponse } from './http';
 import { authorizeRecoveryCapability } from './recovery';
@@ -137,6 +138,7 @@ export const resumeVaultDeletion = async (
   }
 
   try {
+    await releaseVaultR2Inventory(env, job.vault_id);
     const now = Date.now();
     await env.MIRNA_SYNC_DB.batch([
       env.MIRNA_SYNC_DB.prepare(

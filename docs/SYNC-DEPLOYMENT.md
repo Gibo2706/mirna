@@ -1,430 +1,282 @@
-# Mirna Encrypted Sync — Staging Deployment
+# Mirna Encrypted Sync — Beta/Staging Operations
 
-Status: safe runbook for experimental `2.4.0-beta.1`, protocol version 1
-Authorized target: Cloudflare staging only
-Current remote status: provisioning stopped before writes because R2 activation
-requires a billing step; no resource or deployment is asserted
-Production status: not authorized and not configured
+Status: experimental `2.4.0-beta.1`, protocol version 1
 
-## Non-negotiable stop conditions
+Authorized Worker: `mirna-sync-staging`
 
-Stop before accepting or enabling anything if Cloudflare asks for:
+Authorized application: <https://mirna-finansije-beta.vercel.app>
+Stable production: out of scope and unchanged
 
-- a payment method;
-- R2 billing or subscription activation;
-- a Workers Paid or other paid plan;
-- paid overage;
-- a paid rate-limiting, observability or regional product;
-- resource creation in an account whose plan/ownership has not been verified.
+This runbook defines the operational procedure for the dedicated beta. It must
+not contain Cloudflare account identifiers, credentials, Turnstile secrets,
+Vercel tokens or finance plaintext. The checked-in D1 resource identifier is a
+binding identifier, not a decryption secret; it is still omitted from reports.
 
-Do not click through, accept a checkout, attach billing or continue with a
-different paid product. Record only the generic blocker; do not copy account
-email, account ID, database ID, bucket credentials, OAuth material or tokens
-into an issue or deployment report.
-
-R2 has a documented monthly free allowance, but usage beyond it is billed and
-initial R2 activation may require a billing step. It is not a hard-free safety
-boundary. If that activation appears, the R2 provisioning step remains blocked
-until a separate explicit decision.
-
-That stop condition was reached on 2026-07-31 while inspecting the authorized
-account: D1 had no existing database and R2 returned its subscription-required
-response. No D1 database, R2 bucket or Worker deployment was created, and no
-billing action was accepted.
-
-## Deployment state and configuration
-
-The checked-in configuration is:
+## Fixed architecture and trust boundary
 
 ```text
-services/sync-worker/wrangler.jsonc
+Mirna beta PWA
+  -> exact-origin HTTPS
+mirna-sync-staging Worker
+  -> EU-jurisdiction D1 metadata and ciphertext operations
+  -> private EU-jurisdiction R2 Standard snapshot ciphertext
 ```
 
-It defines only:
+The Worker never receives a vault master key, recovery wrapping key, private
+device key or readable finance payload. Cloudflare can see ordinary request
+metadata and can deny, delay or delete ciphertext. EU jurisdiction constrains
+D1/R2 according to each product's guarantee; it does not make globally executed
+Worker requests EU-only. No regional execution product is configured.
 
-- local Miniflare bindings with deliberately non-deployable labels;
-- one `staging` Worker environment;
-- placeholder staging D1 and R2 bindings;
-- disabled Worker observability;
-- a five-minute bounded cleanup trigger.
+There is no production Worker environment, public R2 URL, Durable Object,
+Queue, paid observability or server-side encryption master key in this design.
 
-There is no production environment. Do not add one as part of staging work.
-The placeholder values are intentionally fail-closed:
+Staging CORS allows exactly the beta origin plus explicit local development at
+`http://localhost:5173` and `http://127.0.0.1:5173`. It never reflects an
+arbitrary origin and does not allow the stable production application.
+
+## Source-controlled staging safety caps
+
+The authoritative values live in
+`services/sync-worker/src/config/staging-budgets.ts`. Environment variables,
+headers, query strings, client JSON and D1 values cannot raise them.
+
+| Global boundary           | Rolling 30 days | UTC day   | Current resource |
+| ------------------------- | --------------- | --------- | ---------------- |
+| Worker requests           | 1,500,000       | 50,000    | —                |
+| D1 rows read              | 25,000,000      | 2,000,000 | —                |
+| D1 rows written           | 500,000         | 40,000    | —                |
+| R2 Class A                | 400,000         | 20,000    | —                |
+| R2 Class B                | 4,000,000       | 200,000   | —                |
+| R2 Standard ciphertext    | —               | —         | 4 GiB            |
+| R2 objects                | —               | —         | 100,000          |
+| D1 application storage    | —               | —         | 256 MiB          |
+| Active non-deleted vaults | —               | —         | 50               |
+
+Per vault: 25,000 Worker requests, 250,000 D1 reads, 25,000 D1 writes,
+1,000 R2 Class A, 10,000 R2 Class B, 64 MiB and 2,000 R2 objects per rolling
+window/current inventory as applicable. Existing security caps remain ten
+devices, three active pairings, 8 MiB snapshots, 64 KiB operations and 100
+operations per batch. A vault pauses at 100 unresolved local conflicts or 5,000
+uncompacted encrypted operations.
+
+Every HTTP request first reserves a conservative ledger-overhead vector. The
+route then reserves its maximum D1/R2 vector before application work. D1 batch
+conditions make concurrent cap checks and counter increments atomic. D1 result
+metadata is aggregated across the route for rows read, rows written and current
+database size. Successful and failed routes commit observed units and release
+the unused reservation atomically. If metadata is missing, a route crashes, or
+observed work exceeds its reviewed maximum, accounting stays conservative and
+the full reservation remains charged; an exceeded maximum also engages the
+maintenance kill switch. The ledger's own D1 cost is included in the first
+reservation and is not recursively metered. Scheduled cleanup uses the same
+reserve/measure/reconcile path, including every R2 ListObjects call.
+
+R2 classification is explicit and tested: Put/List/Copy are Class A; Get/Head
+are Class B; Delete is currently provider-free but its Worker/D1 work remains
+metered. Temporary objects enter the D1 inventory before Put, are committed only
+after the existing snapshot CAS succeeds, and remain conservatively charged if
+deletion cannot be confirmed.
+
+Budget errors are intentionally generic:
+
+- `VAULT_QUOTA_EXCEEDED` / HTTP 429;
+- `SERVICE_BUDGET_EXHAUSTED` / HTTP 503.
+
+The client preserves local data/outbox work, shows a calm Serbian pause message
+and applies a six-hour jittered automatic backoff. Manual local use and JSON
+backup remain available.
+
+## D1 operator kill switches
+
+There is no public administration endpoint. Only an authenticated D1 operator
+may update the singleton row:
+
+```sql
+UPDATE service_flags
+SET accept_new_vaults = 0,
+    accept_pairings = 0,
+    accept_writes = 0,
+    maintenance_mode = 1,
+    updated_at = unixepoch('subsec') * 1000
+WHERE singleton_id = 1;
+```
+
+Normal beta defaults are `accept_new_vaults=1`, `accept_pairings=1`,
+`accept_writes=1`, `maintenance_mode=0`. Reads needed for recovery/export may
+remain available while writes are paused. The health route exposes only the
+derived `writesEnabled` boolean, never counter values or flags individually.
+
+## Turnstile boundary
+
+The dedicated managed widget is named `Mirna Sync Beta` and is restricted to:
 
 ```text
-REPLACE_WITH_STAGING_D1_UUID_DO_NOT_DEPLOY
-replace-with-staging-r2-bucket-do-not-deploy
-replace-at-deploy
+mirna-finansije-beta.vercel.app
+localhost
+127.0.0.1
 ```
 
-A non-dry deployment MUST NOT run while any of those placeholders remains.
-Automatic resource provisioning must stay disabled for reviewed development,
-migration and deployment commands.
+The SPA loads the exact `challenges.cloudflare.com` script only when an
+anonymous create flow requests a token. Explicit-render widgets are removed
+after success, error, expiry or timeout so the next attempt receives a fresh
+single-use token. Protected routes/actions are:
 
-## Current platform assumptions
+| Route                         | Expected action        |
+| ----------------------------- | ---------------------- |
+| `POST /v1/vaults`             | `mirna_vault_create`   |
+| `POST /v1/pairings`           | `mirna_pairing_create` |
+| `POST /v1/recovery/challenge` | `mirna_recovery_init`  |
 
-These values were checked against Cloudflare documentation on 2026-07-31. They
-can change and MUST be rechecked immediately before remote provisioning.
+The Worker posts the token to Siteverify and checks success, exact hostname and
+exact action. Turnstile is defense in depth; edge rate limits, D1 attempt
+counters, signatures, sessions and idempotency remain authoritative. Token,
+secret and visitor IP values are never logged or stored.
 
-| Product     | Documented Free-plan boundary relevant to staging                                                                                                                   |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workers     | 100,000 requests/day; 10 ms CPU per HTTP/Cron invocation; 128 MB memory; 50 subrequests; six simultaneous outbound connections; 100 MB Free-plan request body limit |
-| D1          | 5 million rows read/day; 100,000 rows written/day; ten databases; 500 MB/database; 5 GB/account; 50 queries/Free Worker invocation; 2 MB maximum row/BLOB/string    |
-| R2 Standard | 10 GB-month storage, one million Class A and ten million Class B operations per month included; usage-priced beyond the allowance                                   |
+The public site key is `VITE_TURNSTILE_SITE_KEY`. The secret is set only through
+the Cloudflare secret store as `TURNSTILE_SECRET_KEY`. Automated local tests use
+Cloudflare's documented always-pass test keys; real staging material never
+enters `.env`, `.dev.vars`, test fixtures or Git.
 
-D1 Free read/write/storage exhaustion returns errors rather than silently
-charging. R2 does not provide the same hard-failure cost boundary. The Mirna
-application limits of 8 MiB per encrypted snapshot, 64 KiB per encrypted
-operation and bounded retention are required regardless of the platform's
-larger limits.
+## Local gate
 
-Primary references:
-
-- [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
-- [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)
-- [D1 limits](https://developers.cloudflare.com/d1/platform/limits/)
-- [R2 pricing](https://developers.cloudflare.com/r2/pricing/)
-- [D1 data location](https://developers.cloudflare.com/d1/configuration/data-location/)
-- [R2 data location](https://developers.cloudflare.com/r2/reference/data-location/)
-- [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/)
-
-## Data-location statement
-
-Create both staging storage resources with the immutable `eu` jurisdiction at
-creation. For D1, Cloudflare documents that the database runs and persists
-inside that jurisdiction. For R2, objects are stored and processed inside the
-selected jurisdiction. The jurisdiction cannot be added or changed later.
-
-This does not make Worker request processing EU-only. A globally deployed
-Worker may receive and process HTTP requests at other Cloudflare edge locations
-and then access EU-bound storage. Do not claim full EU-only request processing
-without separately configured and verified regional services.
-
-## Prerequisites
-
-Run from the repository root with Node 22 selected only for the current shell:
+Use Node 22 only for the current shell and pinned Wrangler `4.118.0`:
 
 ```sh
 nvm use 22
-node --version
-npx wrangler --version --config services/sync-worker/wrangler.jsonc
+npm ci
+npm run sync:migrations:local
+npm run check
+npm run test:coverage
+npm run test:e2e
+npm run sync:test:e2e
+npm audit --audit-level=high
+npm audit --omit=dev --audit-level=high
 ```
 
-The intended pinned CLI version for this branch is `4.118.0`. Do not install a
-global Wrangler. Never place a Cloudflare API token, OAuth credential or secret
-in a command, tracked file or shell transcript.
-
-Before any remote action, all phase gates needed by the routes being deployed
-and the complete local quality gate must pass. At minimum, the Worker itself
-must pass:
+Before remote work, also run:
 
 ```sh
-npx tsc --project services/sync-worker/tsconfig.json --pretty false
-npx vitest run --config services/sync-worker/vitest.config.ts
-npx wrangler deploy --dry-run --env staging --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false
+npm run sync:types
+npx wrangler deploy --dry-run --env staging \
+  --config services/sync-worker/wrangler.jsonc
 ```
 
-A dry run compiles only. It does not prove D1/R2 behavior or authorize a later
-deployment. The invalid placeholders should remain during the initial
-compile-only review.
+Fresh migrated Worker tests must cover concurrent reservation, daily/rolling
+exhaustion, per-vault isolation, inventory release/orphan behavior, kill switch,
+external budget override attempts and Turnstile hostname/action mismatch.
 
-## Local storage verification
+## Cloudflare staging procedure
 
-Use local Miniflare D1/R2 only. Every Wrangler command names the configuration
-explicitly and disables automatic provisioning:
-
-```sh
-npx wrangler d1 migrations list MIRNA_SYNC_DB --local --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false
-npx wrangler d1 migrations apply MIRNA_SYNC_DB --local --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false
-npx wrangler dev --local --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false
-```
-
-Local tests must use synthetic finance sentinels only. Inspect local D1 rows,
-R2 objects, API payloads and available test logs to confirm that known
-plaintext finance strings do not appear. This regression check is necessary but
-does not prove perfect secrecy.
-
-## Authentication and private account check
-
-Authenticate interactively only after local gates pass:
-
-```sh
-npx wrangler login --config services/sync-worker/wrangler.jsonc
-npx wrangler whoami --config services/sync-worker/wrangler.jsonc
-```
-
-Inspect the result privately. Confirm the intended account and current plan,
-then close or clear any captured terminal view before sharing a report. Do not
-paste identity output anywhere.
-
-Confirm in current official documentation and the account dashboard:
-
-1. Workers remains on the allowed Free plan.
-2. D1 creation does not require an upgrade and there is capacity for another
-   Free database.
-3. R2 Standard is already available without accepting billing activation, or
-   stop before activating it.
-4. No paid overage or subscription has been enabled.
-5. Rate-limiting bindings and optional Turnstile do not introduce a paid
-   dependency. Neither is required for normal background sync authorization.
-
-Do not treat a rate limiter as exact attempt state. Pairing and recovery limits
-must remain authoritative in D1. Turnstile, if evaluated later, is restricted
-to anonymous setup/recovery screens and needs a separate privacy/CSP review.
-
-## Check for existing staging resources
-
-Do not create a duplicate resource. Inspect the intended account privately:
-
-```sh
-npx wrangler d1 list --config services/sync-worker/wrangler.jsonc
-npx wrangler r2 bucket list --config services/sync-worker/wrangler.jsonc
-```
-
-If the R2 list action redirects to or requests billing activation, stop there.
-Do not activate R2 merely to inspect it. If an EU-jurisdiction resource with the
-intended staging name already exists, verify its jurisdiction and ownership
-before deciding whether it can be reused. Jurisdiction cannot be corrected
-after creation.
-
-The expected names are placeholders for this staging design only:
+Always list resources first and reuse only an exact verified match. The only
+authorized names are:
 
 ```text
-Worker: mirna-sync-staging
-D1:     mirna-sync-staging-eu
-R2:     mirna-sync-staging-eu
+Worker:          mirna-sync-staging
+D1:              mirna-sync-staging-eu
+R2 Standard:     mirna-sync-staging-eu
+Turnstile widget: Mirna Sync Beta
 ```
 
-## Provision D1 staging
-
-After the account and no-payment checks pass, create D1 explicitly with the EU
-jurisdiction:
+Creation commands, when the account has already activated D1/R2 and no checkout
+or paid-plan acceptance appears:
 
 ```sh
-npx wrangler d1 create mirna-sync-staging-eu --jurisdiction=eu --config services/sync-worker/wrangler.jsonc
+npx wrangler d1 create mirna-sync-staging-eu --jurisdiction eu
+npx wrangler r2 bucket create mirna-sync-staging-eu \
+  --jurisdiction eu --storage-class Standard
 ```
 
-This is an intentional remote write. Do not use `--update-config`; review the
-returned binding data privately. Replace only the staging D1 placeholder in
-`services/sync-worker/wrangler.jsonc` with the returned database identifier.
-The documentation intentionally uses only this placeholder:
+Never combine a jurisdiction with a location hint. Do not enable R2
+InfrequentAccess, `r2.dev`, a custom bucket domain or lifecycle rules.
+
+After reviewing the binding diff and regenerating types:
+
+```sh
+npx wrangler d1 migrations list mirna-sync-staging-eu --remote \
+  --env staging --config services/sync-worker/wrangler.jsonc
+npx wrangler d1 migrations apply mirna-sync-staging-eu --remote \
+  --env staging --config services/sync-worker/wrangler.jsonc
+npx wrangler deploy --env staging \
+  --config services/sync-worker/wrangler.jsonc
+```
+
+Set/rotate the real Turnstile secret without putting it in a command argument,
+tracked file or report. Verify the secret binding only by name. Never print its
+value.
+
+## Dedicated Vercel beta project
+
+The only authorized project and alias are:
 
 ```text
-<STAGING_D1_DATABASE_ID>
+project: mirna-finansije-beta
+alias:   https://mirna-finansije-beta.vercel.app
+branch:  feat/e2ee-sync
 ```
 
-A D1 resource identifier is not a decryption secret, but it still should not be
-copied into reports where it is unnecessary. Do not change the local binding.
+Verify `.vercel/project.json` privately before using the CLI. If it names any
+other project, use an isolated temporary working copy or relink only after
+confirming the dedicated beta project. Never alter the stable project.
 
-## R2 payment activation stop gate
-
-Perform this step only if R2 Standard is already available with no checkout,
-payment method, subscription activation or paid-plan acceptance. Otherwise stop
-and leave the staging R2 placeholder untouched.
-
-When the no-payment gate has passed, create the private EU-jurisdiction bucket:
-
-```sh
-npx wrangler r2 bucket create mirna-sync-staging-eu --jurisdiction=eu --config services/sync-worker/wrangler.jsonc
-```
-
-If the command itself asks for billing activation, cancel it. Do not accept and
-continue.
-
-After successful creation, replace only the staging bucket placeholder in the
-configuration. Keep:
-
-```json
-{
-  "binding": "MIRNA_SYNC_BUCKET",
-  "bucket_name": "<STAGING_R2_BUCKET_NAME>",
-  "jurisdiction": "eu",
-  "remote": false
-}
-```
-
-The bucket must remain private. Do not enable a public `r2.dev` URL, custom
-public domain or client-side direct object access. Snapshot access is proxied by
-the authenticated Worker.
-
-## Review configuration before migration
-
-Before touching remote D1:
-
-1. confirm the `staging` environment names only the staging Worker and storage;
-2. confirm both resources were created with `eu`, not a location hint;
-3. set `MIRNA_BUILD_COMMIT` to the exact reviewed feature-branch commit using a
-   placeholder during documentation review:
-
-   ```text
-   <FEATURE_BRANCH_COMMIT>
-   ```
-
-4. keep Worker observability disabled and ensure source has no secret/body
-   logging;
-5. verify exact CORS origins; add a preview origin only when that exact preview
-   is intentionally used, never a wildcard;
-6. confirm no production environment, route or custom domain was added;
-7. rerun the staging dry run with automatic provisioning disabled.
-
-Do not configure a server encryption master key. The Worker has no vault-data
-decryption secret. If optional Turnstile is implemented later, its value is set
-interactively and never committed:
-
-```sh
-npx wrangler secret put TURNSTILE_SECRET_KEY --env staging --config services/sync-worker/wrangler.jsonc
-```
-
-Do not create that secret while Turnstile is disabled or before its privacy,
-origin and server-side single-use validation are implemented.
-
-## Apply remote migrations
-
-Use the explicit database name rather than relying on an ambiguous binding.
-List first, inspect the exact pending migration set, and only then apply:
-
-```sh
-npx wrangler d1 migrations list mirna-sync-staging-eu --remote --env staging --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false
-npx wrangler d1 migrations apply mirna-sync-staging-eu --remote --env staging --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false
-```
-
-Do not run arbitrary remote SQL or manually edit the migration table. A
-migration failure stops deployment. Investigate it without dropping or
-recreating a resource and without applying destructive repair SQL.
-
-The four migrations cover foundation, snapshot, operation and device-security /
-deletion state. Migration presence is still not runtime evidence: before
-staging use, apply the exact ordered set and run the Worker and browser gates
-against the same feature commit.
-
-## Deploy the staging Worker
-
-Deployment is allowed only after:
-
-- all required local and phase gates pass;
-- both bindings refer to verified EU staging resources;
-- placeholders are gone;
-- migrations succeeded;
-- the exact feature commit is recorded;
-- only synthetic smoke data is prepared;
-- no payment or production action occurred.
-
-Run one final dry build, then the intentional staging deployment:
-
-```sh
-npx wrangler deploy --dry-run --env staging --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false --strict
-npx wrangler deploy --env staging --config services/sync-worker/wrangler.jsonc --x-provision=false --x-auto-create=false --strict
-```
-
-Do not use `--temporary`, automatic framework configuration, an unqualified
-environment, or a production route. Keep the returned Worker hostname private
-until response headers, CORS and health output have been reviewed. A staging URL
-is not authorization to point the production Mirna application at it.
-
-## Health and smoke verification
-
-Use a placeholder hostname in documentation and replace it only in the private
-operator shell:
-
-```sh
-curl --fail-with-body --silent --show-error \
-  "https://STAGING_WORKER_HOST.example/v1/health"
-```
-
-The health response may reveal only:
-
-```text
-status
-protocolVersion
-buildCommit
-D1 reachability
-R2 reachability
-```
-
-It must use `Cache-Control: no-store` and must not return account, database or
-bucket identifiers, environment dumps, secrets or stack traces.
-
-Staging smoke tests use synthetic ciphertext only and verify:
-
-- exact allowed and denied origins;
-- strict methods, content types, schemas and `/v1` protocol handling;
-- D1 and R2 reachability through the Worker;
-- challenge/session expiry, one-time use and bounded active-session rotation;
-- pairing/recovery attempt bounds and race handling;
-- 8 MiB snapshot enforcement, private R2 access, acknowledgement-gated
-  compaction and D1/R2 failure recovery;
-- operation idempotence/limits, conflict convergence, device expiry/renewal,
-  revoke-and-rotate and resumable recovery-authorized deletion;
-- no known synthetic finance plaintext in D1, R2, API JSON or available Worker
-  logs.
-
-Record remote checks as pending until the routes run against provisioned
-staging D1/R2. Passing local Miniflare tests is not remote verification.
-
-## Staging client boundary
-
-Only a local build or isolated preview may target the staging Worker. Use
-placeholder values in examples:
+The beta Production environment contains only:
 
 ```text
 VITE_MIRNA_SYNC_ENABLED=true
-VITE_MIRNA_SYNC_API_URL=https://STAGING_WORKER_HOST.example
+VITE_MIRNA_SYNC_API_URL=<exact staging workers.dev origin>
+VITE_TURNSTILE_SITE_KEY=<public beta site key>
+VITE_MIRNA_APP_ENV=beta
+VITE_MIRNA_BETA_ONLY=true
 ```
 
-Do not change production Vercel environment variables, deploy `2.4.0-beta.1` to
-the production alias or enable sync for the stable application. The preview
-must use synthetic finance data and one exact CORS origin. When the feature flag
-is false, the client must make zero sync requests.
+Every env change requires a new beta deployment. The build must contain the
+visible `Mirna Sync — Beta` marker, `noindex, nofollow`, a `robots.txt` that
+disallows all crawlers and a CSP that permits only the exact Turnstile origin
+for script/frame/connect. The stable project receives none of these variables.
 
-## Monitoring and quota response
+## Remote smoke and plaintext sentinel gate
 
-Review Workers request/CPU failures, D1 row read/write/storage use and R2
-storage/Class A/Class B operations through the private Cloudflare dashboard.
-Do not enable raw request logging or paid observability. Application logs, if
-later introduced, are limited to a random request ID, route, status, latency,
-size class and generic error code.
+Use unique synthetic data labelled:
 
-Approaching a Free-plan boundary is handled by pausing staging use, reducing
-synthetic load or cleaning eligible encrypted test data. Do not solve it by
-upgrading, accepting overage or weakening retention/correctness rules.
+```text
+Synthetic beta test data. Not based on a real person's financial records.
+```
 
-Scheduled cleanup is bounded and idempotent. It must never delete a current
-snapshot or an operation not yet eligible under active-device acknowledgement
-rules. Cleanup failure is retried; it is not permission to bypass D1 state.
+At low volume verify beta load/marker/noindex, health and strict CORS, the three
+Turnstile-protected anonymous entry points, device auth, create/upload/download,
+operation sync, pairing, recovery, conflict convergence, revocation/rotation,
+offline continuity and deletion. Remove disposable test vaults through the
+authenticated protocol when they are no longer needed.
 
-## Failure and rollback handling
+Search for unique synthetic finance sentinels in remote D1 values, downloaded
+R2 object bytes, API JSON and safe Worker logs. Identifiers, timestamps, public
+keys, signatures and ciphertext are expected; readable finance sentinels are
+not. Never use real personal records for staging.
 
-If deployment fails, stop and preserve the evidence needed to diagnose the
-staging-only failure without exposing identifiers or secrets. Do not recreate
-D1/R2, drop tables, empty a bucket or force a new deployment as a first
-response.
+Low-volume real-staging quota verification may inspect only aggregate D1
+counters, aggregate R2 count/bytes, migration state and service flags. Do not
+expose a public usage endpoint or attempt to exhaust real provider allowances.
 
-Worker code rollback does not automatically roll back D1 migrations or client
-protocol state. A rollback is safe only when the selected Worker version is
-schema- and protocol-compatible with the already applied migration. Otherwise
-disable the staging client and repair forward with a reviewed migration.
+## Rollback and incident response
 
-If plaintext or secret material is found in any server-visible location:
+Pause writes with service flags before investigating an integrity, plaintext or
+cost incident. Worker rollback is safe only to a protocol/schema-compatible
+version; migrations are forward-only. Do not drop the database, empty the
+bucket, recreate resources or force-push as a first response.
 
-1. stop all staging clients;
-2. do not publish the sensitive sample;
-3. preserve only non-sensitive diagnostic metadata;
-4. invalidate affected sessions/pairings/recovery state as applicable;
-5. fix the boundary and rerun the full plaintext-leak gate before redeploying.
+If plaintext or a real secret appears server-side: pause the beta clients,
+rotate/invalidate affected credentials, preserve only non-sensitive diagnostic
+metadata, repair forward, rerun the plaintext gate and deploy a reviewed build.
 
-## Completion record
+Primary current references:
 
-A staging deployment report may state only verified facts:
-
-- exact feature commit and protocol version;
-- which local/phase gates passed and when;
-- whether D1 and R2 were created or reused with EU jurisdiction;
-- whether any provisioning step was blocked by payment activation;
-- whether migrations, health and synthetic smoke checks passed;
-- Worker hostname only when sharing it is necessary;
-- explicit confirmation that no production client/deployment or paid action
-  occurred.
-
-Never include account identity, resource IDs, credentials, tokens, recovery or
-pairing material. Successful staging smoke tests do not constitute an
-independent security audit or production approval.
+- [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
+- [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
+- [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/)
+- [D1 data location](https://developers.cloudflare.com/d1/configuration/data-location/)
+- [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/)
+- [R2 pricing](https://developers.cloudflare.com/r2/pricing/)
+- [R2 data location](https://developers.cloudflare.com/r2/reference/data-location/)
+- [Turnstile server validation](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)
+- [Turnstile explicit rendering](https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/)
+- [Vercel environment variables](https://vercel.com/docs/environment-variables)

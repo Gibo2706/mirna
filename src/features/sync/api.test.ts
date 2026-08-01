@@ -25,6 +25,9 @@ const publicKey = (character: string): string => character.repeat(87);
 const enabledConfig: SyncClientConfig = {
   enabled: true,
   apiOrigin: API_ORIGIN,
+  turnstileSiteKey: '1x00000000000000000000AA',
+  appEnvironment: 'local-beta',
+  betaOnly: true,
 };
 
 const protocolResponse = (body: unknown, status = 200, headers: HeadersInit = {}): Response =>
@@ -40,7 +43,9 @@ const protocolResponse = (body: unknown, status = 200, headers: HeadersInit = {}
 const healthBody = {
   protocolVersion: SYNC_PROTOCOL_VERSION,
   status: 'ok',
+  environment: 'staging',
   buildCommit: 'abcdef1',
+  writesEnabled: true,
   services: { d1: 'ok', r2: 'ok' },
 } as const;
 
@@ -178,6 +183,51 @@ describe('Mirna sync API transport', () => {
     expect(headers.get('X-Mirna-Protocol-Version')).toBe('1');
     expect(headers.has('Origin')).toBe(false);
     expect(headers.has('Authorization')).toBe(false);
+  });
+
+  it('uses a fresh action-bound Turnstile token only on anonymous creation routes', async () => {
+    const input = {
+      protocolVersion: SYNC_PROTOCOL_VERSION,
+      suite: SYNC_CRYPTO_SUITE,
+      requestId: opaqueId('Q'),
+      deviceId: opaqueId('R'),
+      publicKeys: {
+        signing: { format: 'raw-p256' as const, value: publicKey('S') },
+        agreement: { format: 'raw-p256' as const, value: publicKey('T') },
+      },
+      pairingSalt: hash('U'),
+      pairingClaimTokenHash: hash('V'),
+      pollingTokenHash: hash('W'),
+    } as const;
+    const turnstile = {
+      token: vi.fn().mockResolvedValue('single-use-turnstile-token'),
+      dispose: vi.fn(),
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      protocolResponse(
+        {
+          protocolVersion: SYNC_PROTOCOL_VERSION,
+          requestId: input.requestId,
+          expiresAt: LATER,
+        },
+        201,
+      ),
+    );
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock, turnstile });
+
+    await expect(api.createPairing(input)).resolves.toMatchObject({ requestId: input.requestId });
+    expect(turnstile.token).toHaveBeenCalledWith('mirna_pairing_create');
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(headers.get('X-Mirna-Turnstile-Token')).toBe('single-use-turnstile-token');
+  });
+
+  it('fails closed before fetch when a protected route has no Turnstile provider', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock });
+    await expect(api.createPairing({} as never)).rejects.toMatchObject({
+      code: 'TURNSTILE_REQUIRED',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('keeps a session token only in memory and redacts it from URLs, bodies and errors', async () => {

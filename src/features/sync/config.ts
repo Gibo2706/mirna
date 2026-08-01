@@ -1,6 +1,9 @@
 export interface SyncEnvironment {
   readonly VITE_MIRNA_SYNC_ENABLED?: string;
   readonly VITE_MIRNA_SYNC_API_URL?: string;
+  readonly VITE_TURNSTILE_SITE_KEY?: string;
+  readonly VITE_MIRNA_APP_ENV?: string;
+  readonly VITE_MIRNA_BETA_ONLY?: string;
 }
 
 export type SyncClientConfig =
@@ -11,6 +14,9 @@ export type SyncClientConfig =
   | Readonly<{
       enabled: true;
       apiOrigin: string;
+      turnstileSiteKey: string;
+      appEnvironment: 'beta' | 'local-beta';
+      betaOnly: true;
     }>;
 
 export class SyncConfigurationError extends Error {
@@ -19,6 +25,12 @@ export class SyncConfigurationError extends Error {
     this.name = 'SyncConfigurationError';
   }
 }
+
+export const isBetaApplication = (
+  environment: SyncEnvironment = import.meta.env as unknown as SyncEnvironment,
+): boolean =>
+  environment.VITE_MIRNA_BETA_ONLY === 'true' &&
+  (environment.VITE_MIRNA_APP_ENV === 'beta' || environment.VITE_MIRNA_APP_ENV === 'local-beta');
 
 const isLocalhost = (url: URL): boolean => url.hostname === 'localhost';
 
@@ -64,6 +76,22 @@ export const readSyncClientConfig = (
   if (enabledValue !== 'true') throw new SyncConfigurationError();
 
   const apiUrl = environment.VITE_MIRNA_SYNC_API_URL;
-  if (apiUrl === undefined) throw new SyncConfigurationError();
-  return Object.freeze({ enabled: true, apiOrigin: parseSyncApiOrigin(apiUrl) });
+  const siteKey = environment.VITE_TURNSTILE_SITE_KEY;
+  const appEnvironment = environment.VITE_MIRNA_APP_ENV;
+  if (
+    apiUrl === undefined ||
+    !siteKey ||
+    !/^[A-Za-z0-9_-]{20,128}$/u.test(siteKey) ||
+    (appEnvironment !== 'beta' && appEnvironment !== 'local-beta') ||
+    environment.VITE_MIRNA_BETA_ONLY !== 'true'
+  ) {
+    throw new SyncConfigurationError();
+  }
+  return Object.freeze({
+    enabled: true,
+    apiOrigin: parseSyncApiOrigin(apiUrl),
+    turnstileSiteKey: siteKey,
+    appEnvironment,
+    betaOnly: true,
+  });
 };

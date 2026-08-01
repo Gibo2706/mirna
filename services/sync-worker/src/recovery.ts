@@ -26,6 +26,7 @@ import {
   type VaultManifestV1,
 } from '../../../src/domain/sync/schemas';
 import type { RequestContext } from './context';
+import { reserveVaultUsage } from './budget';
 import { assertFreshDeviceAuthorization } from './authorization';
 import { conflict, forbidden, HttpError, notFound } from './errors';
 import { jsonResponse } from './http';
@@ -42,6 +43,7 @@ import {
   toDatabaseBlob,
 } from './server-crypto';
 import { readCanonicalJson } from './validation';
+import { requireTurnstile } from './turnstile';
 
 interface ActiveRecoveryRow {
   recovery_lookup_id: string;
@@ -140,6 +142,7 @@ const activeRecovery = (
     .first<ActiveRecoveryRow>();
 
 export const handleRecoveryChallenge = async (context: RequestContext): Promise<Response> => {
+  await requireTurnstile(context, 'mirna_recovery_init');
   const input = await readCanonicalJson(context.request, recoveryChallengeRequestSchema);
   await assertValidDevicePublicKeys(input.newDevicePublicKeys);
   if (context.allowedOrigin === null || input.origin !== context.allowedOrigin) {
@@ -160,6 +163,7 @@ export const handleRecoveryChallenge = async (context: RequestContext): Promise<
   if (!recovery || (recovery.locked_until !== null && recovery.locked_until > now)) {
     throw notFound();
   }
+  await reserveVaultUsage(context, recovery.vault_id);
   const activeChallenges = await context.env.MIRNA_SYNC_DB.prepare(
     `SELECT COUNT(*) AS count
        FROM recovery_challenges

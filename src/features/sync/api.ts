@@ -51,6 +51,7 @@ import {
 } from '@/domain/sync/snapshot';
 import { z, type ZodType } from 'zod';
 import { parseSyncApiOrigin, type SyncClientConfig } from './config';
+import type { TurnstileAction, TurnstileTokenProvider } from './turnstile-client';
 
 const REQUEST_CONTENT_TYPE = 'application/json; charset=utf-8';
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;\s*charset=utf-8)?$/iu;
@@ -76,7 +77,9 @@ const publicErrorSchema = z.strictObject({
 const healthResponseSchema = z.strictObject({
   protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
   status: z.enum(['ok', 'degraded']),
+  environment: z.enum(['local', 'staging']),
   buildCommit: z.string().regex(/^(?:[0-9a-f]{7,64}|local|replace-at-deploy|unknown)$/u),
+  writesEnabled: z.boolean(),
   services: z.strictObject({
     d1: z.enum(['ok', 'unavailable']),
     r2: z.enum(['ok', 'unavailable']),
@@ -121,6 +124,7 @@ const REMOTE_ERROR_CODES = new Set([
   'DELETION_JOB_NOT_FOUND',
   'DELETION_SIGNATURE_INVALID',
   'DELETION_STATE_CHANGED',
+  'HUMAN_VERIFICATION_REQUIRED',
   'INTERNAL_ERROR',
   'INVALID_JSON',
   'INVALID_PUBLIC_KEY',
@@ -177,6 +181,7 @@ const REMOTE_ERROR_CODES = new Set([
   'SECURE_REVOCATION_SIGNATURE_INVALID',
   'SECURE_REVOCATION_STATE_CHANGED',
   'SECURITY_TRANSITION_ID_REUSED',
+  'SERVICE_BUDGET_EXHAUSTED',
   'SIGNATURE_INVALID',
   'STALE_JOB_RETRY_REQUIRED',
   'STORAGE_QUOTA_REACHED',
@@ -194,6 +199,7 @@ const REMOTE_ERROR_CODES = new Set([
   'SNAPSHOT_TOO_LARGE',
   'UNSUPPORTED_CONTENT_TYPE',
   'VAULT_ALREADY_EXISTS',
+  'VAULT_QUOTA_EXCEEDED',
   'ACK_CONTEXT_CONFLICT',
   'ACK_ROLLBACK_DETECTED',
 ]);
@@ -213,6 +219,12 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   DEVICE_AUTHORIZATION_REQUIRED:
     'Ovlašćenje ovog uređaja je isteklo ili je opozvano. Obnovite ga sa drugog aktivnog uređaja.',
   AUTHENTICATION_REQUIRED: 'Sync sesija je istekla. Uređaj će ponovo potvrditi svoj potpis.',
+  HUMAN_VERIFICATION_REQUIRED: 'Potrebna je kratka provera pre nastavka.',
+  TURNSTILE_REQUIRED: 'Provera protiv zloupotrebe trenutno nije dostupna.',
+  SERVICE_BUDGET_EXHAUSTED:
+    'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.',
+  VAULT_QUOTA_EXCEEDED:
+    'Beta sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
   REMOTE_ERROR: 'Zahtev za sinhronizaciju nije uspeo.',
 };
 
@@ -385,6 +397,7 @@ export interface SyncRequestOptions {
 export interface SyncApiClientOptions {
   readonly fetch?: typeof fetch;
   readonly defaultTimeoutMs?: number;
+  readonly turnstile?: TurnstileTokenProvider;
 }
 
 interface RequestSpec<T> {
@@ -432,13 +445,21 @@ export class MirnaSyncApi {
   readonly #fetch: typeof fetch;
   readonly #defaultTimeoutMs: number;
   readonly #session = new MemoryAccessSession();
+  readonly #turnstile?: TurnstileTokenProvider;
 
   constructor(config: SyncClientConfig, options: SyncApiClientOptions = {}) {
     this.#config = config.enabled
-      ? Object.freeze({ enabled: true, apiOrigin: parseSyncApiOrigin(config.apiOrigin) })
+      ? Object.freeze({
+          enabled: true,
+          apiOrigin: parseSyncApiOrigin(config.apiOrigin),
+          turnstileSiteKey: config.turnstileSiteKey,
+          appEnvironment: config.appEnvironment,
+          betaOnly: true,
+        })
       : Object.freeze({ enabled: false, apiOrigin: null });
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#defaultTimeoutMs = parseTimeout(options.defaultTimeoutMs, DEFAULT_TIMEOUT_MS);
+    this.#turnstile = options.turnstile;
   }
 
   get hasActiveSession(): boolean {
@@ -465,7 +486,7 @@ export class MirnaSyncApi {
     input: z.input<typeof vaultCreateRequestSchema>,
     options?: SyncRequestOptions,
   ): Promise<z.output<typeof vaultCreateResponseSchema>> {
-    return this.#post(
+    return this.#protectedPost(
       SYNC_PHASE_ONE_ROUTES.createVault,
       vaultCreateRequestSchema,
       vaultCreateResponseSchema,
@@ -473,6 +494,7 @@ export class MirnaSyncApi {
       [200, 201],
       false,
       options,
+      'mirna_vault_create',
     );
   }
 
@@ -515,7 +537,7 @@ export class MirnaSyncApi {
     input: z.input<typeof pairingCreateRequestSchema>,
     options?: SyncRequestOptions,
   ): Promise<z.output<typeof pairingCreateResponseSchema>> {
-    return this.#post(
+    return this.#protectedPost(
       SYNC_PHASE_ONE_ROUTES.createPairing,
       pairingCreateRequestSchema,
       pairingCreateResponseSchema,
@@ -523,6 +545,7 @@ export class MirnaSyncApi {
       [200, 201],
       false,
       options,
+      'mirna_pairing_create',
     );
   }
 
@@ -728,7 +751,7 @@ export class MirnaSyncApi {
     input: z.input<typeof recoveryChallengeRequestSchema>,
     options?: SyncRequestOptions,
   ): Promise<z.output<typeof recoveryChallengeSchema>> {
-    return this.#post(
+    return this.#protectedPost(
       SYNC_PHASE_ONE_ROUTES.recoveryChallenge,
       recoveryChallengeRequestSchema,
       recoveryChallengeSchema,
@@ -736,6 +759,7 @@ export class MirnaSyncApi {
       [201],
       false,
       options,
+      'mirna_recovery_init',
     );
   }
 
@@ -1004,6 +1028,34 @@ export class MirnaSyncApi {
         body,
         authenticated,
         responseLimitBytes,
+      },
+      options,
+    );
+  }
+
+  async #protectedPost<RequestBody, ResponseBody>(
+    path: string,
+    requestSchema: ZodType<RequestBody>,
+    responseSchema: ZodType<ResponseBody>,
+    input: RequestBody,
+    expectedStatuses: readonly number[],
+    authenticated: boolean,
+    options: SyncRequestOptions | undefined,
+    action: TurnstileAction,
+  ): Promise<ResponseBody> {
+    this.#assertEnabled();
+    if (!this.#turnstile) throw new SyncApiError('TURNSTILE_REQUIRED');
+    const token = await this.#turnstile.token(action);
+    if (!token || token.length > 2_048) throw new SyncApiError('TURNSTILE_REQUIRED');
+    return this.#request(
+      {
+        method: 'POST',
+        path,
+        responseSchema,
+        expectedStatuses,
+        body: serializeRequest(requestSchema, input),
+        authenticated,
+        headers: { 'X-Mirna-Turnstile-Token': token },
       },
       options,
     );

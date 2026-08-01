@@ -338,6 +338,13 @@ pairings, five-minute pairings, 15-minute sessions, 30-day device authorization,
 8 MiB snapshots, 64 KiB operations, 100 operations per batch, three retained
 snapshots and short orphan retention.
 
+The staging Worker additionally enforces source-controlled rolling-30-day and
+UTC-day service budgets, per-vault usage isolation, a D1-backed R2 inventory and
+operator kill switches. Reservation happens before application work and fails
+closed when accounting is unavailable. Environment variables and clients cannot
+raise these limits; exact values and procedures live in
+[SYNC-DEPLOYMENT.md](./SYNC-DEPLOYMENT.md).
+
 If Cloudflare requests a payment method, billing activation, paid plan or paid
 overage, provisioning stops before acceptance. No service is upgraded and no
 payment method is added without a separate explicit decision.

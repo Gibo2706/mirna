@@ -23,9 +23,16 @@ const EXPECTED_TABLES = [
   'pairing_requests',
   'recovery_challenges',
   'recovery_records',
+  'resource_inventory',
+  'resource_totals',
+  'service_flags',
   'snapshots',
   'sync_changes',
+  'usage_daily_buckets',
+  'usage_reservations',
+  'usage_rolling_totals',
   'vault_manifests',
+  'vault_resource_totals',
   'vaults',
 ] as const;
 
@@ -49,7 +56,18 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(4);
+    expect(migrationCount).toBe(8);
+
+    const reservationColumns = await env.MIRNA_SYNC_DB.prepare(
+      "PRAGMA table_info('usage_reservations')",
+    ).all<{ name: string }>();
+    expect(reservationColumns.results.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        'committed_d1_rows_read',
+        'released_d1_rows_read',
+        'released_r2_class_a',
+      ]),
+    );
 
     const snapshotColumns = await env.MIRNA_SYNC_DB.prepare("PRAGMA table_info('snapshots')").all<{
       name: string;
@@ -139,6 +157,11 @@ describe('D1 migration foundation', () => {
       'idx_device_acknowledgements_vault_snapshot',
       'idx_device_key_envelopes_recipient_epoch',
       'idx_device_security_transitions_vault_created',
+      'idx_usage_daily_window',
+      'idx_usage_reservations_state_created',
+      'idx_resource_inventory_vault_state',
+      'idx_resource_inventory_accounting_reservation',
+      'idx_vault_resource_totals_release_reservation',
     ]) {
       expect(names.has(requiredIndex), `${requiredIndex} should exist`).toBe(true);
     }

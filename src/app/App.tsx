@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { AppShell } from '@/components/AppShell';
 import { useFinanceSnapshot } from '@/db/queries';
-import { readSyncClientConfig } from '@/features/sync/config';
+import { isBetaApplication, readSyncClientConfig } from '@/features/sync/config';
 import { ThemeSync } from './ThemeSync';
 
 // Start fetching the first route while IndexedDB opens to avoid a network/DB waterfall on cold start.
@@ -61,32 +61,54 @@ const PageLoader = () => (
   </div>
 );
 
+const BetaBanner = () => (
+  <aside className="border-b border-warning/30 bg-warning-soft px-4 py-2 text-center text-xs leading-5 text-warning">
+    <strong>Mirna Sync — Beta.</strong> Testni servis može privremeno pauzirati cloud sync; lokalni
+    podaci i JSON backup ostaju dostupni.{' '}
+    <a
+      className="font-bold underline underline-offset-2"
+      href="https://github.com/Gibo2706/mirna/blob/feat/e2ee-sync/docs/SYNC-SECURITY-MODEL.md"
+      target="_blank"
+      rel="noreferrer"
+    >
+      Bezbednosni model
+    </a>
+  </aside>
+);
+
 export const App = () => {
   const snapshot = useFinanceSnapshot();
   const location = useLocation();
   const syncConfig = readSyncClientConfig();
+  const betaApplication = isBetaApplication();
+  const withEnvironmentMarker = (content: React.ReactNode) => (
+    <>
+      {betaApplication ? <BetaBanner /> : null}
+      {content}
+    </>
+  );
 
-  if (snapshot === undefined) return <StartupScreen />;
+  if (snapshot === undefined) return withEnvironmentMarker(<StartupScreen />);
 
   if (snapshot === null || !snapshot.settingsRecord.onboardingCompleted) {
     if (syncConfig.enabled && location.pathname === '/more/sync') {
-      return (
+      return withEnvironmentMarker(
         <Suspense fallback={<StartupScreen />}>
           <Routes>
             <Route path="/more/sync" element={<SyncManager preOnboarding />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </Suspense>
+        </Suspense>,
       );
     }
-    return (
+    return withEnvironmentMarker(
       <Suspense fallback={<StartupScreen />}>
         <OnboardingPage snapshot={snapshot} />
-      </Suspense>
+      </Suspense>,
     );
   }
 
-  return (
+  return withEnvironmentMarker(
     <>
       <ThemeSync appearance={snapshot.settingsRecord.appearance} />
       <Suspense fallback={<PageLoader />}>
@@ -108,6 +130,6 @@ export const App = () => {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
-    </>
+    </>,
   );
 };

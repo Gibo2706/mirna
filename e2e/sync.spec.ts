@@ -1,5 +1,6 @@
-import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   devices,
   expect,
@@ -24,9 +25,8 @@ const DESKTOP_DEVICE_NAME = 'Sintetički računar';
 const RECOVERED_DEVICE_NAME = 'Sintetički oporavljeni uređaj';
 
 const repositoryRoot = resolve(import.meta.dirname, '..');
-const wranglerEntrypoint = resolve(repositoryRoot, 'node_modules/wrangler/bin/wrangler.js');
-const workerConfig = resolve(repositoryRoot, 'services/sync-worker/wrangler.jsonc');
 const workerState = resolve(repositoryRoot, '.wrangler/sync-e2e-state');
+const workerD1State = resolve(workerState, 'v3/d1/miniflare-D1DatabaseObject');
 
 interface LocalSyncSecurityView {
   readonly vaultId: string;
@@ -49,58 +49,31 @@ interface LocalSyncSecurityView {
 
 type D1Row = Readonly<Record<string, unknown>>;
 
-const isD1Envelope = (value: unknown): value is { readonly results: readonly unknown[] } =>
-  typeof value === 'object' && value !== null && 'results' in value && Array.isArray(value.results);
-
 const sqlLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 
+const localD1Path = (): string => {
+  const candidates = readdirSync(workerD1State).filter(
+    (name) => name.endsWith('.sqlite') && name !== 'metadata.sqlite',
+  );
+  if (candidates.length !== 1 || !candidates[0]) {
+    throw new Error('Expected exactly one isolated Miniflare D1 database.');
+  }
+  return resolve(workerD1State, candidates[0]);
+};
+
 const localD1 = (command: string): readonly D1Row[] => {
+  const database = new DatabaseSync(localD1Path());
   try {
-    const execution = spawnSync(
-      process.execPath,
-      [
-        wranglerEntrypoint,
-        'd1',
-        'execute',
-        'mirna-sync-local',
-        '--local',
-        '--persist-to',
-        workerState,
-        '--config',
-        workerConfig,
-        '--command',
-        command,
-        '--json',
-      ],
-      {
-        cwd: repositoryRoot,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          CI: 'true',
-          WRANGLER_LOG_PATH: resolve(repositoryRoot, '.wrangler/sync-e2e-query.log'),
-        },
-        maxBuffer: 4 * 1024 * 1024,
-      },
+    database.exec('PRAGMA busy_timeout = 5000');
+    const rows: unknown = database.prepare(command).all();
+    if (!Array.isArray(rows)) throw new Error('Local D1 result is invalid.');
+    return rows.filter(
+      (row): row is D1Row => typeof row === 'object' && row !== null && !Array.isArray(row),
     );
-    if (execution.error || execution.status !== 0 || typeof execution.stdout !== 'string') {
-      throw new Error('Wrangler D1 command failed.');
-    }
-    const parsed: unknown = JSON.parse(execution.stdout);
-    const envelopes: unknown[] = [];
-    if (Array.isArray(parsed)) {
-      for (const envelope of parsed) envelopes.push(envelope);
-    } else {
-      envelopes.push(parsed);
-    }
-    return envelopes.flatMap((envelope): D1Row[] => {
-      if (!isD1Envelope(envelope)) return [];
-      return envelope.results.filter(
-        (row): row is D1Row => typeof row === 'object' && row !== null && !Array.isArray(row),
-      );
-    });
   } catch {
     throw new Error('Lokalna D1 provera nije uspela; redovi nisu ispisani.');
+  } finally {
+    database.close();
   }
 };
 
@@ -826,6 +799,9 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   await phone.goto(`${ENABLED_APP_ORIGIN}/`);
   await phoneContext.setOffline(true);
   await addPresetExpense(phone, 'Kafa', '360 RSD');
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount)
+    .toBe(1);
   await phoneContext.setOffline(false);
   performanceStartedAt = performance.now();
   await synchronizeSuccessfully(phone);
@@ -846,6 +822,12 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   await Promise.all([desktopContext.setOffline(true), phoneContext.setOffline(true)]);
   await editBudgetAmount(desktop, 'Hrana', '32123');
   await addPresetExpense(phone, 'Apoteka', '1.350 RSD');
+  await expect
+    .poll(async () => ({
+      desktop: (await readLocalSyncSecurityView(desktop)).pendingLocalOperationCount,
+      phone: (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount,
+    }))
+    .toEqual({ desktop: 1, phone: 1 });
   performanceStartedAt = performance.now();
   await phoneContext.setOffline(false);
   await synchronizeSuccessfully(phone);
@@ -869,6 +851,12 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   await Promise.all([phoneContext.setOffline(true), desktopContext.setOffline(true)]);
   await editTransactionNote(phone, 'Kafa', 'Telefon bira ovu vrednost');
   await editTransactionNote(desktop, 'Kafa', 'Računar bira drugu vrednost');
+  await expect
+    .poll(async () => ({
+      desktop: (await readLocalSyncSecurityView(desktop)).pendingLocalOperationCount,
+      phone: (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount,
+    }))
+    .toEqual({ desktop: 1, phone: 1 });
   performanceStartedAt = performance.now();
   await phoneContext.setOffline(false);
   const deferredCompactions = unexpectedSyncResponses.filter(
@@ -918,6 +906,7 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   );
   await phone.getByRole('button', { name: 'Obnovi ovlašćenje' }).click();
   expect((await renewed).status()).toBe(201);
+  await expect.poll(async () => (await readLocalSyncSecurityView(phone)).manifestVersion).toBe(3);
   await synchronizeSuccessfully(desktop);
   expect((await readLocalSyncSecurityView(desktop)).manifestVersion).toBe(3);
 

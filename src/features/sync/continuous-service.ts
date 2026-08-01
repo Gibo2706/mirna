@@ -5,6 +5,10 @@ import type { OperationSyncOptions, OperationSyncResult } from './operation-serv
 
 const COMPACTION_OPERATION_THRESHOLD = 100;
 const COMPACTION_ENCRYPTED_BYTES_THRESHOLD = 1024 * 1024;
+const MAX_PENDING_CONFLICTS = 100;
+const MAX_UNCOMPACTED_OPERATIONS = 5_000;
+const SAFE_PAUSE_MESSAGE =
+  'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.';
 
 export type ContinuousSyncResult =
   | SnapshotSyncResult
@@ -106,6 +110,12 @@ export class ContinuousSyncService {
       setupAfterOperations.vault.vaultId,
       setupAfterOperations.metadata.lastSnapshotServerCursor,
     );
+    if (
+      stats.pendingConflictCount >= MAX_PENDING_CONFLICTS ||
+      stats.operationCount >= MAX_UNCOMPACTED_OPERATIONS
+    ) {
+      throw new Error(SAFE_PAUSE_MESSAGE);
+    }
     if (stats.pendingConflictCount > 0) {
       const metadata = await this.#repository.readMetadata();
       if (!metadata) throw new Error('Sync metadata nedostaje posle obrade konflikta.');

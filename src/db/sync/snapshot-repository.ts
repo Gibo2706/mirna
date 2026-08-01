@@ -7,7 +7,7 @@ import {
   replaceFinanceDataInTransaction,
   validateFinanceData,
 } from '../finance-data';
-import { readLocalSyncSetup, writeLocalSyncSetup } from './repository';
+import { readLocalSyncSetup, writeAdvancedLocalSyncSetup, writeLocalSyncSetup } from './repository';
 import {
   SYNC_CHECKPOINT_RECORD_ID,
   SYNC_METADATA_RECORD_ID,
@@ -39,7 +39,6 @@ export type SnapshotMetadataChanges = Pick<
   | 'lastSnapshotId'
   | 'lastSnapshotHash'
   | 'lastSnapshotContentHash'
-  | 'lastManifestHash'
   | 'lastLocalDataHash'
   | 'pendingKeyRotationSnapshotEpoch'
 > &
@@ -81,6 +80,10 @@ export class SyncSnapshotRepository {
 
   writeSetup(setup: LocalSyncSetup): Promise<void> {
     return writeLocalSyncSetup(setup, this.database);
+  }
+
+  advanceSetup(current: LocalSyncSetup, next: LocalSyncSetup): Promise<LocalSyncSetup> {
+    return writeAdvancedLocalSyncSetup(current, next, this.database);
   }
 
   readFinanceData(): Promise<FinanceData> {
@@ -166,6 +169,7 @@ export class SyncSnapshotRepository {
   async updateMetadata(
     vaultId: string,
     expectedSnapshotRevision: number,
+    expectedManifestHash: string,
     changes: SnapshotMetadataChanges,
   ): Promise<void> {
     await this.database.transaction('rw', this.database.syncMetadata, async () => {
@@ -173,7 +177,8 @@ export class SyncSnapshotRepository {
       if (
         !current ||
         current.vaultId !== vaultId ||
-        current.lastSnapshotRevision !== expectedSnapshotRevision
+        current.lastSnapshotRevision !== expectedSnapshotRevision ||
+        current.lastManifestHash !== expectedManifestHash
       ) {
         throw new LocalSnapshotRaceError();
       }
@@ -195,7 +200,8 @@ export class SyncSnapshotRepository {
           !current ||
           current.vaultId !== setup.vault.vaultId ||
           current.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
-          current.lastSnapshotHash !== setup.metadata.lastSnapshotHash
+          current.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          current.lastManifestHash !== setup.metadata.lastManifestHash
         ) {
           throw new LocalSnapshotRaceError();
         }
@@ -232,7 +238,8 @@ export class SyncSnapshotRepository {
           !current ||
           current.vaultId !== setup.vault.vaultId ||
           current.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
-          current.lastSnapshotHash !== setup.metadata.lastSnapshotHash
+          current.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          current.lastManifestHash !== setup.metadata.lastManifestHash
         ) {
           throw new LocalSnapshotRaceError();
         }
@@ -274,6 +281,7 @@ export class SyncSnapshotRepository {
           currentMetadata.vaultId !== setup.vault.vaultId ||
           currentMetadata.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
           currentMetadata.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          currentMetadata.lastManifestHash !== setup.metadata.lastManifestHash ||
           causalFrontier.serverCursor > currentMetadata.lastServerCursor
         ) {
           return false;
@@ -365,7 +373,11 @@ export class SyncSnapshotRepository {
           detectedAt: input.detectedAt,
         });
         const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
-        if (!current || current.vaultId !== setup.vault.vaultId) {
+        if (
+          !current ||
+          current.vaultId !== setup.vault.vaultId ||
+          current.lastManifestHash !== setup.metadata.lastManifestHash
+        ) {
           throw new LocalSnapshotRaceError();
         }
         await this.database.syncMetadata.put({

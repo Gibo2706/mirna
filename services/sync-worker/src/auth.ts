@@ -13,6 +13,7 @@ import {
   type AuthChallengeV1,
 } from '../../../src/domain/sync/schemas';
 import type { RequestContext } from './context';
+import { reserveVaultUsage } from './budget';
 import { forbidden, HttpError, unauthorized } from './errors';
 import { jsonResponse } from './http';
 import { readWorkerLimits } from './limits';
@@ -475,6 +476,7 @@ export const authenticateRequest = async (
       canonical_manifest: string;
     }>();
   if (!row || !hasCurrentManifestMembership(row, row.device_id, now)) throw unauthorized();
+  await reserveVaultUsage(context, row.vault_id);
   await context.env.MIRNA_SYNC_DB.prepare(
     `UPDATE access_sessions SET last_used_at = ?2 WHERE token_hash = ?1`,
   )

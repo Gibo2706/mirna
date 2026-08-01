@@ -140,7 +140,6 @@ const metadataChanges = (
   lastSnapshotId: metadata.lastSnapshotId,
   lastSnapshotHash: metadata.lastSnapshotHash,
   lastSnapshotContentHash: metadata.lastSnapshotContentHash,
-  lastManifestHash: metadata.lastManifestHash,
   lastLocalDataHash: metadata.lastLocalDataHash,
   pendingKeyRotationSnapshotEpoch: metadata.pendingKeyRotationSnapshotEpoch,
   ...overrides,
@@ -336,8 +335,7 @@ export class SnapshotSyncService {
         vaultKey: { ...setup.vaultKey, encryptedKey },
         metadata: { ...setup.metadata, lastManifestHash: remoteHash },
       };
-      await this.#repository.writeSetup(next);
-      return next;
+      return await this.#repository.advanceSetup(setup, next);
     } finally {
       clearBytes(vaultMasterKey);
     }
@@ -381,6 +379,7 @@ export class SnapshotSyncService {
           await this.#repository.updateMetadata(
             setup.vault.vaultId,
             setup.metadata.lastSnapshotRevision,
+            setup.metadata.lastManifestHash,
             metadataChanges(setup.metadata, {
               lastSyncAt: syncedAt,
               lastErrorCode: undefined,
@@ -400,6 +399,7 @@ export class SnapshotSyncService {
       await this.#repository.updateMetadata(
         setup.vault.vaultId,
         setup.metadata.lastSnapshotRevision,
+        setup.metadata.lastManifestHash,
         metadataChanges(setup.metadata, {
           lastSyncAt: syncedAt,
           lastSuccessfulSyncAt: syncedAt,
@@ -643,6 +643,7 @@ export class SnapshotSyncService {
         await this.#repository.updateMetadata(
           setup.vault.vaultId,
           setup.metadata.lastSnapshotRevision,
+          setup.metadata.lastManifestHash,
           metadataChanges(setup.metadata, {
             lastSyncAt: syncedAt,
             lastSuccessfulSyncAt: syncedAt,
@@ -665,6 +666,7 @@ export class SnapshotSyncService {
     await this.#repository.updateMetadata(
       setup.vault.vaultId,
       setup.metadata.lastSnapshotRevision,
+      setup.metadata.lastManifestHash,
       metadataChanges(setup.metadata, {
         lastSyncAt: this.#now().toISOString(),
         lastErrorCode: errorCode,

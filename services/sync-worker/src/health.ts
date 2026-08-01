@@ -1,5 +1,6 @@
 import type { Env } from './env';
 import { jsonResponse, SYNC_PROTOCOL_VERSION } from './http';
+import { writesEnabled } from './budget';
 
 type Reachability = 'ok' | 'unavailable';
 interface HealthCheckResult {
@@ -69,12 +70,15 @@ export const handleHealth = async (
 ): Promise<Response> => {
   const { d1, r2 } = await checkServices(env);
   const healthy = d1 === 'ok' && r2 === 'ok';
+  const canWrite = d1 === 'ok' && (await writesEnabled(env));
 
   return jsonResponse(
     {
       status: healthy ? 'ok' : 'degraded',
+      environment: env.MIRNA_ENVIRONMENT === 'staging' ? 'staging' : 'local',
       protocolVersion: SYNC_PROTOCOL_VERSION,
       buildCommit: safeBuildCommit(env.MIRNA_BUILD_COMMIT),
+      writesEnabled: canWrite,
       services: { d1, r2 },
     },
     {

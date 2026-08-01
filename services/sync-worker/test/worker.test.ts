@@ -10,6 +10,8 @@ describe('Worker HTTP foundation', () => {
     const body = await response.json<{
       status: string;
       protocolVersion: number;
+      environment: string;
+      writesEnabled: boolean;
       services: { d1: string; r2: string };
     }>();
 
@@ -17,7 +19,9 @@ describe('Worker HTTP foundation', () => {
     expect(body).toEqual({
       status: 'ok',
       protocolVersion: 1,
+      environment: 'local',
       buildCommit: 'local',
+      writesEnabled: true,
       services: { d1: 'ok', r2: 'ok' },
     });
     expect(JSON.stringify(body)).not.toMatch(/database|bucket|account|LOCAL_MINIFLARE/u);

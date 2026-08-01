@@ -26,6 +26,7 @@ import { OperationSyncService } from './operation-service';
 import { ContinuousSyncService, type ContinuousSyncResult } from './continuous-service';
 import { SyncOperationRepository } from '@/db/sync/operation-repository';
 import { DeviceSecurityService } from './device-security-service';
+import { BrowserTurnstileTokenProvider } from './turnstile-client';
 
 type CryptoCapability = Awaited<ReturnType<typeof probeIndexedDbCryptoKeyPersistence>>;
 
@@ -62,6 +63,7 @@ export interface SyncUiLocalStatus {
 }
 
 export interface SyncUiServices {
+  readonly dispose?: () => void;
   readonly probeCapability: () => Promise<CryptoCapability>;
   readonly loadLocalStatus: () => Promise<SyncUiLocalStatus>;
   readonly disableLocalDevice: () => Promise<void>;
@@ -116,7 +118,8 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
   const config = readSyncClientConfig();
   if (!config.enabled) throw new Error('Beta sinhronizacija nije uključena.');
 
-  const api = new MirnaSyncApi(config);
+  const turnstile = new BrowserTurnstileTokenProvider(config.turnstileSiteKey);
+  const api = new MirnaSyncApi(config, { turnstile });
   const dependencies = { api, origin: window.location.origin } as const;
   const operationRepository = new SyncOperationRepository();
   const conflictRepository = new SyncConflictRepository();
@@ -141,6 +144,7 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
   });
 
   return {
+    dispose: () => turnstile.dispose(),
     probeCapability: probeIndexedDbCryptoKeyPersistence,
     loadLocalStatus: async () => {
       const setup = await readLocalSyncSetup();

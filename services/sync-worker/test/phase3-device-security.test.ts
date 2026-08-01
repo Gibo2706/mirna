@@ -134,7 +134,9 @@ const addSecondDevice = async (fixture: InitialVaultFixture): Promise<AddedDevic
             Date.parse(occurredAt) + 7 * 24 * 60 * 60 * 1_000,
           ).toISOString(),
         },
-      ].sort((left, right) => left.deviceId.localeCompare(right.deviceId)),
+      ].sort((left, right) =>
+        left.deviceId < right.deviceId ? -1 : left.deviceId > right.deviceId ? 1 : 0,
+      ),
       previousManifestHash: await manifestBodyHash(fixture.manifest),
       transition: {
         transitionId: createOpaqueId(),

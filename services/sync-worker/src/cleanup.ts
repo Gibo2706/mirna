@@ -1,5 +1,7 @@
 import type { Env } from './env';
 import { resumePendingVaultDeletions } from './deletion';
+import { releaseR2Object } from './budget';
+import { reconcileR2InventoryPage } from './reconciliation';
 
 // Snapshot cleanup needs two D1 statements per object plus R2 work, so it stays
 // deliberately small. Expired metadata is deleted with one bounded SQL
@@ -76,6 +78,7 @@ const cleanupSnapshots = async (env: Env, now: number, batchSize: number): Promi
 
   const objectKeys = [...new Set(claimed.map((row) => row.r2_object_key))];
   await env.MIRNA_SYNC_BUCKET.delete(objectKeys);
+  await Promise.all(objectKeys.map((objectKey) => releaseR2Object(env, objectKey)));
 
   const deleteResults = await env.MIRNA_SYNC_DB.batch(
     claimed.map((row) =>
@@ -241,6 +244,7 @@ export const runScheduledCleanup = async (env: Env, now = Date.now()): Promise<C
   );
 
   const snapshots = await cleanupSnapshots(env, now, snapshotBatchSize);
+  await reconcileR2InventoryPage(env, now);
 
   return {
     authChallenges,

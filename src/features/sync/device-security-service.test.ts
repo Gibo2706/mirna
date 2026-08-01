@@ -256,15 +256,15 @@ class MemorySecurityRepository implements DeviceSecurityRepositoryPort {
     return Promise.resolve(this.setup);
   }
 
-  write(setup: LocalSyncSetup): Promise<void> {
-    this.setup = setup;
-    return Promise.resolve();
+  write(_current: LocalSyncSetup, next: LocalSyncSetup): Promise<LocalSyncSetup> {
+    this.setup = next;
+    return Promise.resolve(next);
   }
 
-  writeRotated(setup: LocalSyncSetup): Promise<void> {
+  writeRotated(setup: LocalSyncSetup): Promise<LocalSyncSetup> {
     this.rotatedWrites += 1;
     this.setup = setup;
-    return Promise.resolve();
+    return Promise.resolve(setup);
   }
 
   rotationBlockers(): Promise<{ pendingOperations: number; pendingConflicts: number }> {

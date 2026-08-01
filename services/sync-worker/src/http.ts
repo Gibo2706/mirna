@@ -9,6 +9,7 @@ const ALLOWED_REQUEST_HEADERS = new Set([
   'idempotency-key',
   'x-mirna-snapshot-envelope',
   'x-mirna-protocol-version',
+  'x-mirna-turnstile-token',
 ]);
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 

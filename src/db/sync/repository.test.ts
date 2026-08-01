@@ -20,6 +20,7 @@ import {
   IncompleteLocalSyncSetupError,
   InvalidLocalSyncSetupError,
   readLocalSyncSetup,
+  writeAdvancedLocalSyncSetup,
   writeLocalSyncSetup,
   writeRotatedLocalSyncSetup,
 } from './repository';
@@ -30,6 +31,7 @@ import {
   localVaultKeyRecordId,
   type LocalSyncSetup,
 } from './records';
+import { LocalSnapshotRaceError, SyncSnapshotRepository } from './snapshot-repository';
 
 const databaseNames: string[] = [];
 
@@ -254,6 +256,77 @@ describe('local sync repository', () => {
     await expect(writeRotatedLocalSyncSetup(rotated, database)).rejects.toBeInstanceOf(
       InvalidLocalSyncSetupError,
     );
+    database.close();
+  });
+
+  it('preserves concurrent snapshot progress and rejects stale snapshot metadata after a manifest advance', async () => {
+    const database = createDatabase();
+    const setup = await createSetup();
+    await writeLocalSyncSetup(setup, database);
+    const occurredAt = '2026-07-31T10:05:00.000Z';
+    const authorizationExpiresAt = '2026-08-30T10:05:00.000Z';
+    const { signature: _signature, ...currentUnsigned } = setup.vault.manifest;
+    void _signature;
+    const manifest = await signVaultManifest(
+      unsignedVaultManifestSchema.parse({
+        ...currentUnsigned,
+        manifestVersion: 2,
+        devices: currentUnsigned.devices.map((device) => ({
+          ...device,
+          authorizedAt: occurredAt,
+          authorizationExpiresAt,
+        })),
+        previousManifestHash: setup.metadata.lastManifestHash,
+        transition: {
+          transitionId: 'T'.repeat(22),
+          kind: 'renew-device',
+          authorizationKind: 'device',
+          authorizingDeviceId: setup.device.deviceId,
+          affectedDeviceId: setup.device.deviceId,
+          occurredAt,
+        },
+      }),
+      setup.device.signingPrivateKey,
+    );
+    const manifestHash = await manifestBodyHash(manifest);
+    const next: LocalSyncSetup = {
+      ...setup,
+      vault: { ...setup.vault, manifest, updatedAt: occurredAt },
+      device: { ...setup.device, authorizationExpiresAt, updatedAt: occurredAt },
+      vaultKey: structuredClone(setup.vaultKey),
+      metadata: { ...setup.metadata, lastManifestHash: manifestHash },
+    };
+    await replaceEnvelopePin(next);
+
+    await database.syncMetadata.update(SYNC_METADATA_RECORD_ID, {
+      firstUploadConsent: 'accepted',
+      lastSnapshotRevision: 1,
+      lastSnapshotId: 'U'.repeat(22),
+      lastSnapshotHash: 'V'.repeat(43),
+      lastSnapshotContentHash: 'W'.repeat(43),
+      lastLocalDataHash: 'X'.repeat(43),
+    });
+
+    const persisted = await writeAdvancedLocalSyncSetup(setup, next, database);
+    expect(persisted.metadata.lastSnapshotRevision).toBe(1);
+    expect(persisted.metadata.lastSnapshotId).toBe('U'.repeat(22));
+    expect(persisted.metadata.lastManifestHash).toBe(manifestHash);
+
+    const snapshotRepository = new SyncSnapshotRepository(database);
+    await expect(
+      snapshotRepository.updateMetadata(setup.vault.vaultId, 1, setup.metadata.lastManifestHash, {
+        firstUploadConsent: 'accepted',
+        lastServerCursor: 0,
+        lastSnapshotServerCursor: 0,
+        lastSnapshotRevision: 1,
+        lastSnapshotId: 'U'.repeat(22),
+        lastSnapshotHash: 'V'.repeat(43),
+        lastSnapshotContentHash: 'W'.repeat(43),
+        lastLocalDataHash: 'X'.repeat(43),
+        pendingKeyRotationSnapshotEpoch: undefined,
+      }),
+    ).rejects.toBeInstanceOf(LocalSnapshotRaceError);
+    expect((await readLocalSyncSetup(database))?.metadata.lastManifestHash).toBe(manifestHash);
     database.close();
   });
 

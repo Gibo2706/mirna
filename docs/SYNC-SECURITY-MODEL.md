@@ -187,7 +187,12 @@ envelope from the gate key.
   the service worker.
 - Logs exclude authorization, tokens, pairing/recovery material, raw bodies,
   ciphertext, full vault IDs and financial content.
-- Staging quotas/rate limits are defense-in-depth, never authorization logic.
+- Source-controlled global/per-vault hard budgets reserve work atomically and
+  fail closed; D1 service flags can pause creation, pairing or writes without a
+  public administration route.
+- Turnstile protects only anonymous vault/pairing/recovery initiation and checks
+  Siteverify success, exact hostname and action. It supplements rather than
+  replaces D1 attempt counters, rate limits and cryptographic authorization.
 - No production resource or paid Cloudflare capability is provisioned by this
   beta work.
 

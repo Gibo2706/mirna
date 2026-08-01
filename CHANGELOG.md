@@ -16,6 +16,10 @@ All notable changes to Mirna are documented here.
   deletion that retains local finance data.
 - Added a Cloudflare Worker with strict protocol-v1 routes, D1 migrations,
   private R2 snapshot storage, bounded cleanup and local Worker/browser gates.
+- Added D1-backed rolling/daily hard budgets, per-vault quotas, R2 object
+  inventory, source-controlled caps and operator kill switches.
+- Added dedicated beta Turnstile validation for anonymous vault, pairing and
+  recovery initiation plus beta-only marking and crawler exclusion.
 
 ### Security
 
@@ -24,8 +28,8 @@ All notable changes to Mirna are documented here.
 - Snapshot and operation ciphertext is signed and bound to strict AAD, manifest
   and causal chains; unknown fields, versions and crypto suites fail closed.
 - Ordinary JSON backups explicitly exclude sync state and secret material.
-- Production remains disabled and staging provisioning stopped before any write
-  when R2 required billing activation. Independent security review is pending.
+- Stable production remains disabled. The dedicated beta target is isolated at
+  `mirna-finansije-beta.vercel.app`; independent security review is pending.
 
 ## [2.3.2] - 2026-07-30
 

@@ -70,7 +70,10 @@ financial database. Exports happen only when requested.
 
 The `2.4.0-beta.1` beta source contains an optional, accountless, end-to-end encrypted sync
 implementation. It is disabled unless an operator supplies an explicit feature flag and API URL,
-is not deployed to production, and has not completed an independent security review. The sync
+is isolated from the stable production application, and has not completed an independent security
+review. The dedicated experimental target is
+[Mirna Sync — Beta](https://mirna-finansije-beta.vercel.app); use only synthetic test data and keep
+a local JSON backup. The sync
 service receives ciphertext and operational metadata, not content-decryption keys. See the
 [sync architecture](docs/SYNC-ARCHITECTURE.md), [protocol](docs/SYNC-PROTOCOL.md),
 [recovery guide](docs/SYNC-RECOVERY.md), and [security model](docs/SYNC-SECURITY-MODEL.md).

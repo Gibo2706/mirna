@@ -11,12 +11,15 @@ import { timingSafeEqual } from '../../../src/domain/sync/encoding';
 import type { AuthenticatedDevice } from './auth';
 import { assertFreshDeviceAuthorization } from './authorization';
 import type { RequestContext } from './context';
+import { observeD1Metadata } from './budget';
+import { STAGING_BUDGETS } from './config/staging-budgets';
 import { conflict, HttpError, notFound } from './errors';
 import { jsonResponse } from './http';
 import { readWorkerLimits } from './limits';
 import { assertValidDevicePublicKeys, assertValidSigningPublicKey } from './public-keys';
 import { canonicalText, encodedToDatabaseBlob } from './server-crypto';
 import { readCanonicalJson } from './validation';
+import { requireTurnstile } from './turnstile';
 
 interface ExistingVaultRow {
   current_manifest_version: number;
@@ -153,6 +156,7 @@ const createResponse = (
   );
 
 export const handleCreateVault = async (context: RequestContext): Promise<Response> => {
+  await requireTurnstile(context, 'mirna_vault_create');
   const input = await readCanonicalJson(context.request, vaultCreateRequestSchema);
   const initialDevice = input.manifest.devices[0];
   if (!initialDevice) throw conflict('MANIFEST_INVALID', 'Initial manifest has no device.');
@@ -182,7 +186,7 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
   const manifestHashBlob = encodedToDatabaseBlob(manifestHash, 32);
 
   try {
-    await context.env.MIRNA_SYNC_DB.batch([
+    const results = await context.env.MIRNA_SYNC_DB.batch([
       context.env.MIRNA_SYNC_DB.prepare(
         `INSERT INTO vaults (
            vault_id, protocol_version, crypto_suite, status, current_key_epoch,
@@ -190,14 +194,14 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
            created_at, updated_at
          )
          SELECT ?1, 1, ?2, 'active', ?3, ?4, NULL, 0, ?5, ?5
-          WHERE (SELECT COUNT(*) FROM vaults) < ?6`,
+          WHERE (SELECT COUNT(*) FROM vaults WHERE status = 'active') < ?6`,
       ).bind(
         input.manifest.vaultId,
         input.manifest.suite,
         input.manifest.keyEpoch,
         input.manifest.manifestVersion,
         now,
-        limits.maxTotalVaults,
+        STAGING_BUDGETS.resources.activeVaults,
       ),
       context.env.MIRNA_SYNC_DB.prepare(
         `INSERT INTO devices (
@@ -264,6 +268,7 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
         now,
       ),
     ]);
+    await observeD1Metadata(context.env, results);
   } catch {
     const raced = await findExistingVault(context.env.MIRNA_SYNC_DB, input.manifest.vaultId);
     if (raced) {
@@ -275,8 +280,15 @@ export const handleCreateVault = async (context: RequestContext): Promise<Respon
     const vaultCount = await context.env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM vaults',
     ).first<number>('count');
-    if ((vaultCount ?? limits.maxTotalVaults) >= limits.maxTotalVaults) {
-      throw new HttpError(503, 'STORAGE_QUOTA_REACHED', 'Staging storage quota is full.');
+    if (
+      (vaultCount ?? STAGING_BUDGETS.resources.activeVaults) >=
+      STAGING_BUDGETS.resources.activeVaults
+    ) {
+      throw new HttpError(
+        503,
+        'SERVICE_BUDGET_EXHAUSTED',
+        'Staging synchronization is temporarily paused.',
+      );
     }
     throw new Error('Vault transaction failed.');
   }

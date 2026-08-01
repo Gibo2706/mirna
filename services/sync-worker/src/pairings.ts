@@ -44,6 +44,7 @@ import {
   toDatabaseBlob,
 } from './server-crypto';
 import { readCanonicalJson } from './validation';
+import { requireTurnstile } from './turnstile';
 
 interface PairingRequestRow {
   pairing_request_id: string;
@@ -167,6 +168,7 @@ const recordFailedClaim = async (
 };
 
 export const handleCreatePairing = async (context: RequestContext): Promise<Response> => {
+  await requireTurnstile(context, 'mirna_pairing_create');
   const input = await readCanonicalJson(context.request, pairingCreateRequestSchema);
   await assertValidDevicePublicKeys(input.publicKeys);
   const existingBeforeInsert = await pairingById(context.env.MIRNA_SYNC_DB, input.requestId);

@@ -60,7 +60,7 @@ import {
 import { db } from '@/db/database';
 import {
   readLocalSyncSetup,
-  writeLocalSyncSetup,
+  writeAdvancedLocalSyncSetup,
   writeRotatedLocalSyncSetup,
 } from '@/db/sync/repository';
 import { localVaultKeyRecordId, type LocalSyncSetup } from '@/db/sync/records';
@@ -107,8 +107,8 @@ export interface DeviceSecurityApiPort {
 
 export interface DeviceSecurityRepositoryPort {
   read(): Promise<LocalSyncSetup | undefined>;
-  write(setup: LocalSyncSetup): Promise<void>;
-  writeRotated(setup: LocalSyncSetup): Promise<void>;
+  write(current: LocalSyncSetup, next: LocalSyncSetup): Promise<LocalSyncSetup>;
+  writeRotated(setup: LocalSyncSetup): Promise<LocalSyncSetup>;
   rotationBlockers(vaultId: string): Promise<{
     readonly pendingOperations: number;
     readonly pendingConflicts: number;
@@ -117,7 +117,7 @@ export interface DeviceSecurityRepositoryPort {
 
 const defaultRepository: DeviceSecurityRepositoryPort = {
   read: () => readLocalSyncSetup(),
-  write: (setup) => writeLocalSyncSetup(setup),
+  write: (current, next) => writeAdvancedLocalSyncSetup(current, next),
   writeRotated: (setup) => writeRotatedLocalSyncSetup(setup),
   rotationBlockers: async (vaultId) => {
     const [pendingOperations, pendingConflicts] = await Promise.all([
@@ -648,8 +648,7 @@ export class DeviceSecurityService {
         now: this.#now().toISOString(),
         pendingRotationSnapshot: envelope.senderDeviceId === setup.device.deviceId,
       });
-      await this.#repository.writeRotated(next);
-      return next;
+      return await this.#repository.writeRotated(next);
     } finally {
       clearBytes(vaultMasterKey);
     }
@@ -673,8 +672,7 @@ export class DeviceSecurityService {
         now: this.#now().toISOString(),
         pendingRotationSnapshot: false,
       });
-      await this.#repository.write(next);
-      return next;
+      return await this.#repository.write(setup, next);
     } finally {
       clearBytes(vaultMasterKey);
     }
@@ -928,8 +926,7 @@ export class DeviceSecurityService {
         now: this.#now().toISOString(),
         pendingRotationSnapshot: true,
       });
-      await this.#repository.writeRotated(next);
-      return next;
+      return await this.#repository.writeRotated(next);
     } finally {
       if (gateKey) clearBytes(gateKey);
       if (newVaultMasterKey) clearBytes(newVaultMasterKey);

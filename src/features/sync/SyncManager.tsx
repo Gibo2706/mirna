@@ -1478,6 +1478,7 @@ export interface SyncManagerProps {
 
 export const SyncManager = ({ preOnboarding = false, services }: SyncManagerProps) => {
   const resolvedServices = useMemo(() => services ?? createDefaultSyncUiServices(), [services]);
+  useEffect(() => () => resolvedServices.dispose?.(), [resolvedServices]);
   const content = <SyncContent services={resolvedServices} preOnboarding={preOnboarding} />;
 
   if (preOnboarding) {

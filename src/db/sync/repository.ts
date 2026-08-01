@@ -410,6 +410,28 @@ const putSetupRecords = async (database: FinanceDatabase, setup: LocalSyncSetup)
   ]);
 };
 
+const assertSameLocalIdentity = (current: LocalSyncSetup, next: LocalSyncSetup): void => {
+  if (
+    current.vault.vaultId !== next.vault.vaultId ||
+    current.device.deviceId !== next.device.deviceId ||
+    current.metadata.enabledAt !== next.metadata.enabledAt ||
+    current.metadata.vaultId !== next.metadata.vaultId
+  ) {
+    throw new InvalidLocalSyncSetupError(
+      'Local manifest transition does not belong to the active setup.',
+    );
+  }
+};
+
+const mergeSecurityMetadata = (
+  current: LocalSyncSetup['metadata'],
+  next: LocalSyncSetup['metadata'],
+): LocalSyncSetup['metadata'] => ({
+  ...current,
+  lastManifestHash: next.lastManifestHash,
+  pendingKeyRotationSnapshotEpoch: next.pendingKeyRotationSnapshotEpoch,
+});
+
 export const writeLocalSyncSetup = async (
   setup: LocalSyncSetup,
   database: FinanceDatabase = db,
@@ -426,13 +448,66 @@ export const writeLocalSyncSetup = async (
 };
 
 /**
+ * Atomically advances a same-key-epoch manifest while retaining snapshot and
+ * operation progress that may have committed after the transition started.
+ */
+export const writeAdvancedLocalSyncSetup = async (
+  current: LocalSyncSetup,
+  next: LocalSyncSetup,
+  database: FinanceDatabase = db,
+): Promise<LocalSyncSetup> => {
+  const [validatedCurrent, validatedNext] = await Promise.all([
+    validateSetup(current),
+    validateSetup(next),
+  ]);
+  assertSameLocalIdentity(validatedCurrent, validatedNext);
+  if (
+    validatedNext.vault.keyEpoch !== validatedCurrent.vault.keyEpoch ||
+    validatedNext.vault.manifest.manifestVersion !==
+      validatedCurrent.vault.manifest.manifestVersion + 1
+  ) {
+    throw new InvalidLocalSyncSetupError(
+      'Local manifest update is not an exact same-epoch transition.',
+    );
+  }
+  await validateManifestTransition(validatedCurrent.vault.manifest, validatedNext.vault.manifest);
+
+  return database.transaction(
+    'rw',
+    [database.syncVault, database.syncDevice, database.syncKeys, database.syncMetadata],
+    async () => {
+      const [storedVault, storedMetadata] = await Promise.all([
+        database.syncVault.get(ACTIVE_SYNC_VAULT_RECORD_ID),
+        database.syncMetadata.get(SYNC_METADATA_RECORD_ID),
+      ]);
+      if (
+        !storedVault ||
+        !storedMetadata ||
+        storedMetadata.vaultId !== validatedCurrent.vault.vaultId ||
+        storedMetadata.lastManifestHash !== validatedCurrent.metadata.lastManifestHash ||
+        storedVault.keyEpoch !== validatedCurrent.vault.keyEpoch ||
+        canonicalizeJson(storedVault.manifest) !== canonicalizeJson(validatedCurrent.vault.manifest)
+      ) {
+        throw new InvalidLocalSyncSetupError('Local manifest update lost its state race.');
+      }
+      const persisted = {
+        ...validatedNext,
+        metadata: mergeSecurityMetadata(storedMetadata, validatedNext.metadata),
+      };
+      await putSetupRecords(database, persisted);
+      return persisted;
+    },
+  );
+};
+
+/**
  * Advances the local vault to exactly the next key epoch while retaining the
  * previous encrypted key for already accepted historical operations.
  */
 export const writeRotatedLocalSyncSetup = async (
   setup: LocalSyncSetup,
   database: FinanceDatabase = db,
-): Promise<void> => {
+): Promise<LocalSyncSetup> => {
   const [validatedSetup, current] = await Promise.all([
     validateSetup(setup),
     readLocalSyncSetup(database),
@@ -443,40 +518,41 @@ export const writeRotatedLocalSyncSetup = async (
     validatedSetup.vault.keyEpoch !== current.vault.keyEpoch + 1 ||
     validatedSetup.vault.manifest.manifestVersion !== current.vault.manifest.manifestVersion + 1 ||
     validatedSetup.device.deviceId !== current.device.deviceId ||
-    validatedSetup.metadata.enabledAt !== current.metadata.enabledAt ||
-    validatedSetup.metadata.firstUploadConsent !== current.metadata.firstUploadConsent ||
-    validatedSetup.metadata.lastServerCursor !== current.metadata.lastServerCursor ||
-    validatedSetup.metadata.lastSnapshotServerCursor !==
-      current.metadata.lastSnapshotServerCursor ||
-    validatedSetup.metadata.lastSnapshotRevision !== current.metadata.lastSnapshotRevision ||
-    validatedSetup.metadata.lastSnapshotId !== current.metadata.lastSnapshotId ||
-    validatedSetup.metadata.lastSnapshotHash !== current.metadata.lastSnapshotHash ||
-    validatedSetup.metadata.lastSnapshotContentHash !== current.metadata.lastSnapshotContentHash
+    validatedSetup.metadata.enabledAt !== current.metadata.enabledAt
   ) {
     throw new InvalidLocalSyncSetupError('Local key rotation is not an exact next-epoch update.');
   }
   await validateManifestTransition(current.vault.manifest, validatedSetup.vault.manifest);
 
   const retiredAt = validatedSetup.vault.updatedAt;
-  await database.transaction(
+  return database.transaction(
     'rw',
     [database.syncVault, database.syncDevice, database.syncKeys, database.syncMetadata],
     async () => {
-      const [storedVault, storedKey] = await Promise.all([
+      const [storedVault, storedKey, storedMetadata] = await Promise.all([
         database.syncVault.get(ACTIVE_SYNC_VAULT_RECORD_ID),
         database.syncKeys.get(current.vaultKey.id),
+        database.syncMetadata.get(SYNC_METADATA_RECORD_ID),
       ]);
       if (
         !storedVault ||
         !storedKey ||
+        !storedMetadata ||
         storedKey.retiredAt !== undefined ||
+        storedMetadata.vaultId !== current.vault.vaultId ||
+        storedMetadata.lastManifestHash !== current.metadata.lastManifestHash ||
         storedVault.keyEpoch !== current.vault.keyEpoch ||
         canonicalizeJson(storedVault.manifest) !== canonicalizeJson(current.vault.manifest)
       ) {
         throw new InvalidLocalSyncSetupError('Local key rotation lost its state race.');
       }
+      const persisted = {
+        ...validatedSetup,
+        metadata: mergeSecurityMetadata(storedMetadata, validatedSetup.metadata),
+      };
       await database.syncKeys.put({ ...storedKey, retiredAt });
-      await putSetupRecords(database, validatedSetup);
+      await putSetupRecords(database, persisted);
+      return persisted;
     },
   );
 };

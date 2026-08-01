@@ -17,10 +17,10 @@ import {
   type OperationEnvelopeV1,
 } from '../../../src/domain/sync/operation';
 import { authenticateRequest, type AuthenticatedDevice } from './auth';
+import { STAGING_BUDGETS } from './config/staging-budgets';
 import type { RequestContext } from './context';
 import { conflict, forbidden, HttpError } from './errors';
 import { jsonResponse } from './http';
-import { readWorkerLimits } from './limits';
 import { canonicalText, toDatabaseBlob } from './server-crypto';
 import { readCanonicalJson } from './validation';
 
@@ -151,8 +151,8 @@ export const handleUploadOperation = async (context: RequestContext): Promise<Re
   if (envelope.deviceSequence !== state.last_device_sequence + 1) {
     throw conflict('OPERATION_SEQUENCE_CONFLICT', 'Operation device sequence is not contiguous.');
   }
-  if (state.operation_count >= readWorkerLimits(context.env).maxOperationsPerVault) {
-    throw new HttpError(507, 'STORAGE_QUOTA_REACHED', 'Operation quota is exhausted.');
+  if (state.operation_count >= STAGING_BUDGETS.perVaultResources.uncompactedOperations) {
+    throw new HttpError(429, 'VAULT_QUOTA_EXCEEDED', 'Vault staging quota is exhausted.');
   }
 
   let cursor: number;

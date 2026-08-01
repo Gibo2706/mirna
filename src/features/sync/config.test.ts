@@ -14,10 +14,16 @@ describe('sync client configuration', () => {
       readSyncClientConfig({
         VITE_MIRNA_SYNC_ENABLED: 'true',
         VITE_MIRNA_SYNC_API_URL: 'https://mirna-sync-staging.example.workers.dev',
+        VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
+        VITE_MIRNA_APP_ENV: 'beta',
+        VITE_MIRNA_BETA_ONLY: 'true',
       }),
     ).toEqual({
       enabled: true,
       apiOrigin: 'https://mirna-sync-staging.example.workers.dev',
+      turnstileSiteKey: '1x00000000000000000000AA',
+      appEnvironment: 'beta',
+      betaOnly: true,
     });
   });
 
@@ -46,5 +52,14 @@ describe('sync client configuration', () => {
     expect(() => readSyncClientConfig({ VITE_MIRNA_SYNC_ENABLED: 'true' })).toThrow(
       SyncConfigurationError,
     );
+    expect(() =>
+      readSyncClientConfig({
+        VITE_MIRNA_SYNC_ENABLED: 'true',
+        VITE_MIRNA_SYNC_API_URL: 'https://sync.example.test',
+        VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
+        VITE_MIRNA_APP_ENV: 'production',
+        VITE_MIRNA_BETA_ONLY: 'true',
+      }),
+    ).toThrow(SyncConfigurationError);
   });
 });
