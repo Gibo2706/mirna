@@ -2,9 +2,9 @@
 
 Status: experimental protocol v1 design for `2.4.0-beta.1`
 Deployment boundary: staging only
-Implementation status: Phase 1 client/Worker recovery and atomic sole-device
-rotation are implemented locally for a vault with no committed snapshot;
-post-snapshot recovery remains a Phase 2 gate
+Implementation status: client/Worker recovery, current-snapshot recovery and
+atomic sole-device key/recovery rotation are implemented and tested locally;
+remote staging and independent security review remain pending
 
 ## What recovery can and cannot do
 
@@ -163,7 +163,7 @@ envelope, AAD and decrypted bundle before importing or using any key.
 
 ## What the service stores
 
-The intended recovery record contains only:
+The recovery record contains only:
 
 - protocol and suite;
 - opaque vault and recovery lookup IDs;
@@ -210,7 +210,7 @@ invalid.
 
 ## End-to-end recovery sequence
 
-The complete Phase 1 recovery flow is required to proceed in this order:
+The protocol-v1 recovery flow proceeds in this order:
 
 1. The user intentionally opens recovery and enters or imports the code locally.
 2. The client parses the prefix, canonical Crockford form, exact length and
@@ -245,9 +245,10 @@ loss after a successful commit must be retryable without creating two active
 recovery authorities. A failure before commit must leave the previous code
 usable rather than leaving the vault without recovery.
 
-This sequence is the required design. The complete Worker routes, UI and atomic
-rotation are still pending and recovery MUST remain unavailable until their
-gate passes.
+The Worker routes, Serbian UI and atomic transition are implemented locally.
+Failure/race tests cover stale challenges, one-time consumption, retry response
+loss and compare-and-swap contention. These gates do not replace an independent
+review.
 
 ## Lost or compromised device policy
 
@@ -268,11 +269,14 @@ revoked device still knows all plaintext and old keys it obtained before
 rotation. Forward exclusion applies only to content created under the completed
 new epoch.
 
-The current Phase 1 transaction performs the membership, random vault-key epoch
-and recovery rotation only while the server has no committed snapshot. It
-fails closed otherwise. Re-encrypting a committed snapshot and rotating its R2
-reference is part of the Phase 2 gate; until then, post-snapshot all-device-loss
-recovery is not presented as complete.
+For a committed snapshot, the recovery client first downloads the current
+ciphertext through a recovery-authorized route, verifies its manifest/device
+signature chain and decrypts it locally under the old key. The atomic recovery
+transaction then revokes every old device/grant/session, installs the sole new
+device and random key epoch, supersedes the old snapshot and clears the current
+pointer. The recovered client retains the verified finance data locally and the
+continuous service publishes a fresh snapshot under the new epoch. If any
+verification fails, recovery stops before the membership transition.
 
 ## Recovery rotation without device loss
 

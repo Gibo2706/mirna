@@ -2,7 +2,8 @@
 
 Status: safe runbook for experimental `2.4.0-beta.1`, protocol version 1
 Authorized target: Cloudflare staging only
-Current remote status: no resource or deployment is asserted by this document
+Current remote status: provisioning stopped before writes because R2 activation
+requires a billing step; no resource or deployment is asserted
 Production status: not authorized and not configured
 
 ## Non-negotiable stop conditions
@@ -26,6 +27,11 @@ initial R2 activation may require a billing step. It is not a hard-free safety
 boundary. If that activation appears, the R2 provisioning step remains blocked
 until a separate explicit decision.
 
+That stop condition was reached on 2026-07-31 while inspecting the authorized
+account: D1 had no existing database and R2 returned its subscription-required
+response. No D1 database, R2 bucket or Worker deployment was created, and no
+billing action was accepted.
+
 ## Deployment state and configuration
 
 The checked-in configuration is:
@@ -40,7 +46,7 @@ It defines only:
 - one `staging` Worker environment;
 - placeholder staging D1 and R2 bindings;
 - disabled Worker observability;
-- an hourly bounded cleanup trigger.
+- a five-minute bounded cleanup trigger.
 
 There is no production environment. Do not add one as part of staging work.
 The placeholder values are intentionally fail-closed:
@@ -286,10 +292,10 @@ Do not run arbitrary remote SQL or manually edit the migration table. A
 migration failure stops deployment. Investigate it without dropping or
 recreating a resource and without applying destructive repair SQL.
 
-The current foundation migration creates tables for all planned phases, but
-table presence does not mean the corresponding protocol route is implemented.
-Before staging use, migration column semantics must match the frozen raw P-256,
-pairing-claim and recovery profiles.
+The four migrations cover foundation, snapshot, operation and device-security /
+deletion state. Migration presence is still not runtime evidence: before
+staging use, apply the exact ordered set and run the Worker and browser gates
+against the same feature commit.
 
 ## Deploy the staging Worker
 
@@ -343,16 +349,17 @@ Staging smoke tests use synthetic ciphertext only and verify:
 - exact allowed and denied origins;
 - strict methods, content types, schemas and `/v1` protocol handling;
 - D1 and R2 reachability through the Worker;
-- challenge/session expiry and one-time behavior once Phase 1 exists;
-- pairing/recovery attempt bounds once those routes exist;
-- 8 MiB snapshot enforcement, private R2 access and D1/R2 failure recovery once
-  Phase 2 exists;
-- idempotence, revocation and operation limits once Phase 3 exists;
+- challenge/session expiry, one-time use and bounded active-session rotation;
+- pairing/recovery attempt bounds and race handling;
+- 8 MiB snapshot enforcement, private R2 access, acknowledgement-gated
+  compaction and D1/R2 failure recovery;
+- operation idempotence/limits, conflict convergence, device expiry/renewal,
+  revoke-and-rotate and resumable recovery-authorized deletion;
 - no known synthetic finance plaintext in D1, R2, API JSON or available Worker
   logs.
 
-Do not call unimplemented routes to manufacture a passing result. Record each
-phase as pending until its actual routes and tests exist.
+Record remote checks as pending until the routes run against provisioned
+staging D1/R2. Passing local Miniflare tests is not remote verification.
 
 ## Staging client boundary
 

@@ -16,20 +16,21 @@ produce no sync requests.
 This document describes both the intended three-phase architecture and the
 implementation state on 2026-07-31. These are not equivalent:
 
-| Area                                                 | Current state                                                                                                                                              |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shared protocol primitives                           | RFC 8785 canonicalization, strict encodings, Web Crypto helpers, recovery-code primitives and signed manifest validation are present in the feature branch |
-| Worker foundation                                    | Local D1/R2 bindings, versioned migration, strict HTTP/origin/body handling, health, bounded cleanup and staging rate-limit bindings are present           |
-| Pairing, recovery and device-auth routes             | Implemented locally with D1-backed state, exact retry/race controls and adversarial Worker coverage; remote staging remains unverified                     |
-| Client sync storage and Phase 1 lifecycle            | Dexie key capability/storage, Serbian enable/pair/recovery UI and the enable, pairing, SAS and recovery state machines pass the Phase 1 browser gate       |
-| Encrypted snapshots                                  | Planned Phase 2; not yet implemented end to end                                                                                                            |
-| Encrypted operation sync, conflicts and key rotation | Planned Phase 3; not yet implemented end to end                                                                                                            |
-| Remote staging resources                             | Not provisioned or verified by this documentation                                                                                                          |
-| Production enablement                                | Not authorized; no production Worker environment is defined                                                                                                |
+| Area                                                 | Current state                                                                                                                                               |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared protocol primitives                           | RFC 8785 canonicalization, strict encodings, Web Crypto helpers, recovery-code primitives and signed manifest validation are implemented in the beta source |
+| Worker foundation                                    | Local D1/R2 bindings, four versioned migrations, strict HTTP/origin/body handling, health, bounded cleanup and staging rate-limit bindings are implemented  |
+| Pairing, recovery and device-auth routes             | Implemented locally with D1-backed state, exact retry/race controls and adversarial Worker coverage; remote staging remains unverified                      |
+| Client sync storage and Phase 1 lifecycle            | Dexie key capability/storage, Serbian enable/pair/recovery UI and the enable, pairing, SAS and recovery state machines pass the Phase 1 browser gate        |
+| Encrypted snapshots                                  | Implemented locally with authenticated compression, private R2 proxying, D1 revision CAS, rollback/fork pins and retry-safe cleanup                         |
+| Encrypted operation sync, conflicts and key rotation | Implemented locally with transactional outbox intent, signed ciphertext operations, explicit conflict resolution, ACK compaction and rotate-on-revoke       |
+| Cloud-vault deletion                                 | Implemented locally as recovery-authorized, resumable R2-first deletion that retains local finance data                                                     |
+| Remote staging resources                             | Blocked before provisioning because R2 activation requires a billing step; no remote deployment is asserted                                                 |
+| Production enablement                                | Not authorized; no production Worker environment is defined                                                                                                 |
 
-Phase 1 passed its focused unit, Worker and isolated multi-context browser gate
-on 2026-07-31. Later-phase domain schemas that exist in source are not reachable
-Worker features and must not be presented as completed service behavior.
+All three implementation phases passed focused unit, Worker and isolated
+multi-context browser gates locally on 2026-07-31. This is engineering test
+evidence, not an independent security audit or remote-staging claim.
 
 ## System boundary
 
@@ -141,9 +142,10 @@ erasure.
 
 ### Sync-specific stores
 
-Dexie schema version 6 adds `syncVault`, `syncDevice`, `syncKeys`, `syncOutbox`,
-`syncInbox`, `syncConflicts`, `syncFrontier` and `syncMetadata`. These stores are
-isolated from ordinary finance backups. Their roles are:
+Dexie schema versions 6 through 10 add `syncVault`, `syncDevice`, `syncKeys`,
+`syncOutbox`, `syncInbox`, `syncConflicts`, `syncFrontier`, `syncMetadata`,
+`syncCheckpoints` and `syncEntityStates`. These stores are isolated from
+ordinary finance backups. Their roles are:
 
 - vault and device state, including the pinned manifest;
 - locally wrapped key envelopes and epoch state;
@@ -152,7 +154,7 @@ isolated from ordinary finance backups. Their roles are:
 - local conflict records;
 - snapshot/frontier pins, scheduler state and non-sensitive diagnostics.
 
-For Phase 3, a successful finance mutation and its deterministic outbox intent
+For operation sync, a successful finance mutation and its deterministic outbox intent
 must be written in one Dexie transaction. Web Crypto work must happen outside
 that transaction, because asynchronous encryption inside a long-lived IndexedDB
 transaction is unreliable. A later scheduler step encrypts the committed intent
@@ -240,8 +242,10 @@ after its signature, AAD, encryption tag, schema and finance integrity all pass.
 If local state is dirty while the remote revision advanced, snapshot overwrite
 is blocked instead of applying last-write-wins.
 
-This flow is a design requirement, not a claim that Phase 2 routes currently
-exist.
+The beta source implements this flow locally. A new snapshot is not accepted
+as routine compaction while an active device still owes an acknowledgement for
+the current snapshot. The one exception is a mandatory key-epoch rotation
+snapshot after revocation, because the old epoch must be replaced immediately.
 
 ## Phase 3: encrypted operations and conflicts
 
@@ -262,11 +266,16 @@ last-write-wins are not conflict-resolution mechanisms.
 
 Snapshots remain the bootstrap and compaction format. Operations and tombstones
 are retained until the required active-device acknowledgements pass the compacted
-frontier. Device revocation blocks service access immediately; future
-confidentiality additionally requires a new random vault master key, a new key
-epoch, new envelopes for remaining devices and a signed manifest transition.
+frontier. Device revocation blocks service access immediately. Future
+confidentiality is then restored with a new random vault master key, a new key
+epoch, recipient-bound envelopes only for remaining devices and a signed
+manifest transition.
 
-This flow is also a design requirement and is not currently complete.
+The beta source implements this flow locally. Explicit conflict-resolution
+operations carry the sorted operation IDs they resolve, so every device can
+recognize the decision and avoid presenting the same conflict again. A pending
+conflict defers both compaction and server acknowledgement until the user makes
+that decision.
 
 ## Worker, D1 and R2 responsibilities
 
@@ -280,14 +289,15 @@ finance payload. Responses use strict JSON, `Cache-Control: no-store`,
 applicable.
 
 There is intentionally no Durable Object, Queue, WebSocket or server push in
-protocol v1. HTTP polling, D1 compare-and-swap, R2 and an hourly cleanup trigger
+protocol v1. HTTP polling, D1 compare-and-swap, R2 and a five-minute cleanup trigger
 are sufficient for the initial correctness model and keep the service small.
 
 ### D1
 
 D1 holds public cryptographic membership, challenge/session hashes, expiry and
-attempt state, signed manifests, encrypted envelopes, snapshot commit metadata
-and, in Phase 3, small encrypted operations and acknowledgement frontiers.
+attempt state, signed manifests, encrypted envelopes, snapshot commit metadata,
+small encrypted operations, acknowledgement frontiers and resumable deletion
+state.
 Indexes scope common request paths by vault and expiry. Security-critical
 pairing and recovery attempt counters live in D1; an eventually consistent edge
 rate limiter is defense in depth, not authorization state.

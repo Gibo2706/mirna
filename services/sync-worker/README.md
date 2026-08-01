@@ -12,14 +12,20 @@ The implemented HTTP surface is intentionally small:
 - consistent no-store JSON responses and generic public errors;
 - D1-backed vault genesis, signed challenge/session authentication, pairing,
   manifest finalization and all-devices-lost recovery;
+- authenticated private snapshot upload/read through R2 with revision CAS,
+  idempotency and retry-safe orphan cleanup;
+- encrypted operation upload, paginated changes, active-device acknowledgements
+  and acknowledgement-gated compaction;
+- signed device renewal, recovery-backed revoke-and-rotate, epoch envelopes,
+  manifest history and resumable cloud-vault deletion;
 - per-route edge rate-limit bindings, authoritative D1 attempt counters and
   atomic hard quotas;
 - a five-minute, bounded and idempotent cleanup task.
 
-Snapshot upload and operation-sync routes are not implemented yet. Their tables
-are present so versioned D1 migrations can evolve in phase order without
-putting plaintext finance content in server storage. Phase 1 passed its client,
-Worker and isolated multi-context browser gate on 2026-07-31.
+All three local implementation phases passed their client, Worker and isolated
+multi-context browser gates on 2026-07-31. Remote staging remains unverified
+because R2 provisioning stopped at the no-billing gate. This is not a security
+audit or production-readiness claim.
 
 ## Security and data boundary
 
@@ -64,8 +70,8 @@ npx vitest run --config services/sync-worker/vitest.config.ts
 ```
 
 The Vitest configuration uses Cloudflare's current `cloudflareTest()` plugin,
-applies `0001_sync_foundation.sql` to isolated local D1 storage and exercises
-the real D1/R2 bindings. No synthetic fixture contains financial content.
+applies every migration in `migrations/` to isolated local D1 storage and
+exercises real local D1/R2 bindings. No fixture contains real financial content.
 
 ## Safe staging dry run
 
@@ -157,11 +163,11 @@ safety ceilings, not permanent Free-plan guarantees.
 R2 objects are removed before their D1 metadata. If R2 deletion fails, the
 claimed metadata remains eligible for a later retry. A committed current
 snapshot is never selected: only `temporary`, `orphaned` or explicitly
-`superseded` rows with an elapsed `cleanup_after` timestamp are eligible. Phase
-3 code may set operation cleanup timestamps only after the required
-authorized-device acknowledgements.
+`superseded` rows with an elapsed `cleanup_after` timestamp are eligible.
+Operation cleanup timestamps are set only after the required authorized-device
+acknowledgements.
 
-The future snapshot upload route must create its `temporary` D1 row, including a
+The snapshot upload route creates its `temporary` D1 row, including a
 mandatory `cleanup_after`, before streaming to R2. The later vault-revision CAS
 promotes that same row. This ordering guarantees that an R2 success followed by
 a CAS failure still leaves a durable cleanup record; a raw R2 upload without the

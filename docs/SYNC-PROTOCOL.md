@@ -3,16 +3,15 @@
 Status: frozen core cryptographic profile for experimental `2.4.0-beta.1`
 Protocol version: `1`
 Deployment boundary: staging only
-Interoperability status: incomplete until all Phase 1–3 schemas and routes pass
-their gates
+Interoperability status: complete local protocol-v1 implementation; remote
+staging and independent security review remain pending
 
 ## Normative scope
 
 The words **MUST**, **MUST NOT**, **SHOULD** and **MAY** describe protocol v1
-requirements. The core encoding, signature, manifest, pairing-secret and
-recovery profiles in this document are frozen. Snapshot and operation sections
-describe the required direction but are not a claim that their complete wire
-schemas or Worker routes are implemented.
+requirements. The encoding, signature, manifest, pairing, recovery, snapshot,
+operation, device-security and deletion profiles in this document are frozen
+for protocol v1 and are implemented in the `2.4.0-beta.1` source.
 
 An implementation MUST reject an unknown protocol version, suite, transcript
 type, object type, command type or unexpected JSON field. It MUST NOT negotiate
@@ -85,6 +84,10 @@ mirna-sensitive-request-v1
 mirna-snapshot-envelope-v1
 mirna-operation-envelope-v1
 mirna-recovery-proof-v1
+mirna-recovery-challenge-v1
+mirna-recovery-bundle-fetch-v1
+mirna-secure-device-revocation-v1
+mirna-vault-deletion-v1
 ```
 
 ### HKDF labels
@@ -410,9 +413,8 @@ signing key. The new device MUST validate its own identity and key set, the
 request, origin, manifest pins, epoch, ECDH key, AAD, ciphertext digest/length,
 device signature and pairing MAC before decrypting or finalizing.
 
-The cryptographic derivation helpers exist, but the complete strict transcript
-schema and Worker enforcement remain a Phase 1 gate. Pairing is not complete
-until those are implemented and adversarially tested.
+The strict transcript schema, Worker enforcement and two-context pairing flow
+are implemented locally and covered by adversarial and browser tests.
 
 ### Short Authentication String
 
@@ -547,12 +549,13 @@ recovery signing key, and invalidate the prior record. Replacing a lost or
 suspected device also requires revocation and completion of a fresh random vault
 master key/key-epoch rotation before claiming forward exclusion.
 
-The Phase 1 route and client lifecycle implement this as one sole-device,
-new-epoch, new-recovery transition and retain an exact completion response for
-bounded idempotent retry. It currently refuses a vault that already has a
-committed cloud snapshot; Phase 2 must add snapshot re-encryption and atomic
-reference rotation before general post-snapshot recovery is complete. See
-[SYNC-RECOVERY.md](./SYNC-RECOVERY.md) for operational details.
+The route and client lifecycle implement this as one sole-device, new-epoch,
+new-recovery transition and retain an exact completion response for bounded
+idempotent retry. For a vault with a committed snapshot, the recovery capability
+may fetch only the current ciphertext; the client verifies and decrypts it with
+the old key before committing recovery. The Worker then supersedes that object,
+clears the current snapshot pointer and the recovered client publishes a fresh
+snapshot under the new epoch. See [SYNC-RECOVERY.md](./SYNC-RECOVERY.md).
 
 ## Device authentication and sessions
 
@@ -590,14 +593,20 @@ The Worker challenge/session routes and memory-only browser transport are
 implemented locally. Remote staging behavior is not verified until the staging
 gate passes.
 
-## Snapshot protocol requirements
+## Snapshot protocol
 
-Phase 2 will define strict `SyncSnapshotV1` plaintext and
-`EncryptedSnapshotEnvelopeV1` clear metadata. The clear envelope is limited to
-vault/object identity, revision and base revision, key epoch, creating device,
-nonce/AAD, compression mode, ciphertext length/hash, previous accepted snapshot
-hash, protocol/suite and signature. Finance state and causal data stay inside
-the ciphertext.
+`SyncSnapshotV1` is a strict, canonical plaintext object containing sorted
+finance records, causal frontier, entity-version state, manifest pin and the
+snapshot chain. Device-local preferences are excluded. The plaintext also
+contains a domain-separated content-integrity hash, then is compressed with
+authenticated `gzip` when supported and encrypted with an object key derived
+from the current vault master key.
+
+`EncryptedSnapshotEnvelopeV1` exposes only vault/snapshot identity, revision
+and base revision, key epoch, creating device, parent manifest hash, previous
+snapshot hash, causal-frontier hash, compression, nonce/AAD, ciphertext
+length/hash and the creator signature. Finance records, entity identities and
+causal entries remain inside the ciphertext.
 
 Snapshots MUST:
 
@@ -612,17 +621,25 @@ Snapshots MUST:
 - be schema/integrity validated and atomically applied after local decryption;
 - never overwrite dirty local state after remote advancement.
 
-Compression, if used, is an authenticated `gzip` or explicit `none` mode and
-happens before encryption. Phase 2 is not implemented end to end, so no complete
-snapshot wire schema is declared interoperable yet.
+Decompression is capped at 16 MiB and a 100:1 ratio. A successful decrypt is
+not sufficient: the client also verifies strict schemas, content hash, finance
+integrity, snapshot/manifest chains and entity-state consistency before one
+atomic local apply.
 
-## Operation protocol requirements
+Routine compaction receives `SNAPSHOT_ACK_PENDING` until all active devices have
+acknowledged the current snapshot. A key-epoch rotation snapshot may bypass
+that gate, because continuing on the revoked epoch would defeat forward
+confidentiality.
 
-Phase 3 will define strict encrypted `SyncOperationV1` commands. Plaintext inside
-the ciphertext includes operation/device identity, per-device sequence, Lamport
-value, causal frontier, allowlisted command and payload, entity precondition,
-previous device-operation hash, epoch and local creation time. Arbitrary table
-writes, scripts and unrestricted JSON Patch are forbidden.
+## Operation protocol
+
+`SyncOperationV1` plaintext includes operation/device identity, deterministic
+mutation-group position, per-device sequence, Lamport value, causal frontier,
+allowlisted command and payload, entity precondition/result, previous
+device-operation hash, epoch and local creation time. An explicit conflict
+resolution additionally carries 1–20 unique, lexically sorted
+`resolvesOperationIds`. Arbitrary table writes, scripts and unrestricted JSON
+Patch are forbidden.
 
 The server-visible envelope contains only the opaque operation ID, device ID and
 sequence, epoch, nonce/AAD, ciphertext size/hash, signature and accepted server
@@ -634,8 +651,32 @@ still verify signatures, hash chains and causal frontiers because a server curso
 is not cryptographic ordering. Tombstones and compacted operations remain until
 the required authorized-device acknowledgement policy permits deletion.
 
-Phase 3 is not implemented end to end, so no complete operation wire schema is
-declared interoperable yet.
+The client writes each finance mutation and deterministic outbox intent in one
+Dexie transaction, then encrypts outside the transaction. An idempotent retry
+reuses the same signed envelope. Pending conflicts stop acknowledgement and
+compaction; local, remote or custom user resolution creates an ordinary signed
+operation that all devices can apply and recognize as final.
+
+## Device renewal, revocation and cloud deletion
+
+Renewal requires a fresh `/v1/devices/renew` challenge and a correctly chained
+`renew-device` manifest. It extends exactly one active device authorization and
+does not replace its keys.
+
+Revocation requires both a fresh device signature and recovery proof/signature
+over one bound transcript. The atomic transition moves the target device to the
+revoked set, advances the manifest and key epoch, replaces recovery material,
+and stores exactly one recipient-bound envelope for every remaining active
+device. The new vault master key is random; it is not derived from the old key.
+The revoked device immediately loses challenges, sessions, envelopes and sync
+access, while old ciphertext may still be readable from any key it retained.
+
+Cloud-vault deletion requires an authenticated active device, a fresh
+audience-bound device signature, recovery gate proof, recovery signature and
+the exact signed confirmation `DELETE ENCRYPTED CLOUD VAULT`. Deletion is
+idempotent and resumable: private R2 objects are removed first, then D1 vault
+state, after which a non-secret completion tombstone answers retries. Local
+finance tables are deliberately not deleted.
 
 ## HTTP profile
 
@@ -657,11 +698,11 @@ Unexpected methods/content types, oversized bodies and unsupported versions are
 rejected before expensive work. Public errors are stable and generic; they do
 not contain stack traces, secret values or storage/account identifiers.
 
-The intended small API surface includes health, vault creation, authentication,
-manifest transitions, pairing, devices, snapshots, changes,
-acknowledgements, recovery and vault deletion. At the time of this document,
-only the Worker foundation and `GET /v1/health` are implemented. Other endpoint
-names are not a compatibility promise until their schemas and tests land.
+The implemented API surface includes health, vault creation/deletion,
+challenge/session authentication, manifest history, pairing, recovery, device
+renewal/revocation, epoch envelopes, snapshot upload/read, operation upload,
+paginated changes and acknowledgements. `services/sync-worker/src/router.ts`
+and the strict shared schemas define the route-level contract.
 
 ## Limits and lifetimes
 
