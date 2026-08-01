@@ -237,15 +237,6 @@ if (Number(outsideUnresolved ?? 0) !== 0) {
   throw new Error('Repair je odbijen: postoji drugi nerešen accounting incident.');
 }
 
-const createdTimes = before.reservations.map((row) => Number(row.created_at));
-const settledTimes = before.reservations.map((row) => Number(row.settled_at ?? row.created_at));
-if (
-  Number(flags.updated_at) < Math.min(...createdTimes) - 5 * 60 * 1_000 ||
-  Number(flags.updated_at) > Math.max(...settledTimes) + 60 * 60 * 1_000
-) {
-  throw new Error('Repair je odbijen: promena service flagova nije vremenski vezana za zahtev.');
-}
-
 const alreadyReconciled =
   before.reservations.every((row) => row.reconciled_at !== null) &&
   flags.accept_new_vaults === 1 &&
@@ -256,6 +247,15 @@ const alreadyReconciled =
 if (alreadyReconciled) {
   process.stdout.write(`${JSON.stringify({ changed: false, evidence: backupPath }, null, 2)}\n`);
   process.exit(0);
+}
+
+const createdTimes = before.reservations.map((row) => Number(row.created_at));
+const settledTimes = before.reservations.map((row) => Number(row.settled_at ?? row.created_at));
+if (
+  Number(flags.updated_at) < Math.min(...createdTimes) - 5 * 60 * 1_000 ||
+  Number(flags.updated_at) > Math.max(...settledTimes) + 60 * 60 * 1_000
+) {
+  throw new Error('Repair je odbijen: promena service flagova nije vremenski vezana za zahtev.');
 }
 
 const requestPattern = sqlText(`${requestId}:%`);
