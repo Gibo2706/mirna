@@ -35,7 +35,8 @@ const configuredOrigins = (value: string): ReadonlySet<string> => {
       const parsed = new URL(exact);
       const secureOrigin = parsed.protocol === 'https:';
       const knownLocalDevelopmentOrigin =
-        parsed.protocol === 'http:' && parsed.hostname === 'localhost';
+        parsed.protocol === 'http:' &&
+        (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1');
       if (parsed.origin === exact && (secureOrigin || knownLocalDevelopmentOrigin)) {
         origins.add(exact);
       }

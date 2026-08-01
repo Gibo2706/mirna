@@ -13,7 +13,7 @@
     "MIRNA_ENVIRONMENT": "local",
     "MIRNA_BUILD_COMMIT": "local",
     "MIRNA_PROTOCOL_VERSION": "1",
-    "MIRNA_ALLOWED_ORIGINS": "http://localhost:5173,http://localhost:4173",
+    "MIRNA_ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173",
     "MIRNA_CLEANUP_BATCH_SIZE": "10",
     "MIRNA_EPHEMERAL_CLEANUP_BATCH_SIZE": "1000",
     "MIRNA_MAX_TOTAL_VAULTS": "50",

@@ -39,6 +39,12 @@ describe('Worker HTTP foundation', () => {
     expect(allowed.status).toBe(200);
     expect(allowed.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:5173');
 
+    const loopback = await SELF.fetch(
+      request('/v1/health', { headers: { Origin: 'http://127.0.0.1:5173' } }),
+    );
+    expect(loopback.status).toBe(200);
+    expect(loopback.headers.get('Access-Control-Allow-Origin')).toBe('http://127.0.0.1:5173');
+
     const rejected = await SELF.fetch(
       request('/v1/health', { headers: { Origin: 'https://attacker.invalid' } }),
     );

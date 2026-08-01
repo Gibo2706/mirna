@@ -232,7 +232,8 @@ VITE_MIRNA_BETA_ONLY=true
 Every env change requires a new beta deployment. The build must contain the
 visible `Mirna Sync — Beta` marker, `noindex, nofollow`, a `robots.txt` that
 disallows all crawlers and a CSP that permits only the exact Turnstile origin
-for script/frame/connect. The stable project receives none of these variables.
+for script/frame/connect plus the exact staging Worker origin for connect. The
+stable project receives none of these variables.
 
 ## Remote smoke and plaintext sentinel gate
 
