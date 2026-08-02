@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { verifyStagingSnapshot } from './sync-staging-contract.mjs';
@@ -7,7 +7,22 @@ const DATABASE = 'mirna-sync-staging-eu';
 const BUCKET = 'mirna-sync-staging-eu';
 const WORKER_URL = 'https://mirna-sync-staging.bogdan-markovic2706.workers.dev/v1/health';
 const CONFIG = 'services/sync-worker/wrangler.jsonc';
-const BUILD = /^(?:[0-9a-f]{7,64}|replace-at-deploy)$/u;
+const BUILD = /^[0-9a-f]{7,64}$/u;
+const conformanceArtifact = JSON.parse(
+  readFileSync('services/sync-worker/route-budget-conformance.json', 'utf8'),
+);
+const registrySource = readFileSync('services/sync-worker/src/route-registry.ts', 'utf8');
+if (
+  conformanceArtifact.status !== 'registry-complete' ||
+  conformanceArtifact.routeCount !== 27 ||
+  conformanceArtifact.suite !== 'npm run sync:route-budget:verify' ||
+  conformanceArtifact.coverage !== 'complete-worker-runtime-suite-with-source-derived-bounds' ||
+  !registrySource.includes(
+    `ROUTE_BUDGET_REGISTRY_VERSION = '${conformanceArtifact.registryVersion}'`,
+  )
+) {
+  throw new Error('Lokalni route-budget conformance marker nije potpun ili usklađen.');
+}
 
 const options = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -74,6 +89,7 @@ PRAGMA table_info(service_flags);
 PRAGMA table_info(usage_daily_buckets);
 PRAGMA table_info(usage_rolling_totals);
 PRAGMA table_info(resource_totals);
+PRAGMA table_info(pairing_request_totals);
 PRAGMA index_list(usage_reservations);
 PRAGMA index_info(idx_usage_reservations_failure);
 SELECT COUNT(*) AS row_count, MIN(accept_new_vaults) AS accept_new_vaults,
@@ -84,6 +100,9 @@ SELECT COUNT(*) AS row_count, MIN(accept_new_vaults) AS accept_new_vaults,
 SELECT COUNT(*) AS row_count, MIN(r2_stored_bytes) AS r2_stored_bytes,
        MIN(r2_object_count) AS r2_object_count, MIN(d1_storage_bytes) AS d1_storage_bytes
   FROM resource_totals WHERE singleton_id = 1;
+SELECT COUNT(*) AS row_count, MIN(total_count) AS total_count,
+       (SELECT COUNT(*) FROM pairing_requests) AS actual_count
+  FROM pairing_request_totals WHERE singleton_id = 1;
 SELECT COUNT(*) AS row_count, MIN(worker_requests) AS worker_requests,
        MIN(d1_rows_read) AS d1_rows_read, MIN(d1_rows_written) AS d1_rows_written,
        MIN(r2_class_a) AS r2_class_a, MIN(r2_class_b) AS r2_class_b
@@ -114,7 +133,7 @@ const d1Payload = runWrangler([
 const resultSets = (Array.isArray(d1Payload) ? d1Payload : [d1Payload]).map(
   (entry) => entry.results ?? entry.result?.results ?? [],
 );
-if (resultSets.length !== 13) throw new Error('D1 verifier nije dobio očekivane rezultate.');
+if (resultSets.length !== 15) throw new Error('D1 verifier nije dobio očekivane rezultate.');
 
 const columns = (index) => resultSets[index].map(({ name }) => name);
 const first = (index) => resultSets[index][0] ?? null;
@@ -125,12 +144,14 @@ const parsedBucketSize = parseBucketBytes(r2.bucket_size ?? r2.bucketSize ?? r2.
 const bucketBytes = parsedBucketSize.bytes;
 
 let health;
+let healthHttpStatus;
 try {
   const response = await fetch(WORKER_URL, {
     headers: { 'X-Mirna-Protocol-Version': '1' },
     cache: 'no-store',
     redirect: 'error',
   });
+  healthHttpStatus = response.status;
   health = await response.json();
 } catch {
   throw new Error('Worker health provera nije uspela.');
@@ -147,18 +168,26 @@ const snapshot = {
     usage_daily_buckets: columns(3),
     usage_rolling_totals: columns(4),
     resource_totals: columns(5),
+    pairing_request_totals: columns(6),
   },
-  indexes: resultSets[6].map(({ name }) => name),
-  failureIndexColumns: resultSets[7].map(({ name }) => name),
-  flags: first(8),
-  resources: first(9),
-  rolling: first(10),
-  daily: first(11),
-  unresolved: first(12),
+  indexes: resultSets[7].map(({ name }) => name),
+  failureIndexColumns: resultSets[8].map(({ name }) => name),
+  flags: first(9),
+  resources: first(10),
+  pairingTotals: first(11),
+  rolling: first(12),
+  daily: first(13),
+  unresolved: first(14),
   r2: { readable: true, objectCount, bytes: bucketBytes, exactBytes: parsedBucketSize.exact },
   health,
+  healthHttpStatus,
 };
-const verification = verifyStagingSnapshot(snapshot, expectedMigrations, expectedBuild);
+const verification = verifyStagingSnapshot(
+  snapshot,
+  expectedMigrations,
+  expectedBuild,
+  conformanceArtifact.registryVersion,
+);
 if (!verification.ok) {
   process.stderr.write(
     `Staging readiness nije prošao:\n${verification.errors.map((error) => `- ${error}`).join('\n')}\n`,
@@ -178,6 +207,8 @@ process.stdout.write(
       r2Objects: objectCount,
       r2Bytes: bucketBytes,
       workerBuild: health.buildCommit,
+      routeBudgetConformance: health.readiness.routeBudgetConformance,
+      routeBudgetRegistryVersion: health.readiness.routeBudgetRegistryVersion,
     },
     null,
     2,

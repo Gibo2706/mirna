@@ -25,7 +25,8 @@ import {
   requiresJsonContentType,
   validatePreflightHeaders,
 } from './http';
-import { allowedMethodsForPath, isSnapshotUploadPath, routeRequest } from './router';
+import { allowedMethodsForPath, routeRequest } from './router';
+import { matchApiRequest } from './route-registry';
 import { RouteUsageMeter } from './metering';
 import { recordBetaDiagnostic } from './diagnostics';
 
@@ -82,6 +83,13 @@ const recordAccountingFailure = (
         businessCommitted: error.accounting.businessCommitted,
         phase: error.accounting.phase,
         route: error.accounting.route,
+        faultRole: error.accounting.faultRole,
+        ...(error.accounting.originRequestId
+          ? { originRequestId: error.accounting.originRequestId }
+          : {}),
+        ...(error.accounting.originRoute ? { originRoute: error.accounting.originRoute } : {}),
+        lifecycleOperation: error.accounting.lifecycleOperation,
+        businessWorkStarted: error.accounting.businessWorkStarted,
         serviceFlagsChanged: error.accounting.serviceFlagsChanged,
       },
     },
@@ -128,6 +136,7 @@ const executeRoute = async (context: RequestContext): Promise<Response> => {
 
   const requestedProtocol = request.headers.get('X-Mirna-Protocol-Version');
   const pathname = new URL(request.url).pathname;
+  const matchedRoute = matchApiRequest(request);
   if (
     (pathname !== HEALTH_PATH && requestedProtocol !== '1') ||
     (requestedProtocol !== null && requestedProtocol !== '1')
@@ -140,8 +149,8 @@ const executeRoute = async (context: RequestContext): Promise<Response> => {
     );
   }
 
-  const snapshotUpload = request.method === 'PUT' && isSnapshotUploadPath(pathname);
-  if (snapshotUpload && !isBinaryContentType(request)) {
+  const binaryBody = matchedRoute?.definition.bodyPolicy === 'binary';
+  if (binaryBody && !isBinaryContentType(request)) {
     return errorResponse(
       'UNSUPPORTED_CONTENT_TYPE',
       'Content-Type must be application/octet-stream.',
@@ -150,7 +159,11 @@ const executeRoute = async (context: RequestContext): Promise<Response> => {
     );
   }
 
-  if (!snapshotUpload && requiresJsonContentType(request) && !isJsonContentType(request)) {
+  if (
+    matchedRoute?.definition.bodyPolicy === 'json' &&
+    requiresJsonContentType(request) &&
+    !isJsonContentType(request)
+  ) {
     return errorResponse(
       'UNSUPPORTED_CONTENT_TYPE',
       'Content-Type must be application/json.',
@@ -168,6 +181,7 @@ const executeRoute = async (context: RequestContext): Promise<Response> => {
 
   await enforceEdgeRateLimit(request, context.accountingEnv ?? context.env);
   if (pathname === HEALTH_PATH && request.method === 'GET') return routeRequest(context);
+  if (!matchedRoute) return routeRequest(context);
   await usageBudget.reserveRoute(context);
   await recordAccountingSuccess(
     context,

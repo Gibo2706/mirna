@@ -561,7 +561,8 @@ export const handleUploadSnapshot = async (
           SET cleanup_after = ?3
         WHERE vault_id = ?1
           AND state = 'superseded'
-          AND revision <= ?2`,
+          AND revision <= ?2
+          AND cleanup_after > ?3`,
     ).bind(authenticated.vaultId, envelope.revision - limits.maxRetainedSnapshots, now),
   );
 

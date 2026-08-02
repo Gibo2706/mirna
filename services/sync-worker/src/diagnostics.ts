@@ -91,6 +91,17 @@ const clientEventSchema = z.strictObject({
     .string()
     .regex(/^[a-z][a-z0-9-]{0,63}$/u)
     .optional(),
+  faultRole: z.enum(['origin', 'blocked', 'none']).optional(),
+  originRequestId: z.string().regex(REQUEST_ID).optional(),
+  originRoute: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,63}$/u)
+    .optional(),
+  lifecycleOperation: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,63}$/u)
+    .optional(),
+  businessWorkStarted: z.boolean().optional(),
   businessCommitted: z.boolean().optional(),
   serviceFlagsChanged: z.boolean().optional(),
   workerBuild: z
@@ -278,6 +289,13 @@ export const handleBetaDiagnosticEvent = async (context: RequestContext): Promis
       ...(event.accountingReason ? { accountingReason: event.accountingReason } : {}),
       ...(event.reservationPhase ? { reservationPhase: event.reservationPhase } : {}),
       ...(event.route ? { route: event.route } : {}),
+      ...(event.faultRole ? { faultRole: event.faultRole } : {}),
+      ...(event.originRequestId ? { originRequestId: event.originRequestId } : {}),
+      ...(event.originRoute ? { originRoute: event.originRoute } : {}),
+      ...(event.lifecycleOperation ? { lifecycleOperation: event.lifecycleOperation } : {}),
+      ...(event.businessWorkStarted !== undefined
+        ? { businessWorkStarted: event.businessWorkStarted }
+        : {}),
       ...(event.businessCommitted !== undefined
         ? { businessCommitted: event.businessCommitted }
         : {}),

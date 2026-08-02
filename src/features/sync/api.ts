@@ -105,6 +105,17 @@ const accountingFailureSchema = z.strictObject({
   businessCommitted: z.boolean(),
   serviceFlagsChanged: z.boolean(),
   workerBuild: z.string().regex(/^(?:[0-9a-f]{7,64}|local|replace-at-deploy|unknown)$/u),
+  faultRole: z.enum(['origin', 'blocked', 'none']).optional(),
+  originRequestId: z.string().uuid().optional(),
+  originRoute: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,63}$/u)
+    .optional(),
+  lifecycleOperation: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,63}$/u)
+    .optional(),
+  businessWorkStarted: z.boolean().optional(),
 });
 
 export type AccountingFailure = z.output<typeof accountingFailureSchema>;
@@ -149,6 +160,8 @@ const healthResponseSchema = z.strictObject({
       accountingSchema: z.enum(['ok', 'error']),
       accountingState: z.enum(['ok', 'fault']),
       writes: z.enum(['enabled', 'disabled']),
+      routeBudgetConformance: z.enum(['ok', 'fault']),
+      routeBudgetRegistryVersion: z.string().regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}\.[1-9][0-9]*$/u),
     })
     .optional(),
 });
@@ -1325,6 +1338,11 @@ export class MirnaSyncApi {
         businessCommitted: error.accounting?.businessCommitted,
         serviceFlagsChanged: error.accounting?.serviceFlagsChanged,
         workerBuild: error.accounting?.workerBuild,
+        faultRole: error.accounting?.faultRole,
+        originRequestId: error.accounting?.originRequestId,
+        originRoute: error.accounting?.originRoute,
+        lifecycleOperation: error.accounting?.lifecycleOperation,
+        businessWorkStarted: error.accounting?.businessWorkStarted,
         online: navigator.onLine,
       });
     } catch {

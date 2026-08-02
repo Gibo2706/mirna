@@ -423,10 +423,40 @@ describe('staging usage budgets', () => {
     expect(Number(reservation?.measured_d1_rows_read)).toBeGreaterThan(0);
     expect(
       await env.MIRNA_SYNC_DB.prepare(
-        `SELECT accounting_fault, maintenance_mode, accept_writes
+        `SELECT accounting_fault, maintenance_mode, accept_writes, state_request_id
            FROM service_flags WHERE singleton_id = 1`,
-      ).first<Record<string, number>>(),
-    ).toEqual({ accounting_fault: 1, maintenance_mode: 0, accept_writes: 1 });
+      ).first<Record<string, number | string>>(),
+    ).toEqual({
+      accounting_fault: 1,
+      maintenance_mode: 0,
+      accept_writes: 1,
+      state_request_id: request.requestId,
+    });
+
+    const laterController = new UsageBudgetController(STAGING_BUDGETS, () => now + 1, {
+      'pairing-create': {
+        workerRequests: 0,
+        d1RowsRead: 0,
+        d1RowsWritten: 0,
+        r2ClassA: 0,
+        r2ClassB: 0,
+      },
+    });
+    const later = context('/v1/pairings', 'POST');
+    await laterController.reserveRoute(later);
+    const laterMeter = new RouteUsageMeter();
+    later.usageMeter = laterMeter;
+    later.env = laterMeter.wrapEnvironment(env);
+    later.businessCommit = { kind: 'pairing-create', committed: true, reconciled: false };
+    await later.env.MIRNA_SYNC_DB.prepare('SELECT vault_id FROM vaults LIMIT 1').all();
+    await expect(laterController.settle(later)).rejects.toMatchObject({
+      accounting: { serviceFlagsChanged: false },
+    });
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT state_request_id FROM service_flags WHERE singleton_id = 1',
+      ).first<string>('state_request_id'),
+    ).toBe(request.requestId);
     await env.MIRNA_SYNC_DB.prepare(
       `UPDATE service_flags
           SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,

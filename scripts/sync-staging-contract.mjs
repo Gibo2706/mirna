@@ -48,6 +48,7 @@ export const REQUIRED_ACCOUNTING_COLUMNS = Object.freeze({
     'r2_object_count',
     'd1_storage_bytes',
   ]),
+  pairing_request_totals: Object.freeze(['singleton_id', 'total_count', 'updated_at']),
 });
 
 export const STAGING_VERIFY_LIMITS = Object.freeze({
@@ -83,7 +84,12 @@ const verifyUsage = (errors, label, usage, limits) => {
   }
 };
 
-export const verifyStagingSnapshot = (snapshot, expectedMigrations, expectedBuild) => {
+export const verifyStagingSnapshot = (
+  snapshot,
+  expectedMigrations,
+  expectedBuild,
+  expectedRegistryVersion,
+) => {
   const errors = [];
   const applied = new Set(snapshot.migrations ?? []);
   const expected = new Set(expectedMigrations);
@@ -134,6 +140,17 @@ export const verifyStagingSnapshot = (snapshot, expectedMigrations, expectedBuil
     }
   }
 
+  const pairingTotals = snapshot.pairingTotals;
+  if (!pairingTotals || pairingTotals.row_count !== 1) {
+    errors.push('pairing_request_totals: singleton missing');
+  } else if (
+    !isNonNegativeInteger(pairingTotals.total_count) ||
+    !isNonNegativeInteger(pairingTotals.actual_count) ||
+    pairingTotals.total_count !== pairingTotals.actual_count
+  ) {
+    errors.push('pairing_request_totals: counter mismatch');
+  }
+
   verifyUsage(errors, 'global rolling', snapshot.rolling, STAGING_VERIFY_LIMITS.rolling);
   verifyUsage(errors, 'current daily', snapshot.daily, STAGING_VERIFY_LIMITS.daily);
 
@@ -167,6 +184,10 @@ export const verifyStagingSnapshot = (snapshot, expectedMigrations, expectedBuil
 
   const health = snapshot.health;
   if (!health || health.buildCommit !== expectedBuild) errors.push('Worker: build mismatch');
+  if (snapshot.healthHttpStatus !== undefined && snapshot.healthHttpStatus !== 200) {
+    errors.push('Worker: health HTTP status is not ready');
+  }
+  if (health?.status !== 'ok') errors.push('Worker: health status is not ready');
   if (!health || health.services?.d1 !== 'ok' || health.services?.r2 !== 'ok') {
     errors.push('Worker: storage reachability failed');
   }
@@ -176,6 +197,9 @@ export const verifyStagingSnapshot = (snapshot, expectedMigrations, expectedBuil
     health.readiness.storage !== 'ok' ||
     health.readiness.accountingSchema !== 'ok' ||
     health.readiness.accountingState !== 'ok' ||
+    health.readiness.routeBudgetConformance !== 'ok' ||
+    (expectedRegistryVersion !== undefined &&
+      health.readiness.routeBudgetRegistryVersion !== expectedRegistryVersion) ||
     health.readiness.writes !== 'enabled'
   ) {
     errors.push('Worker: accounting readiness failed');

@@ -6,6 +6,7 @@ export const ACTIVE_SYNC_VAULT_RECORD_ID = 'active-sync-vault' as const;
 export const LOCAL_SYNC_DEVICE_RECORD_ID = 'local-sync-device' as const;
 export const SYNC_METADATA_RECORD_ID = 'sync-metadata' as const;
 export const SYNC_CHECKPOINT_RECORD_ID = 'sync-safety-checkpoint' as const;
+export const SYNC_PAIRING_FINALIZATION_RECORD_ID = 'sync-pairing-finalization' as const;
 
 export const localVaultKeyRecordId = (vaultId: string, keyEpoch: number): string =>
   `${vaultId}:epoch:${keyEpoch}:vault-master-key`;
@@ -173,4 +174,18 @@ export interface LocalSyncSetup {
   device: SyncDeviceRecord;
   vaultKey: SyncKeyRecord;
   metadata: SyncMetadataRecord;
+}
+
+export interface SyncPairingFinalizationRecord {
+  id: typeof SYNC_PAIRING_FINALIZATION_RECORD_ID;
+  version: 1;
+  requestId: string;
+  vaultId: string;
+  deviceId: string;
+  manifestVersion: number;
+  manifestHash: string;
+  nonce: string;
+  ciphertext: string;
+  setup: LocalSyncSetup;
+  createdAt: string;
 }

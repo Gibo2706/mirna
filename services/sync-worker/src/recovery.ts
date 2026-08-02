@@ -691,13 +691,15 @@ export const handleCompleteRecovery = async (
         Date.parse(newDevice.authorizationExpiresAt),
       ),
       context.env.MIRNA_SYNC_DB.prepare(
-        `UPDATE access_sessions SET revoked_at = ?2 WHERE vault_id = ?1 AND revoked_at IS NULL`,
+        `UPDATE access_sessions SET revoked_at = ?2
+          WHERE vault_id = ?1 AND revoked_at IS NULL AND expires_at > ?2`,
       ).bind(row.vault_id, now),
       context.env.MIRNA_SYNC_DB.prepare(
         `UPDATE pairing_requests
           SET status = 'cancelled', cancelled_at = ?2
         WHERE vault_id = ?1
-          AND status IN ('pending', 'approved')`,
+          AND status IN ('pending', 'approved')
+          AND expires_at > ?2`,
       ).bind(row.vault_id, now),
       context.env.MIRNA_SYNC_DB.prepare(
         `UPDATE recovery_records

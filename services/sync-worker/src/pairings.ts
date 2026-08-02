@@ -31,7 +31,8 @@ import {
 } from '../../../src/domain/sync/schemas';
 import { authenticateRequest, consumeSensitiveChallenge, type AuthenticatedDevice } from './auth';
 import { assertFreshDeviceAuthorization } from './authorization';
-import type { RequestContext } from './context';
+import { assertNewPairingMutationAllowed } from './budget';
+import { markBusinessCommit, type RequestContext } from './context';
 import { conflict, forbidden, HttpError, notFound } from './errors';
 import { jsonResponse } from './http';
 import { readWorkerLimits } from './limits';
@@ -60,6 +61,8 @@ interface PairingRequestRow {
   max_attempts: number;
   created_at: number;
   expires_at: number;
+  finalized_at: number | null;
+  cancelled_at: number | null;
   finalization_hash: ArrayBuffer | null;
 }
 
@@ -143,13 +146,14 @@ const pairingById = (
     .first<PairingRequestRow>();
 
 const recordFailedClaim = async (
-  database: D1Database,
+  context: RequestContext,
   pairingRequestId: string,
   now: number,
-): Promise<void> => {
-  await database
-    .prepare(
-      `UPDATE pairing_requests
+  route: 'pairing-inspect' | 'pairing-approve',
+): Promise<boolean> => {
+  await assertNewPairingMutationAllowed(context, route);
+  const result = await context.env.MIRNA_SYNC_DB.prepare(
+    `UPDATE pairing_requests
           SET failed_attempts = MIN(failed_attempts + 1, max_attempts),
               status = CASE
                 WHEN failed_attempts + 1 >= max_attempts THEN 'cancelled'
@@ -162,13 +166,13 @@ const recordFailedClaim = async (
         WHERE pairing_request_id = ?1
           AND status = 'pending'
           AND expires_at > ?2`,
-    )
+  )
     .bind(pairingRequestId, now)
     .run();
+  return result.meta.changes === 1;
 };
 
 export const handleCreatePairing = async (context: RequestContext): Promise<Response> => {
-  await requireTurnstile(context, 'mirna_pairing_create');
   const input = await readCanonicalJson(context.request, pairingCreateRequestSchema);
   await assertValidDevicePublicKeys(input.publicKeys);
   const existingBeforeInsert = await pairingById(context.env.MIRNA_SYNC_DB, input.requestId);
@@ -176,8 +180,11 @@ export const handleCreatePairing = async (context: RequestContext): Promise<Resp
     if (!isExactPairingRetry(existingBeforeInsert, input)) {
       throw conflict('PAIRING_ID_REUSED', 'Pairing identifier was already used.');
     }
+    markBusinessCommit(context, 'pairing-create', true);
     return pairingCreateResponse(context, input, existingBeforeInsert.expires_at, false);
   }
+  await assertNewPairingMutationAllowed(context, 'pairing-create');
+  await requireTurnstile(context, 'mirna_pairing_create');
   const now = Date.now();
   const activeForDevice = await context.env.MIRNA_SYNC_DB.prepare(
     `SELECT COUNT(*) AS count
@@ -202,6 +209,7 @@ export const handleCreatePairing = async (context: RequestContext): Promise<Resp
          expires_at, finalized_at, cancelled_at, finalization_hash
        )
        SELECT ?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, 5, ?8, ?9, NULL, NULL, NULL
+         FROM pairing_request_totals totals
         WHERE (
           SELECT COUNT(*)
             FROM pairing_requests
@@ -209,7 +217,8 @@ export const handleCreatePairing = async (context: RequestContext): Promise<Resp
              AND status IN ('pending', 'approved')
              AND expires_at > ?8
         ) < 3
-          AND (SELECT COUNT(*) FROM pairing_requests) < ?10`,
+          AND totals.singleton_id = 1
+          AND totals.total_count < ?10`,
     )
       .bind(
         input.requestId,
@@ -224,7 +233,9 @@ export const handleCreatePairing = async (context: RequestContext): Promise<Resp
         limits.maxTotalPairingRequests,
       )
       .run();
-    if (inserted.meta.changes !== 1) {
+    // The pairing-total trigger contributes its own changed row to provider
+    // metadata, so a successful insert may report more than one change.
+    if ((inserted.meta.changes ?? 0) < 1) {
       throw new HttpError(429, 'PAIRING_LIMIT_REACHED', 'Too many active pairing requests.');
     }
   } catch (error) {
@@ -236,9 +247,11 @@ export const handleCreatePairing = async (context: RequestContext): Promise<Resp
     if (!isExactPairingRetry(existing, input)) {
       throw conflict('PAIRING_ID_REUSED', 'Pairing identifier was already used.');
     }
+    markBusinessCommit(context, 'pairing-create', true);
     return pairingCreateResponse(context, input, existing.expires_at, false);
   }
 
+  markBusinessCommit(context, 'pairing-create');
   return pairingCreateResponse(context, input, expiresAt, true);
 };
 
@@ -247,13 +260,16 @@ const inspectPairing = async (
   pairingRequestId: string,
   claimToken: string,
   allowApproved = false,
+  mutationRoute: 'pairing-inspect' | 'pairing-approve' = 'pairing-inspect',
 ): Promise<PairingRequestRow> => {
   const now = Date.now();
   let claimHash: string;
   try {
     claimHash = await hashPairingClaimToken(base64UrlToBytes(claimToken));
   } catch {
-    await recordFailedClaim(context.env.MIRNA_SYNC_DB, pairingRequestId, now);
+    if (await recordFailedClaim(context, pairingRequestId, now, mutationRoute)) {
+      markBusinessCommit(context, 'pairing-inspect-lockout');
+    }
     throw notFound();
   }
   const row = await context.env.MIRNA_SYNC_DB.prepare(
@@ -269,7 +285,9 @@ const inspectPairing = async (
     .bind(pairingRequestId, encodedToDatabaseBlob(claimHash, 32), now)
     .first<PairingRequestRow>();
   if (!row || (!allowApproved && row.status !== 'pending')) {
-    await recordFailedClaim(context.env.MIRNA_SYNC_DB, pairingRequestId, now);
+    if (await recordFailedClaim(context, pairingRequestId, now, mutationRoute)) {
+      markBusinessCommit(context, 'pairing-inspect-lockout');
+    }
     throw notFound();
   }
   return row;
@@ -317,6 +335,7 @@ export const handleInspectPairing = async (
   pairingRequestId: string,
 ): Promise<Response> => {
   const input = await readCanonicalJson(context.request, pairingInspectRequestSchema);
+  await assertNewPairingMutationAllowed(context, 'pairing-inspect');
   const row = await inspectPairing(context, pairingRequestId, input.claimToken);
   return jsonResponse(
     pairingCandidateSchema.parse({
@@ -452,16 +471,15 @@ export const handleApprovePairing = async (
     throw forbidden('PAIRING_CONTEXT_MISMATCH', 'Pairing request identifier does not match.');
   }
   const authenticated = await authenticateRequest(context);
-  const request = await inspectPairing(context, pairingRequestId, input.claimToken, true);
+  const request = await inspectPairing(
+    context,
+    pairingRequestId,
+    input.claimToken,
+    true,
+    'pairing-approve',
+  );
   const limits = readWorkerLimits(context.env);
   if (request.status !== 'pending') {
-    await consumeSensitiveChallenge(
-      context,
-      input.sensitiveChallenge,
-      input.sensitiveSignature,
-      '/v1/pairings/approve',
-      authenticated.deviceId,
-    );
     const retry = await exactStoredApproval(
       context,
       request,
@@ -470,9 +488,13 @@ export const handleApprovePairing = async (
       input.candidateManifest,
       await hashDomainSeparatedCanonical(SYNC_DOMAIN_LABELS.pairingEnvelopeHash, input.envelope),
     );
-    if (retry) return retry;
+    if (retry) {
+      markBusinessCommit(context, 'pairing-approve', true);
+      return retry;
+    }
     throw conflict('PAIRING_STATE_CHANGED', 'Pairing approval is incomplete.');
   }
+  await assertNewPairingMutationAllowed(context, 'pairing-approve');
   const currentPairings = await context.env.MIRNA_SYNC_DB.prepare(
     `SELECT COUNT(*) AS count
        FROM pairing_requests
@@ -557,7 +579,10 @@ export const handleApprovePairing = async (
       input.candidateManifest,
       verified.envelopeHash,
     );
-    if (raced) return raced;
+    if (raced) {
+      markBusinessCommit(context, 'pairing-approve', true);
+      return raced;
+    }
     throw conflict('PAIRING_STATE_CHANGED', 'Pairing request is no longer pending.');
   }
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
@@ -569,10 +594,14 @@ export const handleApprovePairing = async (
       input.candidateManifest,
       verified.envelopeHash,
     );
-    if (raced) return raced;
+    if (raced) {
+      markBusinessCommit(context, 'pairing-approve', true);
+      return raced;
+    }
     throw conflict('PAIRING_STATE_CHANGED', 'Pairing request is no longer pending.');
   }
 
+  markBusinessCommit(context, 'pairing-approve');
   return jsonResponse(
     { protocolVersion: 1, status: 'approved', expiresAt: isoTimestamp(request.expires_at) },
     { requestId: context.requestId, allowedOrigin: context.allowedOrigin },
@@ -616,7 +645,13 @@ export const handlePollPairing = async (
   const row = await storedEnvelope(context, pairingRequestId, input.pollingToken);
   if (!row) throw notFound();
   const status =
-    row.expires_at <= Date.now() ? 'expired' : row.status === 'finalized' ? 'consumed' : row.status;
+    row.status === 'finalized'
+      ? 'consumed'
+      : row.status === 'cancelled'
+        ? 'cancelled'
+        : row.expires_at <= Date.now()
+          ? 'expired'
+          : row.status;
   const response =
     status === 'approved'
       ? {
@@ -642,8 +677,24 @@ export const handleCancelPairing = async (
   pairingRequestId: string,
 ): Promise<Response> => {
   const input = await readCanonicalJson(context.request, pairingCancelRequestSchema);
-  const tokenHash = await pollingHash(input.pollingToken).catch(() => null);
-  if (!tokenHash) throw notFound();
+  const existing = await storedEnvelope(context, pairingRequestId, input.pollingToken);
+  if (!existing) throw notFound();
+  if (existing.status === 'cancelled' && existing.cancelled_at !== null) {
+    markBusinessCommit(context, 'pairing-cancel', true);
+    return jsonResponse(
+      {
+        protocolVersion: 1,
+        status: 'cancelled',
+        expiresAt: isoTimestamp(existing.cancelled_at),
+      },
+      { requestId: context.requestId, allowedOrigin: context.allowedOrigin },
+    );
+  }
+  if (existing.status === 'finalized') {
+    throw conflict('PAIRING_ALREADY_FINALIZED', 'Finalized pairing cannot be cancelled.');
+  }
+  await assertNewPairingMutationAllowed(context, 'pairing-cancel');
+  const tokenHash = await pollingHash(input.pollingToken);
   const now = Date.now();
   const result = await context.env.MIRNA_SYNC_DB.prepare(
     `UPDATE pairing_requests
@@ -656,6 +707,7 @@ export const handleCancelPairing = async (
     .bind(pairingRequestId, toDatabaseBlob(tokenHash), now)
     .run();
   if (result.meta.changes !== 1) throw notFound();
+  markBusinessCommit(context, 'pairing-cancel');
   return jsonResponse(
     { protocolVersion: 1, status: 'cancelled', expiresAt: isoTimestamp(now) },
     { requestId: context.requestId, allowedOrigin: context.allowedOrigin },
@@ -731,6 +783,17 @@ export const handleFinalizePairing = async (
     SYNC_DOMAIN_LABELS.pairingFinalize,
     input.transcript,
   );
+  const newDeviceSigningKey = await importSigningPublicKey(newDevice.publicKeys.signing);
+  if (
+    !(await verifyDomainSeparatedCanonicalSignature(
+      SYNC_DOMAIN_LABELS.pairingFinalize,
+      input.transcript,
+      input.signature,
+      newDeviceSigningKey,
+    ))
+  ) {
+    throw forbidden('PAIRING_FINALIZATION_SIGNATURE_INVALID', 'Finalization signature is invalid.');
+  }
   if (stored.status === 'finalized' && stored.finalization_hash) {
     const retry = await exactFinalizedPairing(
       context,
@@ -739,7 +802,10 @@ export const handleFinalizePairing = async (
       finalizationHash,
       input.transcript.newDeviceId,
     );
-    if (retry) return retry;
+    if (retry) {
+      markBusinessCommit(context, 'pairing-finalize', true);
+      return retry;
+    }
     throw conflict('PAIRING_ALREADY_FINALIZED', 'Pairing was finalized with different data.');
   }
   const envelopeHash = bytesToBase64Url(databaseBytes(stored.envelope_hash));
@@ -759,17 +825,7 @@ export const handleFinalizePairing = async (
       'Pairing finalization does not match approval.',
     );
   }
-  const newDeviceSigningKey = await importSigningPublicKey(newDevice.publicKeys.signing);
-  if (
-    !(await verifyDomainSeparatedCanonicalSignature(
-      SYNC_DOMAIN_LABELS.pairingFinalize,
-      input.transcript,
-      input.signature,
-      newDeviceSigningKey,
-    ))
-  ) {
-    throw forbidden('PAIRING_FINALIZATION_SIGNATURE_INVALID', 'Finalization signature is invalid.');
-  }
+  await assertNewPairingMutationAllowed(context, 'pairing-finalize');
   const current = await currentVault(context.env.MIRNA_SYNC_DB, stored.vault_id ?? '');
   if (!current || current.current_manifest_version + 1 !== candidateManifest.manifestVersion) {
     throw conflict('MANIFEST_STATE_CHANGED', 'Vault manifest changed during pairing.');
@@ -868,7 +924,10 @@ export const handleFinalizePairing = async (
       finalizationHash,
       input.transcript.newDeviceId,
     );
-    if (raced) return raced;
+    if (raced) {
+      markBusinessCommit(context, 'pairing-finalize', true);
+      return raced;
+    }
     throw conflict('PAIRING_FINALIZATION_CONFLICT', 'Pairing finalization lost its state race.');
   }
   if (results.some((result) => result.meta.changes !== 1)) {
@@ -879,10 +938,14 @@ export const handleFinalizePairing = async (
       finalizationHash,
       input.transcript.newDeviceId,
     );
-    if (raced) return raced;
+    if (raced) {
+      markBusinessCommit(context, 'pairing-finalize', true);
+      return raced;
+    }
     throw conflict('PAIRING_FINALIZATION_CONFLICT', 'Pairing finalization lost its state race.');
   }
 
+  markBusinessCommit(context, 'pairing-finalize');
   return jsonResponse(
     pairingFinalizeResponseSchema.parse({
       protocolVersion: 1,

@@ -43,6 +43,11 @@ export interface AccountingFailureDetails {
   readonly businessCommitted: boolean;
   readonly serviceFlagsChanged: boolean;
   readonly workerBuild: string;
+  readonly faultRole: 'origin' | 'blocked' | 'none';
+  readonly originRequestId?: string;
+  readonly originRoute?: string;
+  readonly lifecycleOperation: string;
+  readonly businessWorkStarted: boolean;
 }
 
 export class HttpError extends Error {

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { estimateScheduledCleanupUsage } from '../src/budget';
 import {
   planScheduledCleanup,
+  runScheduledCleanup,
   scheduledCleanupEstimateInput,
   scheduledCleanupHasWork,
   type ScheduledCleanupPlan,
@@ -226,27 +227,6 @@ const seedExpiredData = async (): Promise<void> => {
       NOW - 2_000,
       NOW + 1_000,
     ),
-    env.MIRNA_SYNC_DB.prepare(
-      `INSERT INTO deletion_requests (
-         deletion_request_id, vault_id, requested_by_device_id,
-         idempotency_key_hash, authorization_transcript_hash,
-         authorization_signature, second_factor_proof_hash, state,
-         created_at, updated_at, expires_at, stale_after, retention_expires_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'deleting_r2', ?8, ?9, ?10, ?11, ?12)`,
-    ).bind(
-      'deletion-request-001',
-      SEEDED_VAULT_ID,
-      SEEDED_DEVICE_ID,
-      bytes(32, 24),
-      bytes(32, 25),
-      bytes(64, 26),
-      bytes(32, 27),
-      NOW - 10_000,
-      NOW - 5_000,
-      NOW - 4_000,
-      NOW - 1_000,
-      NOW + 5_000,
-    ),
   ]);
 };
 
@@ -290,6 +270,8 @@ describe('scheduled cleanup', () => {
   it('scales one-item and maximum-batch reservations from inspected work', () => {
     const plan = (overrides: Partial<ScheduledCleanupPlan>): ScheduledCleanupPlan => ({
       inspectedRows: 0,
+      deletionRows: 0,
+      resumedDeletionRequestIds: [],
       authChallenges: 0,
       recoveryChallenges: 0,
       accessSessions: 0,
@@ -312,6 +294,8 @@ describe('scheduled cleanup', () => {
       authChallenges: 1_000,
       snapshots: 10,
       deletionRequests: 3,
+      deletionRows: 100,
+      resumedDeletionRequestIds: ['A'.repeat(22), 'B'.repeat(22), 'C'.repeat(22)],
       resumedDeletionRequests: 3,
       reconcileR2: true,
     });
@@ -345,16 +329,6 @@ describe('scheduled cleanup', () => {
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_envelopes')).toBe(1);
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_requests')).toBe(1);
 
-    const deletionState = await env.MIRNA_SYNC_DB.prepare(
-      `SELECT state, safe_error_code
-         FROM deletion_requests
-        WHERE deletion_request_id = 'deletion-request-001'`,
-    ).first<{ state: string; safe_error_code: string }>();
-    expect(deletionState).toEqual({
-      state: 'failed',
-      safe_error_code: 'STALE_JOB_RETRY_REQUIRED',
-    });
-
     await runCron();
     expect(await scalar('SELECT COUNT(*) AS count FROM snapshots')).toBe(1);
     expect(await scalar('SELECT COUNT(*) AS count FROM sync_changes')).toBe(0);
@@ -365,5 +339,73 @@ describe('scheduled cleanup', () => {
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_envelopes')).toBe(0);
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_requests')).toBe(0);
     expect(await scalar('SELECT COUNT(*) AS count FROM recovery_challenges')).toBe(0);
+  });
+
+  it('executes only the deletion IDs captured by the inspected plan', async () => {
+    const deletionVaultId = opaqueId(80);
+    const deletionDeviceId = opaqueId(81);
+    await env.MIRNA_SYNC_DB.batch([
+      env.MIRNA_SYNC_DB.prepare(
+        `INSERT INTO vaults (
+           vault_id, protocol_version, crypto_suite, status, current_key_epoch,
+           current_manifest_version, current_snapshot_revision, created_at, updated_at
+         ) VALUES (?1, 1, ?2, 'deleting', 1, 0, 0, ?3, ?3)`,
+      ).bind(deletionVaultId, 'MIRNA-E2EE-P256-HKDF-SHA256-AES256GCM-V1', NOW - 10_000),
+      env.MIRNA_SYNC_DB.prepare(
+        `INSERT INTO devices (
+           vault_id, device_id, signing_public_key_raw, agreement_public_key_raw,
+           status, added_in_manifest_version, created_at
+         ) VALUES (?1, ?2, ?3, ?4, 'active', 1, ?5)`,
+      ).bind(
+        deletionVaultId,
+        deletionDeviceId,
+        rawP256PublicKey(82),
+        rawP256PublicKey(83),
+        NOW - 9_000,
+      ),
+    ]);
+    const insertDeletion = async (requestId: string, hashByte: number, updatedAt: number) => {
+      await env.MIRNA_SYNC_DB.prepare(
+        `INSERT INTO deletion_requests (
+           deletion_request_id, vault_id, requested_by_device_id,
+           idempotency_key_hash, authorization_transcript_hash,
+           authorization_signature, second_factor_proof_hash, state,
+           created_at, updated_at, expires_at, stale_after, retention_expires_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?11, ?12)`,
+      )
+        .bind(
+          requestId,
+          deletionVaultId,
+          deletionDeviceId,
+          bytes(32, hashByte),
+          bytes(32, hashByte + 1),
+          bytes(64, hashByte + 2),
+          bytes(32, hashByte + 3),
+          NOW - 10_000,
+          updatedAt,
+          NOW + 1_000,
+          NOW + 2_000,
+          NOW + 20_000,
+        )
+        .run();
+    };
+
+    await insertDeletion('deletion-request-old', 51, NOW - 1_000);
+    const inspected = await planScheduledCleanup(env, NOW);
+    expect(inspected.resumedDeletionRequestIds).toEqual(['deletion-request-old']);
+
+    await insertDeletion('deletion-request-new', 61, NOW);
+    await runScheduledCleanup(env, NOW, inspected);
+
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT state FROM deletion_requests WHERE deletion_request_id = 'deletion-request-old'`,
+      ).first<string>('state'),
+    ).toBe('completed');
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT state FROM deletion_requests WHERE deletion_request_id = 'deletion-request-new'`,
+      ).first<string>('state'),
+    ).toBe('pending');
   });
 });

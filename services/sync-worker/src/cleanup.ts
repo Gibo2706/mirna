@@ -33,6 +33,8 @@ export interface CleanupResult {
 
 export interface ScheduledCleanupPlan extends CleanupResult {
   readonly inspectedRows: number;
+  readonly deletionRows: number;
+  readonly resumedDeletionRequestIds: readonly string[];
   readonly resumedDeletionRequests: number;
   readonly staleDeletionRequests: number;
   readonly retainedDeletionRequests: number;
@@ -69,6 +71,7 @@ export const scheduledCleanupEstimateInput = (
     plan.betaDiagnosticEvents,
   snapshotRows: plan.snapshots,
   deletionRequests: plan.deletionRequests,
+  deletionRows: plan.deletionRows,
   reconcileR2: plan.reconcileR2,
 });
 
@@ -175,23 +178,71 @@ export const planScheduledCleanup = async (
   const pairingRequests = takeOrdinaryRows(row.pairingRequests);
   const syncChanges = takeOrdinaryRows(row.syncChanges);
   const betaDiagnosticEvents = takeOrdinaryRows(row.betaDiagnosticEvents);
-  const resumedDeletionRequests = Math.min(row.resumedDeletionRequests ?? 0, 3);
+  const resumedDeletionRequestIds =
+    row.resumedDeletionRequests === 0
+      ? []
+      : (
+          await env.MIRNA_SYNC_DB.prepare(
+            `SELECT deletion_request_id
+               FROM deletion_requests
+              WHERE state IN ('pending', 'deleting_r2', 'deleting_d1', 'failed')
+                AND retention_expires_at > ?1
+              ORDER BY updated_at, deletion_request_id
+              LIMIT 3`,
+          )
+            .bind(now)
+            .all<{ deletion_request_id: string }>()
+        ).results.map(({ deletion_request_id }) => deletion_request_id);
+  const resumedDeletionRequests = resumedDeletionRequestIds.length;
   const staleDeletionRequests = Math.min(row.staleDeletionRequests ?? 0, 3);
   const retainedDeletionRequests = Math.min(row.retainedDeletionRequests ?? 0, 3);
+  const deletionRows =
+    resumedDeletionRequests === 0
+      ? 0
+      : ((await env.MIRNA_SYNC_DB.prepare(
+          `WITH deletion_vaults AS (
+             SELECT vault_id
+               FROM deletion_requests
+              WHERE deletion_request_id IN (${resumedDeletionRequestIds.map((_, index) => `?${index + 1}`).join(', ')})
+           )
+           SELECT
+             (SELECT COUNT(*) FROM vaults WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM devices WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM vault_manifests WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM device_grants WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM auth_challenges WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM access_sessions WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM pairing_requests WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM pairing_envelopes WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM recovery_records WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM snapshots WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM sync_changes WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM device_acknowledgements WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM device_key_envelopes WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM device_security_transitions WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM resource_inventory WHERE vault_id IN (SELECT vault_id FROM deletion_vaults)) +
+             (SELECT COUNT(*) FROM vault_resource_totals WHERE vault_id IN (SELECT vault_id FROM deletion_vaults))
+             AS row_count`,
+        )
+          .bind(...resumedDeletionRequestIds)
+          .first<number>('row_count')) ?? 0);
   return {
-    inspectedRows: [
-      row.authChallenges,
-      row.recoveryChallenges,
-      row.accessSessions,
-      row.pairingEnvelopes,
-      row.pairingRequests,
-      row.snapshots,
-      row.syncChanges,
-      row.resumedDeletionRequests,
-      row.staleDeletionRequests,
-      row.retainedDeletionRequests,
-      row.betaDiagnosticEvents,
-    ].reduce((total, count) => total + (count ?? 0), 0),
+    inspectedRows:
+      [
+        row.authChallenges,
+        row.recoveryChallenges,
+        row.accessSessions,
+        row.pairingEnvelopes,
+        row.pairingRequests,
+        row.snapshots,
+        row.syncChanges,
+        row.resumedDeletionRequests,
+        row.staleDeletionRequests,
+        row.retainedDeletionRequests,
+        row.betaDiagnosticEvents,
+      ].reduce((total, count) => total + (count ?? 0), 0) + deletionRows,
+    deletionRows,
+    resumedDeletionRequestIds,
     authChallenges,
     recoveryChallenges,
     accessSessions,
@@ -393,7 +444,9 @@ export const runScheduledCleanup = async (
         );
 
   const resumedDeletionRequests =
-    plan.resumedDeletionRequests === 0 ? 0 : await resumePendingVaultDeletions(env);
+    plan.resumedDeletionRequests === 0
+      ? 0
+      : await resumePendingVaultDeletions(env, plan.resumedDeletionRequestIds, now);
 
   const staleDeletionRequests =
     plan.staleDeletionRequests === 0

@@ -2,6 +2,7 @@ import QRCode from 'qrcode';
 import { db } from '@/db/database';
 import { probeIndexedDbCryptoKeyPersistence } from '@/db/sync/capability';
 import { disableSyncOnThisDevice, readLocalSyncSetup } from '@/db/sync/repository';
+import { hasPendingPairingFinalization } from '@/db/sync/pairing-finalization-checkpoint';
 import type { LocalSyncSetup, SyncConflictRecord } from '@/db/sync/records';
 import {
   SyncConflictRepository,
@@ -45,6 +46,7 @@ export interface NewDevicePairingLifecyclePort {
   start(displayName: string): Promise<PairingCodePresentation>;
   poll(): Promise<PairingPollResult>;
   confirmSas(sas: string): Promise<LocalSyncSetup>;
+  resumeFinalization(): Promise<LocalSyncSetup>;
   cancel(): Promise<void>;
 }
 
@@ -64,6 +66,7 @@ export interface SyncUiLocalStatus {
   readonly pendingConflictCount: number;
   readonly pendingLocalOperationCount: number;
   readonly pendingConflicts: readonly SyncConflictRecord[];
+  readonly pendingPairingFinalization: boolean;
 }
 
 export interface SyncUiServices {
@@ -193,7 +196,10 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
     dispose: () => turnstile.dispose(),
     probeCapability: probeIndexedDbCryptoKeyPersistence,
     loadLocalStatus: async () => {
-      const setup = await readLocalSyncSetup();
+      const [setup, pendingPairingFinalization] = await Promise.all([
+        readLocalSyncSetup(),
+        hasPendingPairingFinalization(),
+      ]);
       const pendingConflicts = setup
         ? await db.syncConflicts
             .where('vaultId')
@@ -209,6 +215,7 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
         pendingConflictCount: pendingConflicts.length,
         pendingLocalOperationCount,
         pendingConflicts,
+        pendingPairingFinalization,
       };
     },
     disableLocalDevice: disableSyncOnThisDevice,

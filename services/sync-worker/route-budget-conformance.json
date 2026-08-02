@@ -1,0 +1,7 @@
+{
+  "registryVersion": "2026-08-02.1",
+  "status": "registry-complete",
+  "routeCount": 27,
+  "suite": "npm run sync:route-budget:verify",
+  "coverage": "complete-worker-runtime-suite-with-source-derived-bounds"
+}

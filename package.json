@@ -31,6 +31,7 @@
     "sync:types:check": "npm run sync:types -- --check",
     "sync:test": "vitest run src/domain/sync src/db/sync src/features/sync",
     "sync:test:worker": "vitest run --config services/sync-worker/vitest.config.ts",
+    "sync:route-budget:verify": "vitest run --config services/sync-worker/vitest.config.ts",
     "sync:test:crypto": "vitest run src/domain/sync/canonical.test.ts src/domain/sync/encoding.test.ts src/domain/sync/crypto.test.ts src/domain/sync/crypto-vectors.test.ts src/domain/sync/manifest.test.ts",
     "sync:test:e2e": "playwright test --config playwright.sync.config.ts",
     "sync:migrations:local": "wrangler d1 migrations apply mirna-sync-local --local --config services/sync-worker/wrangler.jsonc",

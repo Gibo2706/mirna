@@ -72,6 +72,7 @@ import {
 } from './protocol-fixtures';
 
 interface PendingPairing {
+  accountingRequestId: string;
   requestId: string;
   newDeviceId: string;
   newDeviceKeys: Awaited<ReturnType<typeof generateDeviceKeyPairs>>;
@@ -101,6 +102,30 @@ const domainHash = async (label: string, value: Uint8Array): Promise<string> =>
 
 const errorCode = async (response: Response): Promise<string | undefined> =>
   (await response.json<{ error?: { code?: string } }>()).error?.code;
+
+const expectRouteConformance = async (requestId: string, routeKey: string): Promise<void> => {
+  const reservation = await env.MIRNA_SYNC_DB.prepare(
+    `SELECT route_key, reserved_d1_rows_read, reserved_d1_rows_written,
+            reserved_r2_class_a, reserved_r2_class_b, measurement_exact,
+            measured_d1_rows_read, measured_d1_rows_written,
+            measured_r2_class_a, measured_r2_class_b, settlement_failure_code
+       FROM usage_reservations
+      WHERE reservation_id = ?1`,
+  )
+    .bind(`${requestId}:route`)
+    .first<Record<string, number | string | null>>();
+  expect(reservation?.route_key).toBe(routeKey);
+  expect(reservation?.measurement_exact).toBe(1);
+  expect(reservation?.settlement_failure_code).toBeNull();
+  for (const resource of ['d1_rows_read', 'd1_rows_written', 'r2_class_a', 'r2_class_b']) {
+    const reserved = Number(reservation?.[`reserved_${resource}`]);
+    const measured = Number(reservation?.[`measured_${resource}`]);
+    expect(
+      measured,
+      `${routeKey} ${resource}: reserved=${reserved}, measured=${measured}, diff=${measured - reserved}`,
+    ).toBeLessThanOrEqual(reserved);
+  }
+};
 
 const createPendingPairing = async (
   options: { newDeviceId?: string } = {},
@@ -133,8 +158,11 @@ const createPendingPairing = async (
     pollingTokenHash: await domainHash(SYNC_DOMAIN_LABELS.pollingTokenHash, pollingTokenBytes),
   });
   expect(response.status).toBe(201);
+  const accountingRequestId = response.headers.get('X-Request-Id');
+  if (!accountingRequestId) throw new Error('Pairing response omitted its accounting Request ID.');
   const body = pairingCreateResponseSchema.parse(await response.json());
   return {
+    accountingRequestId,
     requestId,
     newDeviceId,
     newDeviceKeys,
@@ -362,6 +390,11 @@ const finalizeApprovedPairing = async (
   });
 
 describe('Phase 1 pairing request lifecycle', () => {
+  it('settles the real pairing-create path within its explicit route reservation', async () => {
+    const pairing = await createPendingPairing();
+    await expectRouteConformance(pairing.accountingRequestId, 'pairing-create');
+  });
+
   it('creates and inspects only with the claim token while keeping polling authority separate', async () => {
     const pairing = await createPendingPairing();
     const inspected = await postCanonical(`/v1/pairings/${pairing.requestId}/inspect`, {
@@ -546,7 +579,14 @@ describe('Phase 1 pairing request lifecycle', () => {
       pollingToken: cancellable.pollingToken,
     });
     expect(cancelled.status).toBe(200);
-    expect(await cancelled.json()).toMatchObject({ status: 'cancelled' });
+    const cancelledBody = await cancelled.json();
+    expect(cancelledBody).toMatchObject({ status: 'cancelled' });
+    const repeatedCancel = await postCanonical(`/v1/pairings/${cancellable.requestId}/cancel`, {
+      protocolVersion: 1,
+      pollingToken: cancellable.pollingToken,
+    });
+    expect(repeatedCancel.status).toBe(200);
+    expect(await repeatedCancel.json()).toEqual(cancelledBody);
 
     const expired = await createPendingPairing();
     const expiredAt = Date.now() - 1;
@@ -566,6 +606,18 @@ describe('Phase 1 pairing request lifecycle', () => {
     });
     expect(pollExpired.status).toBe(200);
     expect(pairingPollResponseSchema.parse(await pollExpired.json()).status).toBe('expired');
+
+    await env.MIRNA_SYNC_DB.prepare(
+      `UPDATE pairing_requests SET created_at = ?2, expires_at = ?3
+        WHERE pairing_request_id = ?1`,
+    )
+      .bind(cancellable.requestId, expiredAt - 1_000, expiredAt)
+      .run();
+    const pollCancelled = await postCanonical(`/v1/pairings/${cancellable.requestId}/poll`, {
+      protocolVersion: 1,
+      pollingToken: cancellable.pollingToken,
+    });
+    expect(pairingPollResponseSchema.parse(await pollCancelled.json()).status).toBe('cancelled');
   });
 });
 

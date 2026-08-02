@@ -30,6 +30,7 @@ import {
   type VaultManifestV1,
 } from '@/domain/sync/schemas';
 import type { LocalSyncSetup } from '@/db/sync/records';
+import type { PendingPairingFinalization } from '@/db/sync/pairing-finalization-checkpoint';
 import type { MirnaSyncApi } from './api';
 import {
   EnableSyncLifecycle,
@@ -40,6 +41,7 @@ import {
   type PairingApprovalRequestV1,
   type PairingCreateRequestV1,
   type PairingFinalizeRequestV1,
+  type PairingFinalizationCheckpointPort,
   type RecoveryBundleFetchRequestV1,
   type RecoveryChallengeRequestV1,
   type RecoveryCompleteRequestV1,
@@ -86,6 +88,55 @@ class MemoryRepository implements SyncLifecycleRepositoryPort {
   }
 }
 
+class MemoryPairingCheckpoint implements PairingFinalizationCheckpointPort {
+  pending: PendingPairingFinalization | undefined;
+
+  constructor(private readonly repository: MemoryRepository) {}
+
+  stage(
+    setup: LocalSyncSetup,
+    request: PairingFinalizeRequestV1,
+  ): Promise<PendingPairingFinalization> {
+    this.pending ??= {
+      record: {
+        id: 'sync-pairing-finalization',
+        version: 1,
+        requestId: request.transcript.pairingRequestId,
+        vaultId: request.transcript.vaultId,
+        deviceId: request.transcript.newDeviceId,
+        manifestVersion: setup.vault.manifest.manifestVersion,
+        manifestHash: request.transcript.candidateManifestHash,
+        nonce: 'A'.repeat(16),
+        ciphertext: 'B'.repeat(22),
+        setup,
+        createdAt: NOW.toISOString(),
+      },
+      request,
+    };
+    return Promise.resolve(this.pending);
+  }
+
+  read(): Promise<PendingPairingFinalization | undefined> {
+    return Promise.resolve(this.pending);
+  }
+
+  async complete(pending: PendingPairingFinalization): Promise<LocalSyncSetup> {
+    if (pending !== this.pending) throw new Error('Synthetic checkpoint mismatch.');
+    await this.repository.write(pending.record.setup);
+    this.pending = undefined;
+    return pending.record.setup;
+  }
+}
+
+const checkpointByRepository = new WeakMap<MemoryRepository, MemoryPairingCheckpoint>();
+const checkpointsFor = (repository: MemoryRepository): MemoryPairingCheckpoint => {
+  const existing = checkpointByRepository.get(repository);
+  if (existing) return existing;
+  const created = new MemoryPairingCheckpoint(repository);
+  checkpointByRepository.set(repository, created);
+  return created;
+};
+
 interface StoredPairing {
   readonly request: PairingCreateRequestV1;
   readonly expiresAt: string;
@@ -109,6 +160,8 @@ class MemoryPhase1Api implements SyncPhase1ApiPort {
   clearedSessions = 0;
   recoveryCompletionBody: string | undefined;
   recoveryCompletionCalls = 0;
+  failFinalizeResponseOnce = false;
+  finalizePairingCalls = 0;
 
   async createVault(request: VaultCreateRequestV1): Promise<unknown> {
     this.createVaultCalls += 1;
@@ -279,6 +332,7 @@ class MemoryPhase1Api implements SyncPhase1ApiPort {
   }
 
   finalizePairing(pairingRequestId: string, request: PairingFinalizeRequestV1): Promise<unknown> {
+    this.finalizePairingCalls += 1;
     const pairing = this.requirePairing(pairingRequestId);
     if (
       pairing.finalization &&
@@ -294,6 +348,10 @@ class MemoryPhase1Api implements SyncPhase1ApiPort {
       !this.manifests.some((item) => item.manifestVersion === this.currentManifest?.manifestVersion)
     ) {
       this.manifests.push(this.currentManifest);
+    }
+    if (this.failFinalizeResponseOnce) {
+      this.failFinalizeResponseOnce = false;
+      return Promise.reject(new Error('Synthetic response loss after finalize commit.'));
     }
     return Promise.resolve({
       protocolVersion: SYNC_PROTOCOL_VERSION,
@@ -387,6 +445,7 @@ const dependencies = (
   origin: ORIGIN,
   now,
   selectRecoveryConfirmationGroups: () => [1, 4, 7],
+  pairingFinalizationCheckpoints: checkpointsFor(repository),
 });
 
 type SyncPhase1Api = MemoryPhase1Api;
@@ -541,11 +600,38 @@ describe('Phase 1 sync lifecycle', () => {
     await expect(newcomer.confirmSas(prepared.sas)).rejects.toThrow(
       'Synthetic local write failure',
     );
-    expect(newcomer.state).toBe('awaiting-sas-confirmation');
-    const setup = await newcomer.confirmSas(prepared.sas);
+    expect(newcomer.state).toBe('finalizing');
+    const setup = await newcomer.resumeFinalization();
 
     expect(newRepository.writes).toBe(2);
     expect(setup.vault.manifest.manifestVersion).toBe(2);
+  });
+
+  it('resumes the identical finalization after server commit, response loss and reload', async () => {
+    const api = new MemoryPhase1Api();
+    const existingRepository = new MemoryRepository();
+    await initializeVault(api, existingRepository);
+    const newRepository = new MemoryRepository();
+    const newcomer = new NewDevicePairingLifecycle(dependencies(api, newRepository));
+    const pairing = await newcomer.start('Laptop');
+    const approver = new ExistingDevicePairingLifecycle(dependencies(api, existingRepository));
+    const prepared = await approver.prepare(pairing.pairingCode);
+    await approver.approve(prepared.sas);
+    await newcomer.poll();
+    api.failFinalizeResponseOnce = true;
+
+    await expect(newcomer.confirmSas(prepared.sas)).rejects.toThrow(
+      'Synthetic response loss after finalize commit',
+    );
+    expect(newcomer.state).toBe('finalizing');
+    expect(newRepository.writes).toBe(0);
+
+    const reloaded = new NewDevicePairingLifecycle(dependencies(api, newRepository));
+    const setup = await reloaded.resumeFinalization();
+    expect(api.finalizePairingCalls).toBe(2);
+    expect(newRepository.writes).toBe(1);
+    expect(setup.device.deviceId).toBe(prepared.candidate.deviceId);
+    expect(reloaded.state).toBe('active');
   });
 
   it('clears the existing-device approval capability on an approver SAS mismatch', async () => {

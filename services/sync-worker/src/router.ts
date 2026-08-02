@@ -1,13 +1,14 @@
 import { authenticateRequest, handleAuthChallenge, handleAuthSession } from './auth';
 import type { RequestContext } from './context';
-import { HttpError } from './errors';
-import { handleHealth } from './health';
 import { handleDeleteVault } from './deletion';
 import {
   handleGetCurrentDeviceKeyEnvelope,
   handleRenewDevice,
   handleSecureRevokeDevice,
 } from './devices';
+import { handleBetaDiagnosticEvent } from './diagnostics';
+import { HttpError } from './errors';
+import { handleHealth } from './health';
 import { handleAcknowledgeChanges, handleGetChanges, handleUploadOperation } from './operations';
 import {
   handleApprovePairing,
@@ -23,52 +24,23 @@ import {
   handleFetchRecoverySnapshot,
   handleRecoveryChallenge,
 } from './recovery';
+import { allowedMethodsForRegisteredPath, matchApiRoute, matchApiRequest } from './route-registry';
 import { handleGetCurrentSnapshot, handleUploadSnapshot } from './snapshots';
 import { handleCreateVault, handleGetCurrentManifest, handleGetManifestChanges } from './vaults';
-import { handleBetaDiagnosticEvent } from './diagnostics';
-
-const PAIRING_ROUTE =
-  /^\/v1\/pairings\/([A-Za-z0-9_-]{22})\/(inspect|approve|poll|cancel|finalize)$/u;
-const RECOVERY_COMPLETE_ROUTE = /^\/v1\/vaults\/([A-Za-z0-9_-]{22})\/recover$/u;
-const SNAPSHOT_UPLOAD_ROUTE = /^\/v1\/snapshots\/([A-Za-z0-9_-]{22})$/u;
-const DEVICE_SECURITY_ROUTE = /^\/v1\/devices\/([A-Za-z0-9_-]{22})\/(renew|revoke)$/u;
-const KEY_EPOCH_ROUTE = /^\/v1\/key-epochs\/([1-9][0-9]*)$/u;
 
 export const isSnapshotUploadPath = (pathname: string): boolean =>
-  SNAPSHOT_UPLOAD_ROUTE.test(pathname);
+  matchApiRoute('PUT', pathname)?.definition.id === 'snapshot-upload';
 
-export const allowedMethodsForPath = (pathname: string): readonly string[] | null => {
-  if (
-    pathname === '/v1/health' ||
-    pathname === '/v1/vault/manifest' ||
-    pathname === '/v1/snapshots/current' ||
-    pathname === '/v1/changes' ||
-    pathname === '/v1/manifests' ||
-    pathname === '/v1/key-epochs/current'
-  ) {
-    return ['GET'];
-  }
-  if (KEY_EPOCH_ROUTE.test(pathname)) return ['GET'];
-  if (pathname === '/v1/vault') return ['DELETE'];
-  if (SNAPSHOT_UPLOAD_ROUTE.test(pathname)) return ['PUT'];
-  if (
-    pathname === '/v1/vaults' ||
-    pathname === '/v1/auth/challenge' ||
-    pathname === '/v1/auth/session' ||
-    pathname === '/v1/operations' ||
-    pathname === '/v1/acks' ||
-    pathname === '/v1/pairings' ||
-    pathname === '/v1/recovery/challenge' ||
-    pathname === '/v1/recovery/bundle' ||
-    pathname === '/v1/recovery/snapshot' ||
-    pathname === '/v1/diagnostics/events' ||
-    PAIRING_ROUTE.test(pathname) ||
-    RECOVERY_COMPLETE_ROUTE.test(pathname) ||
-    DEVICE_SECURITY_ROUTE.test(pathname)
-  ) {
-    return ['POST'];
-  }
-  return null;
+export const allowedMethodsForPath = allowedMethodsForRegisteredPath;
+
+const requiredParameter = (parameters: Readonly<Record<string, string>>, name: string): string => {
+  const value = parameters[name];
+  if (!value) throw new HttpError(404, 'ROUTE_NOT_FOUND', 'Route was not found.');
+  return value;
+};
+
+const assertUnreachable = (routeId: never): never => {
+  throw new Error(`Unimplemented API route: ${String(routeId)}`);
 };
 
 export const routeRequest = async (context: RequestContext): Promise<Response> => {
@@ -78,61 +50,70 @@ export const routeRequest = async (context: RequestContext): Promise<Response> =
   if (!methods.includes(context.request.method)) {
     throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method is not allowed.');
   }
+  const matched = matchApiRequest(context.request);
+  if (!matched) throw new HttpError(404, 'ROUTE_NOT_FOUND', 'Route was not found.');
+  const { id } = matched.definition;
+  const parameters = matched.parameters;
 
-  if (pathname === '/v1/health') {
-    return handleHealth(context.env, context.requestId, context.allowedOrigin);
+  switch (id) {
+    case 'health':
+      return handleHealth(context.env, context.requestId, context.allowedOrigin);
+    case 'beta-diagnostics':
+      return handleBetaDiagnosticEvent(context);
+    case 'vault-create':
+      return handleCreateVault(context);
+    case 'vault-delete-init':
+      return handleDeleteVault(context);
+    case 'auth-challenge':
+      return handleAuthChallenge(context);
+    case 'auth-session':
+      return handleAuthSession(context);
+    case 'pairing-create':
+      return handleCreatePairing(context);
+    case 'pairing-inspect':
+      return handleInspectPairing(context, requiredParameter(parameters, 'pairingRequestId'));
+    case 'pairing-approve':
+      return handleApprovePairing(context, requiredParameter(parameters, 'pairingRequestId'));
+    case 'pairing-poll':
+      return handlePollPairing(context, requiredParameter(parameters, 'pairingRequestId'));
+    case 'pairing-cancel':
+      return handleCancelPairing(context, requiredParameter(parameters, 'pairingRequestId'));
+    case 'pairing-finalize':
+      return handleFinalizePairing(context, requiredParameter(parameters, 'pairingRequestId'));
+    case 'recovery-challenge':
+      return handleRecoveryChallenge(context);
+    case 'recovery-bundle':
+      return handleFetchRecoveryBundle(context);
+    case 'recovery-snapshot':
+      return handleFetchRecoverySnapshot(context);
+    case 'recovery-complete':
+      return handleCompleteRecovery(context, requiredParameter(parameters, 'vaultId'));
+    case 'operation-upload':
+      return handleUploadOperation(context);
+    case 'changes-read':
+      return handleGetChanges(context);
+    case 'changes-ack':
+      return handleAcknowledgeChanges(context);
+    case 'key-envelope-current':
+      return handleGetCurrentDeviceKeyEnvelope(context);
+    case 'key-envelope-by-epoch':
+      return handleGetCurrentDeviceKeyEnvelope(
+        context,
+        Number(requiredParameter(parameters, 'keyEpoch')),
+      );
+    case 'manifest-changes':
+      return handleGetManifestChanges(context, await authenticateRequest(context));
+    case 'manifest-current':
+      return handleGetCurrentManifest(context, await authenticateRequest(context));
+    case 'snapshot-current':
+      return handleGetCurrentSnapshot(context);
+    case 'snapshot-upload':
+      return handleUploadSnapshot(context, requiredParameter(parameters, 'snapshotId'));
+    case 'device-renew':
+      return handleRenewDevice(context, requiredParameter(parameters, 'deviceId'));
+    case 'device-revoke':
+      return handleSecureRevokeDevice(context, requiredParameter(parameters, 'deviceId'));
+    default:
+      return assertUnreachable(id);
   }
-  if (pathname === '/v1/diagnostics/events') return handleBetaDiagnosticEvent(context);
-  if (pathname === '/v1/vaults') return handleCreateVault(context);
-  if (pathname === '/v1/vault') return handleDeleteVault(context);
-  if (pathname === '/v1/auth/challenge') return handleAuthChallenge(context);
-  if (pathname === '/v1/auth/session') return handleAuthSession(context);
-  if (pathname === '/v1/pairings') return handleCreatePairing(context);
-  if (pathname === '/v1/recovery/challenge') return handleRecoveryChallenge(context);
-  if (pathname === '/v1/recovery/bundle') return handleFetchRecoveryBundle(context);
-  if (pathname === '/v1/recovery/snapshot') return handleFetchRecoverySnapshot(context);
-  if (pathname === '/v1/operations') return handleUploadOperation(context);
-  if (pathname === '/v1/changes') return handleGetChanges(context);
-  if (pathname === '/v1/acks') return handleAcknowledgeChanges(context);
-  if (pathname === '/v1/key-epochs/current') return handleGetCurrentDeviceKeyEnvelope(context);
-  if (pathname === '/v1/manifests') {
-    return handleGetManifestChanges(context, await authenticateRequest(context));
-  }
-  if (pathname === '/v1/vault/manifest') {
-    return handleGetCurrentManifest(context, await authenticateRequest(context));
-  }
-  if (pathname === '/v1/snapshots/current') return handleGetCurrentSnapshot(context);
-
-  const snapshot = SNAPSHOT_UPLOAD_ROUTE.exec(pathname);
-  if (snapshot?.[1]) return handleUploadSnapshot(context, snapshot[1]);
-  const keyEpoch = KEY_EPOCH_ROUTE.exec(pathname)?.[1];
-  if (keyEpoch) return handleGetCurrentDeviceKeyEnvelope(context, Number(keyEpoch));
-
-  const pairing = PAIRING_ROUTE.exec(pathname);
-  const deviceSecurity = DEVICE_SECURITY_ROUTE.exec(pathname);
-  if (deviceSecurity?.[1] && deviceSecurity[2] === 'renew') {
-    return handleRenewDevice(context, deviceSecurity[1]);
-  }
-  if (deviceSecurity?.[1] && deviceSecurity[2] === 'revoke') {
-    return handleSecureRevokeDevice(context, deviceSecurity[1]);
-  }
-  if (!pairing?.[1] || !pairing[2]) {
-    const recovery = RECOVERY_COMPLETE_ROUTE.exec(pathname);
-    if (recovery?.[1]) return handleCompleteRecovery(context, recovery[1]);
-    throw new HttpError(404, 'ROUTE_NOT_FOUND', 'Route was not found.');
-  }
-  const pairingRequestId = pairing[1];
-  switch (pairing[2]) {
-    case 'inspect':
-      return handleInspectPairing(context, pairingRequestId);
-    case 'approve':
-      return handleApprovePairing(context, pairingRequestId);
-    case 'poll':
-      return handlePollPairing(context, pairingRequestId);
-    case 'cancel':
-      return handleCancelPairing(context, pairingRequestId);
-    case 'finalize':
-      return handleFinalizePairing(context, pairingRequestId);
-  }
-  throw new HttpError(404, 'ROUTE_NOT_FOUND', 'Route was not found.');
 };

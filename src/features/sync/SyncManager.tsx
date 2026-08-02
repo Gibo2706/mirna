@@ -298,7 +298,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           <dt className="text-xs font-semibold text-muted">Health</dt>
           <dd className="mt-1 font-bold">
             {health
-              ? `${health.status}; D1 ${health.services.d1}; R2 ${health.services.r2}; schema ${health.readiness?.accountingSchema ?? 'nije dostupna'}; accounting ${health.readiness?.accountingState ?? 'nije dostupan'}; writes ${health.readiness?.writes ?? (health.writesEnabled ? 'enabled' : 'disabled')}`
+              ? `${health.status}; D1 ${health.services.d1}; R2 ${health.services.r2}; schema ${health.readiness?.accountingSchema ?? 'nije dostupna'}; accounting ${health.readiness?.accountingState ?? 'nije dostupan'}; route budgets ${health.readiness?.routeBudgetConformance ?? 'nije dostupno'}; writes ${health.readiness?.writes ?? (health.writesEnabled ? 'enabled' : 'disabled')}`
               : 'Nije dostupan'}
           </dd>
         </div>
@@ -319,7 +319,20 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
         {latestError?.accountingCategory ? (
           <p>
             Poslovni upis: {latestError.businessCommitted ? 'commitovan' : 'nije commitovan'};
-            service flags: {latestError.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
+            business rad:{' '}
+            {latestError.businessWorkStarted === false ? 'nije započet' : 'započet ili nepoznat'};
+            fault uloga: {latestError.faultRole ?? 'nije zabeležena'}; service flags:{' '}
+            {latestError.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
+          </p>
+        ) : null}
+        {latestError?.originRequestId ? (
+          <p className="min-w-0">
+            Origin fault:{' '}
+            <ExpandableOpaqueValue
+              value={latestError.originRequestId}
+              label="Origin fault Request ID"
+            />{' '}
+            ({latestError.originRoute ?? 'ruta nije zabeležena'})
           </p>
         ) : null}
         <p>Klijentska faza: {latestTurnstile?.eventType ?? 'nije zabeležena'}</p>
@@ -352,9 +365,25 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
                 ) : null}
                 {event.reservationPhase ? <div>Faza: {event.reservationPhase}</div> : null}
                 {event.route ? <div>Ruta: {event.route}</div> : null}
+                {event.lifecycleOperation ? (
+                  <div>Lifecycle operacija: {event.lifecycleOperation}</div>
+                ) : null}
+                {event.faultRole ? <div>Fault uloga: {event.faultRole}</div> : null}
+                {event.originRequestId ? (
+                  <div className="min-w-0">
+                    Origin Request ID:{' '}
+                    <ExpandableOpaqueValue
+                      value={event.originRequestId}
+                      label="Origin fault Request ID događaja"
+                    />
+                    {event.originRoute ? ` (${event.originRoute})` : ''}
+                  </div>
+                ) : null}
                 {event.accountingCategory ? (
                   <div>
                     Poslovni upis: {event.businessCommitted ? 'commitovan' : 'nije commitovan'};
+                    business rad:{' '}
+                    {event.businessWorkStarted === false ? 'nije započet' : 'započet ili nepoznat'};
                     flagovi: {event.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
                   </div>
                 ) : null}
@@ -741,23 +770,25 @@ const EnablePanel = ({
   );
 };
 
-type NewPairingStage = 'idle' | 'pending' | 'sas' | 'ended';
+type NewPairingStage = 'idle' | 'resume' | 'pending' | 'sas' | 'ended';
 
 const NewDevicePairingPanel = ({
   services,
   onActivated,
   onBack,
+  resumeAvailable = false,
 }: {
   services: SyncUiServices;
   onActivated: () => Promise<void>;
   onBack: () => void;
+  resumeAvailable?: boolean;
 }) => {
   const { success } = useToast();
   const lifecycle = useRef<NewDevicePairingLifecyclePort | null>(null);
   const pollInFlight = useRef(false);
   const [deviceName, setDeviceName] = useState('Novi uređaj');
   const [presentation, setPresentation] = useState<PairingCodePresentation>();
-  const [stage, setStage] = useState<NewPairingStage>('idle');
+  const [stage, setStage] = useState<NewPairingStage>(resumeAvailable ? 'resume' : 'idle');
   const [sas, setSas] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -805,7 +836,8 @@ const NewDevicePairingPanel = ({
         activeLifecycle &&
         activeLifecycle.state !== 'cancelled' &&
         activeLifecycle.state !== 'ended' &&
-        activeLifecycle.state !== 'active'
+        activeLifecycle.state !== 'active' &&
+        activeLifecycle.state !== 'finalizing'
       ) {
         void activeLifecycle.cancel().catch(() => undefined);
       }
@@ -830,6 +862,23 @@ const NewDevicePairingPanel = ({
         // The lifecycle always clears local pairing material when cancellation was possible.
       }
       lifecycle.current = null;
+      setError(safeErrorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resumeFinalization = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    const activeLifecycle = lifecycle.current ?? services.createNewDevicePairingLifecycle();
+    lifecycle.current = activeLifecycle;
+    try {
+      await activeLifecycle.resumeFinalization();
+      success('Započeto povezivanje je bezbedno dovršeno.');
+      await onActivated();
+    } catch (caught) {
       setError(safeErrorMessage(caught));
     } finally {
       setBusy(false);
@@ -888,6 +937,18 @@ const NewDevicePairingPanel = ({
             nalepite QR sadržaj ili ručni kod i uporedite SAS na oba ekrana.
           </p>
         </div>
+        {stage === 'resume' ? (
+          <div className="grid gap-3 rounded-xl border border-warning/40 bg-warning/5 p-3">
+            <p className="text-sm leading-6">
+              Ovaj uređaj ima šifrovani checkpoint potvrđenog povezivanja. Dovršite isti zahtev;
+              novi ključevi se neće praviti.
+            </p>
+            <Button onClick={() => void resumeFinalization()} disabled={busy}>
+              {busy ? <BusyIcon /> : <ShieldCheck size={17} aria-hidden="true" />}
+              Dovrši započeto povezivanje
+            </Button>
+          </div>
+        ) : null}
         {stage === 'idle' || stage === 'ended' ? (
           <>
             <Field label="Naziv ovog uređaja">
@@ -1902,6 +1963,16 @@ const SyncContent = ({
     }
 
     if (mode === 'choose') {
+      if (localStatus.pendingPairingFinalization) {
+        return (
+          <NewDevicePairingPanel
+            services={services}
+            resumeAvailable
+            onActivated={refresh}
+            onBack={() => setMode('choose')}
+          />
+        );
+      }
       return <EmptyModeChooser preOnboarding={preOnboarding} onChoose={setMode} />;
     }
     if (mode === 'enable') {

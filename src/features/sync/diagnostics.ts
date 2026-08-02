@@ -85,6 +85,11 @@ export interface BetaDiagnosticEventInput {
   readonly accountingReason?: string;
   readonly reservationPhase?: string;
   readonly route?: string;
+  readonly faultRole?: string;
+  readonly originRequestId?: string;
+  readonly originRoute?: string;
+  readonly lifecycleOperation?: string;
+  readonly businessWorkStarted?: boolean;
   readonly businessCommitted?: boolean;
   readonly serviceFlagsChanged?: boolean;
   readonly workerBuild?: string;
@@ -147,6 +152,14 @@ const safeEvent = (input: BetaDiagnosticEventInput): SyncBetaDiagnosticEventReco
       ? input.reservationPhase
       : undefined,
   route: boundedValue(input.route, /^[a-z][a-z0-9-]{0,63}$/u),
+  faultRole:
+    input.faultRole && ['origin', 'blocked', 'none'].includes(input.faultRole)
+      ? input.faultRole
+      : undefined,
+  originRequestId: boundedValue(input.originRequestId, REQUEST_ID),
+  originRoute: boundedValue(input.originRoute, /^[a-z][a-z0-9-]{0,63}$/u),
+  lifecycleOperation: boundedValue(input.lifecycleOperation, /^[a-z][a-z0-9-]{0,63}$/u),
+  businessWorkStarted: input.businessWorkStarted,
   businessCommitted: input.businessCommitted,
   serviceFlagsChanged: input.serviceFlagsChanged,
   workerBuild: input.workerBuild?.slice(0, 64),
@@ -258,6 +271,15 @@ export class BetaDiagnosticsService {
       if (event.accountingReason !== undefined) payload.accountingReason = event.accountingReason;
       if (event.reservationPhase !== undefined) payload.reservationPhase = event.reservationPhase;
       if (event.route !== undefined) payload.route = event.route;
+      if (event.faultRole !== undefined) payload.faultRole = event.faultRole;
+      if (event.originRequestId !== undefined) payload.originRequestId = event.originRequestId;
+      if (event.originRoute !== undefined) payload.originRoute = event.originRoute;
+      if (event.lifecycleOperation !== undefined) {
+        payload.lifecycleOperation = event.lifecycleOperation;
+      }
+      if (event.businessWorkStarted !== undefined) {
+        payload.businessWorkStarted = event.businessWorkStarted;
+      }
       if (event.businessCommitted !== undefined) {
         payload.businessCommitted = event.businessCommitted;
       }

@@ -8,7 +8,11 @@ import { MorePage } from '@/pages/MorePage';
 import { emptyFinanceData, settings } from '@/tests/factories';
 import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 import { SyncManager } from './SyncManager';
-import type { SyncUiLocalStatus, SyncUiServices } from './ui-services';
+import type {
+  NewDevicePairingLifecyclePort,
+  SyncUiLocalStatus,
+  SyncUiServices,
+} from './ui-services';
 import * as syncUiServices from './ui-services';
 import { SyncApiError } from './api';
 
@@ -121,6 +125,7 @@ const baseServices = (
     pendingConflictCount: 0,
     pendingLocalOperationCount: 0,
     pendingConflicts: [],
+    pendingPairingFinalization: false,
   },
 ): SyncUiServices => ({
   probeCapability: vi.fn(() => Promise.resolve(supportedCapability)),
@@ -254,6 +259,7 @@ describe('Phase 1 sync UI', () => {
       pendingConflictCount: 0,
       pendingLocalOperationCount: 0,
       pendingConflicts: [],
+      pendingPairingFinalization: false,
     };
     const confirmRecoveryCode = vi.fn(() => Promise.resolve());
     const activate = vi.fn(() => {
@@ -263,6 +269,7 @@ describe('Phase 1 sync UI', () => {
         pendingConflictCount: 0,
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
+        pendingPairingFinalization: false,
       };
       return Promise.resolve(setup);
     });
@@ -437,6 +444,7 @@ describe('Phase 1 sync UI', () => {
           }),
         ),
         confirmSas: vi.fn(() => Promise.resolve(localSetup())),
+        resumeFinalization: vi.fn(() => Promise.resolve(localSetup())),
         cancel,
       }),
     });
@@ -456,6 +464,54 @@ describe('Phase 1 sync UI', () => {
     expect(screen.queryByTestId('sync-pairing-code')).not.toBeInTheDocument();
   });
 
+  it('offers and completes a durable pairing finalization after reload', async () => {
+    const user = userEvent.setup();
+    let resumed = false;
+    const setup = localSetup();
+    const resumeFinalization = vi.fn(() => {
+      resumed = true;
+      return Promise.resolve(setup);
+    });
+    const cancel = vi.fn(() => Promise.resolve());
+    const lifecycle = {
+      get state() {
+        return resumed ? 'active' : 'idle';
+      },
+      start: vi.fn(),
+      poll: vi.fn(),
+      confirmSas: vi.fn(),
+      resumeFinalization,
+      cancel,
+    } as NewDevicePairingLifecyclePort;
+    const services = baseServices({
+      loadLocalStatus: vi.fn(() =>
+        Promise.resolve(
+          resumed
+            ? {
+                setup,
+                pendingConflictCount: 0,
+                pendingLocalOperationCount: 0,
+                pendingConflicts: [],
+                pendingPairingFinalization: false,
+              }
+            : {
+                pendingConflictCount: 0,
+                pendingLocalOperationCount: 0,
+                pendingConflicts: [],
+                pendingPairingFinalization: true,
+              },
+        ),
+      ),
+      createNewDevicePairingLifecycle: () => lifecycle,
+    });
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: /Dovrši započeto povezivanje/i }));
+    await waitFor(() => expect(resumeFinalization).toHaveBeenCalledOnce());
+    expect(await screen.findByText(/Ovaj uređaj je povezan/i)).toBeVisible();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it('requires an explicit action before the first encrypted snapshot upload', async () => {
     const user = userEvent.setup();
     const setup = localSetup();
@@ -473,6 +529,7 @@ describe('Phase 1 sync UI', () => {
         pendingConflictCount: 0,
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
+        pendingPairingFinalization: false,
       },
     );
 
@@ -504,6 +561,7 @@ describe('Phase 1 sync UI', () => {
         pendingConflictCount: 0,
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
+        pendingPairingFinalization: false,
       },
     );
 
@@ -538,6 +596,7 @@ describe('Phase 1 sync UI', () => {
         pendingConflictCount: 0,
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
+        pendingPairingFinalization: false,
       },
     );
 

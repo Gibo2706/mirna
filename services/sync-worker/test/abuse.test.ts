@@ -84,7 +84,7 @@ describe('anonymous edge rate limiting', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('protects health and does not invoke a limiter for an unknown route', async () => {
+  it('protects health and unknown routes with the bounded fallback limiter', async () => {
     const limit = vi.fn<RateLimit['limit']>(() => Promise.resolve({ success: true }));
     const configured = environment('staging', {
       MIRNA_HEALTH_RATE_LIMITER: fakeLimiter(limit),
@@ -92,6 +92,6 @@ describe('anonymous edge rate limiting', () => {
     await expect(enforceEdgeRateLimit(request('/v1/health'), configured)).resolves.toBeUndefined();
     expect(limit).toHaveBeenCalledOnce();
     await expect(enforceEdgeRateLimit(request('/v1/nope'), configured)).resolves.toBeUndefined();
-    expect(limit).toHaveBeenCalledOnce();
+    expect(limit).toHaveBeenCalledTimes(2);
   });
 });

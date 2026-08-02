@@ -5,8 +5,14 @@ import { recordBetaDiagnostic } from './diagnostics';
 import type { Env } from './env';
 import type { AccountingCategory, AccountingFailureDetails, AccountingReason } from './errors';
 import { HttpError } from './errors';
+import {
+  API_ROUTE_REGISTRY,
+  matchApiRequest,
+  type ApiRouteDefinition,
+  type ApiRouteId,
+  type BudgetAccess,
+} from './route-registry';
 
-export type BudgetAccess = 'read' | 'diagnostic' | 'write' | 'new-vault' | 'pairing';
 export type R2Operation = 'put' | 'list' | 'copy' | 'get' | 'head' | 'delete';
 export type R2OperationClass = 'A' | 'B' | 'free';
 
@@ -24,11 +30,9 @@ export const classifyR2Operation = (operation: R2Operation): R2OperationClass =>
   }
 };
 
-interface RouteBudget {
-  readonly key: string;
-  readonly access: BudgetAccess;
-  readonly usage: MeteredUsage;
-}
+type RouteBudget = Pick<ApiRouteDefinition, 'access' | 'usage'> & {
+  readonly key: ApiRouteId;
+};
 
 interface DailyUsageRow extends MeteredUsage {
   readonly scope_type: 'global' | 'vault';
@@ -52,8 +56,11 @@ interface ReservationRow {
 const MAX_SQL_INTEGER = 9_007_199_254_740_991;
 const LEDGER_OVERHEAD: MeteredUsage = Object.freeze({
   workerRequests: 1,
-  d1RowsRead: 128,
-  d1RowsWritten: 32,
+  // Covers the fixed reservation/settlement ledger plus at most three indexed
+  // platform diagnostic inserts which intentionally occur outside the route
+  // meter. It does not include application-handler work.
+  d1RowsRead: 1_024,
+  d1RowsWritten: 128,
   r2ClassA: 0,
   r2ClassB: 0,
 });
@@ -70,7 +77,9 @@ const usage = (
  * Turnstile diagnostics and a documented margin. A focused metering test keeps
  * the executable maximum below it.
  */
-export const VAULT_CREATE_ROUTE_USAGE: MeteredUsage = Object.freeze(usage(2_048, 128));
+export const VAULT_CREATE_ROUTE_USAGE: MeteredUsage =
+  API_ROUTE_REGISTRY.find(({ id }) => id === 'vault-create')?.usage ??
+  Object.freeze(usage(2_048, 128));
 
 export interface ScheduledCleanupEstimateInput {
   readonly expiredUsageBuckets: number;
@@ -78,6 +87,7 @@ export interface ScheduledCleanupEstimateInput {
   readonly ordinaryRows: number;
   readonly snapshotRows: number;
   readonly deletionRequests: number;
+  readonly deletionRows: number;
   readonly reconcileR2: boolean;
 }
 
@@ -96,6 +106,7 @@ export const estimateScheduledCleanupUsage = (
     input.ordinaryRows,
     input.snapshotRows,
     input.deletionRequests,
+    input.deletionRows,
   ]) {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error('Scheduled cleanup estimate is invalid.');
@@ -109,70 +120,31 @@ export const estimateScheduledCleanupUsage = (
         input.inspectedRows * 4 +
         input.ordinaryRows * 32 +
         input.snapshotRows * 256 +
-        input.deletionRequests * 512,
+        input.deletionRequests * 512 +
+        input.deletionRows * 16,
       64 +
         input.expiredUsageBuckets * 12 +
         input.ordinaryRows * 12 +
         input.snapshotRows * 64 +
-        input.deletionRequests * 128,
+        input.deletionRequests * 128 +
+        input.deletionRows * 32,
       (input.reconcileR2 ? 1 : 0) + input.deletionRequests * 100,
     ),
   );
 };
 
 const routeBudget = (request: Request): RouteBudget => {
-  const path = new URL(request.url).pathname;
-  const method = request.method;
-  if (method === 'OPTIONS') return { key: 'preflight', access: 'read', usage: ZERO_USAGE };
-  if (path === '/v1/health') return { key: 'health', access: 'read', usage: usage(4, 0, 0, 1) };
-  if (method === 'POST' && path === '/v1/diagnostics/events') {
-    return { key: 'beta-diagnostics', access: 'diagnostic', usage: usage(2_048, 32) };
-  }
-  if (method === 'POST' && path === '/v1/vaults') {
-    return { key: 'vault-create', access: 'new-vault', usage: VAULT_CREATE_ROUTE_USAGE };
-  }
-  if (method === 'POST' && path === '/v1/pairings') {
-    return { key: 'pairing-create', access: 'pairing', usage: usage(512, 16) };
-  }
-  if (path.startsWith('/v1/pairings/')) {
-    return { key: 'pairing-action', access: 'pairing', usage: usage(160, 36) };
-  }
-  if (path === '/v1/recovery/challenge') {
-    return { key: 'recovery-init', access: 'write', usage: usage(512, 20) };
-  }
-  if (path.includes('/recover') || path.startsWith('/v1/recovery/')) {
-    return { key: 'recovery-action', access: 'write', usage: usage(240, 64, 0, 1) };
-  }
-  if (/^\/v1\/devices\/[A-Za-z0-9_-]{22}\/(?:renew|revoke)$/u.test(path)) {
-    return { key: 'device-security', access: 'write', usage: usage(4_096, 512) };
-  }
-  if (method === 'POST' && path === '/v1/acks') {
-    // One acknowledgement may compact the full 5,000-operation vault window.
-    return { key: 'sync-ack', access: 'write', usage: usage(8_192, 5_128) };
-  }
-  if (method === 'POST' && path === '/v1/operations') {
-    // The indexed sequence/count check is bounded by the 5,000-operation cap.
-    return { key: 'operation-upload', access: 'write', usage: usage(8_192, 64) };
-  }
-  if (method === 'PUT' && path.startsWith('/v1/snapshots/')) {
-    return { key: 'snapshot-upload', access: 'write', usage: usage(192, 48, 1, 1) };
-  }
-  if (method === 'GET' && path === '/v1/snapshots/current') {
-    return { key: 'snapshot-download', access: 'read', usage: usage(64, 4, 0, 1) };
-  }
-  if (method === 'DELETE' && path === '/v1/vault') {
-    // A vault can contain at most 2,000 objects, so 1,000-key pages require at
-    // most two Class A ListObjects calls before the free DeleteObject calls.
-    return { key: 'vault-delete', access: 'write', usage: usage(1_024, 256, 2) };
-  }
-  if (method === 'GET') return { key: 'sync-read', access: 'read', usage: usage(96, 4) };
-  if (path === '/v1/auth/challenge' || path === '/v1/auth/session') {
-    return { key: 'device-auth', access: 'write', usage: usage(72, 16) };
-  }
-  return { key: 'sync-write', access: 'write', usage: usage(192, 48) };
+  const matched = matchApiRequest(request);
+  if (!matched) throw new HttpError(404, 'ROUTE_NOT_FOUND', 'Route was not found.');
+  return {
+    key: matched.definition.id,
+    access: matched.definition.access,
+    usage: matched.definition.usage,
+  };
 };
 
-export const budgetRouteKey = (request: Request): string => routeBudget(request).key;
+export const budgetRouteKey = (request: Request): string =>
+  matchApiRequest(request)?.definition.id ?? 'unmatched-route';
 
 const utcDay = (timestamp: number): string => new Date(timestamp).toISOString().slice(0, 10);
 
@@ -202,8 +174,11 @@ const flagCondition = (access: BudgetAccess): string => {
       // Exact retries must reach the idempotent handler while an accounting
       // fault is active. The handler refuses a genuinely new vault afterward.
       return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accept_new_vaults = 1';
-    case 'pairing':
-      return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accept_pairings = 1 AND f.accounting_fault = 0';
+    case 'pairing-retry':
+      // Exact committed retries must reach the handler during reconciliation.
+      // Each pairing handler asserts the flags again immediately before a new
+      // business transition.
+      return 'f.maintenance_mode = 0 AND f.accept_writes = 1 AND f.accept_pairings = 1';
   }
 };
 
@@ -219,6 +194,12 @@ const accountingDetails = (
   phase: AccountingFailureDetails['phase'],
   route: string,
   serviceFlagsChanged = false,
+  faultContext: Partial<
+    Pick<
+      AccountingFailureDetails,
+      'faultRole' | 'originRequestId' | 'originRoute' | 'businessWorkStarted'
+    >
+  > = {},
 ): AccountingFailureDetails => ({
   category,
   reason,
@@ -227,6 +208,11 @@ const accountingDetails = (
   businessCommitted: context.businessCommit?.committed === true,
   serviceFlagsChanged,
   workerBuild: safeBuild(context.accountingEnv ?? context.env),
+  faultRole: faultContext.faultRole ?? (serviceFlagsChanged ? 'origin' : 'none'),
+  ...(faultContext.originRequestId ? { originRequestId: faultContext.originRequestId } : {}),
+  ...(faultContext.originRoute ? { originRoute: faultContext.originRoute } : {}),
+  lifecycleOperation: route,
+  businessWorkStarted: faultContext.businessWorkStarted ?? phase === 'settlement',
 });
 
 const accountingError = (
@@ -238,13 +224,19 @@ const accountingError = (
   route: string,
   serviceFlagsChanged = false,
   reason: AccountingReason = 'RESERVATION_BATCH_FAILED',
+  faultContext: Partial<
+    Pick<
+      AccountingFailureDetails,
+      'faultRole' | 'originRequestId' | 'originRoute' | 'businessWorkStarted'
+    >
+  > = {},
 ): HttpError =>
   new HttpError(
     status,
     category,
     message,
     undefined,
-    accountingDetails(context, category, reason, phase, route, serviceFlagsChanged),
+    accountingDetails(context, category, reason, phase, route, serviceFlagsChanged, faultContext),
   );
 
 const diagnosticErrorClass = (error: unknown): string => {
@@ -285,11 +277,12 @@ const classifyReservationFailure = async (
     maintenance_mode: number;
     accounting_fault: number;
     state_reason: string;
+    state_request_id: string | null;
   } | null;
   try {
     state = await env.MIRNA_SYNC_DB.prepare(
       `SELECT accept_new_vaults, accept_pairings, accept_writes, maintenance_mode,
-              accounting_fault, state_reason
+              accounting_fault, state_reason, state_request_id
          FROM service_flags WHERE singleton_id = 1`,
     ).first();
   } catch {
@@ -328,7 +321,27 @@ const classifyReservationFailure = async (
       'D1_STORAGE_LIMIT_REACHED',
     );
   }
-  if (state.accounting_fault === 1 && !['read', 'diagnostic', 'new-vault'].includes(access)) {
+  if (
+    state.accounting_fault === 1 &&
+    !['read', 'diagnostic', 'new-vault', 'pairing-retry'].includes(access)
+  ) {
+    const originRequestId = state.state_request_id ?? undefined;
+    let originRoute: string | undefined;
+    if (originRequestId) {
+      try {
+        originRoute =
+          (await env.MIRNA_SYNC_DB.prepare(
+            `SELECT route_key
+               FROM usage_reservations
+              WHERE reservation_id = ?1
+              LIMIT 1`,
+          )
+            .bind(`${originRequestId}:route`)
+            .first<string>('route_key')) ?? undefined;
+      } catch {
+        originRoute = undefined;
+      }
+    }
     return accountingError(
       context,
       503,
@@ -338,13 +351,19 @@ const classifyReservationFailure = async (
       route,
       false,
       activeFaultReason(state.state_reason),
+      {
+        faultRole: 'blocked',
+        ...(originRequestId ? { originRequestId } : {}),
+        ...(originRoute ? { originRoute } : {}),
+        businessWorkStarted: false,
+      },
     );
   }
   const disabled =
     (!['read', 'diagnostic'].includes(access) &&
       (state.maintenance_mode !== 0 || state.accept_writes !== 1)) ||
     (access === 'new-vault' && state.accept_new_vaults !== 1) ||
-    (access === 'pairing' && state.accept_pairings !== 1);
+    (access === 'pairing-retry' && state.accept_pairings !== 1);
   if (disabled) {
     return accountingError(
       context,
@@ -624,8 +643,8 @@ const markAccountingFault = async (
     const result = await (context.accountingEnv ?? context.env).MIRNA_SYNC_DB.prepare(
       `UPDATE service_flags
           SET accounting_fault = 1, state_reason = ?1, state_request_id = ?2,
-              accounting_fault_at = COALESCE(accounting_fault_at, ?3), updated_at = ?3
-        WHERE singleton_id = 1`,
+              accounting_fault_at = ?3, updated_at = ?3
+        WHERE singleton_id = 1 AND accounting_fault = 0`,
     )
       .bind(category, context.requestId, now)
       .run();
@@ -876,15 +895,19 @@ export class UsageBudgetController {
                 SET accounting_fault = 1,
                     state_reason = 'USAGE_RESERVATION_UNDERESTIMATED',
                     state_request_id = ?1,
-                    accounting_fault_at = COALESCE(accounting_fault_at, ?2),
+                    accounting_fault_at = ?2,
                     updated_at = ?2
-              WHERE singleton_id = 1`,
+              WHERE singleton_id = 1 AND accounting_fault = 0`,
           ).bind(context.requestId, now),
         );
       }
       const results = await accountingEnv.MIRNA_SYNC_DB.batch(statements);
-      if (results.some((result) => result.meta.changes !== 1)) throw new Error('settlement failed');
+      const settlementResultCount = (rows as ReservationRow[]).length * 3;
+      if (results.slice(0, settlementResultCount).some((result) => result.meta.changes !== 1)) {
+        throw new Error('settlement failed');
+      }
       if (underestimated) {
+        const serviceFlagsChanged = results[settlementResultCount]?.meta.changes === 1;
         await recordBetaDiagnostic(
           { ...context, env: accountingEnv },
           {
@@ -897,7 +920,7 @@ export class UsageBudgetController {
               accountingReason: 'USAGE_RESERVATION_UNDERESTIMATED',
               businessCommitted: context.businessCommit?.committed === true,
               route: activeRoute,
-              serviceFlagsChanged: true,
+              serviceFlagsChanged,
             },
           },
         );
@@ -908,8 +931,14 @@ export class UsageBudgetController {
           'Staging usage reservation was underestimated.',
           'settlement',
           activeRoute,
-          true,
+          serviceFlagsChanged,
           'USAGE_RESERVATION_UNDERESTIMATED',
+          {
+            faultRole: serviceFlagsChanged ? 'origin' : 'none',
+            ...(serviceFlagsChanged ? { originRequestId: context.requestId } : {}),
+            originRoute: activeRoute,
+            businessWorkStarted: true,
+          },
         );
       }
     } catch (error) {
@@ -1034,6 +1063,103 @@ export const assertNewVaultCreationAllowed = async (context: RequestContext): Pr
       'Staging synchronization is in maintenance mode.',
       'route-reservation',
       'vault-create',
+      false,
+      'SERVICE_FLAGS_DISABLED',
+    );
+  }
+};
+
+/**
+ * Pairing route reservations allow exact committed retries through an active
+ * accounting fault. Every handler must call this guard immediately before a
+ * new pairing mutation, after it has exhausted its exact-retry branch.
+ */
+export const assertNewPairingMutationAllowed = async (
+  context: RequestContext,
+  route: Extract<
+    ApiRouteId,
+    'pairing-create' | 'pairing-inspect' | 'pairing-approve' | 'pairing-cancel' | 'pairing-finalize'
+  >,
+): Promise<void> => {
+  const env = context.accountingEnv ?? context.env;
+  let state: {
+    accept_pairings: number;
+    accept_writes: number;
+    maintenance_mode: number;
+    accounting_fault: number;
+    state_reason: string;
+    state_request_id: string | null;
+  } | null;
+  try {
+    state = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT accept_pairings, accept_writes, maintenance_mode,
+              accounting_fault, state_reason, state_request_id
+         FROM service_flags WHERE singleton_id = 1`,
+    ).first();
+  } catch {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      'route-reservation',
+      route,
+      false,
+      'FLAGS_READ_FAILED',
+    );
+  }
+  if (!state) {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      'route-reservation',
+      route,
+      false,
+      'REQUIRED_ACCOUNTING_ROW_MISSING',
+    );
+  }
+  if (state.accounting_fault === 1) {
+    const originRequestId = state.state_request_id ?? undefined;
+    let originRoute: string | undefined;
+    if (originRequestId) {
+      try {
+        originRoute =
+          (await env.MIRNA_SYNC_DB.prepare(
+            'SELECT route_key FROM usage_reservations WHERE reservation_id = ?1 LIMIT 1',
+          )
+            .bind(`${originRequestId}:route`)
+            .first<string>('route_key')) ?? undefined;
+      } catch {
+        originRoute = undefined;
+      }
+    }
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting requires reconciliation.',
+      'route-reservation',
+      route,
+      false,
+      activeFaultReason(state.state_reason),
+      {
+        faultRole: 'blocked',
+        ...(originRequestId ? { originRequestId } : {}),
+        ...(originRoute ? { originRoute } : {}),
+        businessWorkStarted: false,
+      },
+    );
+  }
+  if (state.maintenance_mode !== 0 || state.accept_writes !== 1 || state.accept_pairings !== 1) {
+    throw accountingError(
+      context,
+      503,
+      'SERVICE_MAINTENANCE',
+      'Staging synchronization is in maintenance mode.',
+      'route-reservation',
+      route,
       false,
       'SERVICE_FLAGS_DISABLED',
     );

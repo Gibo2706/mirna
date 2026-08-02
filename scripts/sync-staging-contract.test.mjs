@@ -6,6 +6,7 @@ const migrations = Array.from(
   (_, index) => `${String(index + 1).padStart(4, '0')}_migration.sql`,
 );
 const build = 'abcdef1';
+const registryVersion = '2026-08-02.1';
 const validSnapshot = () => ({
   migrations: [...migrations],
   columns: Object.fromEntries(
@@ -23,6 +24,7 @@ const validSnapshot = () => ({
     state_reason: 'NONE',
   },
   resources: { row_count: 1, r2_stored_bytes: 0, r2_object_count: 0, d1_storage_bytes: 1 },
+  pairingTotals: { row_count: 1, total_count: 2, actual_count: 2 },
   rolling: {
     row_count: 1,
     worker_requests: 1,
@@ -42,12 +44,15 @@ const validSnapshot = () => ({
   unresolved: { reserved_count: 0, unreconciled_failure_count: 0 },
   r2: { readable: true, objectCount: 0, bytes: 0 },
   health: {
+    status: 'ok',
     buildCommit: build,
     services: { d1: 'ok', r2: 'ok' },
     readiness: {
       storage: 'ok',
       accountingSchema: 'ok',
       accountingState: 'ok',
+      routeBudgetConformance: 'ok',
+      routeBudgetRegistryVersion: registryVersion,
       writes: 'enabled',
     },
   },
@@ -55,7 +60,7 @@ const validSnapshot = () => ({
 
 describe('staging schema and accounting contract', () => {
   it('accepts a fully migrated, ready and internally consistent staging snapshot', () => {
-    expect(verifyStagingSnapshot(validSnapshot(), migrations, build)).toEqual({
+    expect(verifyStagingSnapshot(validSnapshot(), migrations, build, registryVersion)).toEqual({
       ok: true,
       errors: [],
     });
@@ -123,6 +128,16 @@ describe('staging schema and accounting contract', () => {
 
     expect(verifyStagingSnapshot(snapshot, migrations, build).errors).toContain(
       'Worker: accounting readiness missing',
+    );
+  });
+
+  it('rejects a stale or faulted route-budget registry marker', () => {
+    const snapshot = validSnapshot();
+    snapshot.health.readiness.routeBudgetConformance = 'fault';
+    snapshot.health.readiness.routeBudgetRegistryVersion = '2026-08-01.1';
+
+    expect(verifyStagingSnapshot(snapshot, migrations, build, registryVersion).errors).toContain(
+      'Worker: accounting readiness failed',
     );
   });
 });

@@ -19,6 +19,8 @@ describe('Worker HTTP foundation', () => {
         storage: string;
         accountingSchema: string;
         accountingState: string;
+        routeBudgetConformance: string;
+        routeBudgetRegistryVersion: string;
         writes: string;
       };
     }>();
@@ -35,6 +37,8 @@ describe('Worker HTTP foundation', () => {
         storage: 'ok',
         accountingSchema: 'ok',
         accountingState: 'ok',
+        routeBudgetConformance: 'ok',
+        routeBudgetRegistryVersion: '2026-08-02.1',
         writes: 'enabled',
       },
     });
@@ -55,6 +59,8 @@ describe('Worker HTTP foundation', () => {
     await expect(checkAccountingReadiness(missingSchema)).resolves.toEqual({
       accountingSchema: 'error',
       accountingState: 'fault',
+      routeBudgetConformance: 'fault',
+      routeBudgetRegistryVersion: '2026-08-02.1',
       writes: 'disabled',
     });
 
@@ -169,11 +175,11 @@ describe('Worker HTTP foundation', () => {
         body: 'plaintext is not accepted',
       }),
     );
-    expect(wrongContentType.status).toBe(415);
+    expect(wrongContentType.status).toBe(404);
     expect(await wrongContentType.json()).toMatchObject({
       error: {
-        code: 'UNSUPPORTED_CONTENT_TYPE',
-        message: 'Content-Type must be application/json.',
+        code: 'ROUTE_NOT_FOUND',
+        message: 'Route was not found.',
       },
     });
 

@@ -11,7 +11,7 @@ import {
   vaultDeletionResponseSchema,
 } from '../../../src/domain/sync/schemas';
 import { authenticateRequest } from './auth';
-import type { RequestContext } from './context';
+import { markBusinessCommit, type RequestContext } from './context';
 import type { Env } from './env';
 import { releaseVaultR2Inventory } from './budget';
 import { conflict, forbidden, HttpError } from './errors';
@@ -162,16 +162,23 @@ export const resumeVaultDeletion = async (
   return job;
 };
 
-export const resumePendingVaultDeletions = async (env: Env, limit = 3): Promise<number> => {
+export const resumePendingVaultDeletions = async (
+  env: Env,
+  plannedRequestIds: readonly string[],
+  now = Date.now(),
+): Promise<number> => {
+  if (plannedRequestIds.length === 0) return 0;
+  if (plannedRequestIds.length > 3) throw new Error('Deletion cleanup plan exceeds its hard cap.');
+  const placeholders = plannedRequestIds.map((_, index) => `?${index + 2}`).join(', ');
   const rows = await env.MIRNA_SYNC_DB.prepare(
     `SELECT deletion_request_id
        FROM deletion_requests
-      WHERE state IN ('pending', 'deleting_r2', 'deleting_d1', 'failed')
+      WHERE deletion_request_id IN (${placeholders})
+        AND state IN ('pending', 'deleting_r2', 'deleting_d1', 'failed')
         AND retention_expires_at > ?1
-      ORDER BY updated_at, deletion_request_id
-      LIMIT ?2`,
+      ORDER BY updated_at, deletion_request_id`,
   )
-    .bind(Date.now(), limit)
+    .bind(now, ...plannedRequestIds)
     .all<{ deletion_request_id: string }>();
   let completed = 0;
   for (const row of rows.results) {
@@ -215,12 +222,8 @@ export const handleDeleteVault = async (context: RequestContext): Promise<Respon
     ) {
       throw conflict('DELETION_IDEMPOTENCY_REUSED', 'Deletion identity was already used.');
     }
-    return responseForJob(
-      context,
-      existing.state === 'completed'
-        ? existing
-        : await resumeVaultDeletion(context.env, existing.deletion_request_id),
-    );
+    markBusinessCommit(context, 'vault-delete-init', true);
+    return responseForJob(context, existing);
   }
 
   const authenticated = await authenticateRequest(context);
@@ -310,7 +313,7 @@ export const handleDeleteVault = async (context: RequestContext): Promise<Respon
       ).bind(authenticated.vaultId, now, manifest.manifestVersion),
       context.env.MIRNA_SYNC_DB.prepare(
         `UPDATE access_sessions SET revoked_at = ?2
-          WHERE vault_id = ?1 AND revoked_at IS NULL`,
+          WHERE vault_id = ?1 AND revoked_at IS NULL AND expires_at > ?2`,
       ).bind(authenticated.vaultId, now),
       context.env.MIRNA_SYNC_DB.prepare(
         `UPDATE recovery_challenges SET consumed_at = ?2
@@ -319,11 +322,10 @@ export const handleDeleteVault = async (context: RequestContext): Promise<Respon
     ]);
   } catch {
     const raced = await loadDeletionJob(context.env.MIRNA_SYNC_DB, transcript.idempotencyKey);
-    if (raced)
-      return responseForJob(
-        context,
-        await resumeVaultDeletion(context.env, raced.deletion_request_id),
-      );
+    if (raced) {
+      markBusinessCommit(context, 'vault-delete-init', true);
+      return responseForJob(context, raced);
+    }
     throw conflict('DELETION_STATE_CHANGED', 'Deletion state changed.');
   }
   if (
@@ -333,5 +335,8 @@ export const handleDeleteVault = async (context: RequestContext): Promise<Respon
   ) {
     throw conflict('DELETION_STATE_CHANGED', 'Deletion state changed.');
   }
-  return responseForJob(context, await resumeVaultDeletion(context.env, transcript.idempotencyKey));
+  const created = await loadDeletionJob(context.env.MIRNA_SYNC_DB, transcript.idempotencyKey);
+  if (!created) throw new Error('Deletion job disappeared after creation.');
+  markBusinessCommit(context, 'vault-delete-init');
+  return responseForJob(context, created);
 };

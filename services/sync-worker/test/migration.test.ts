@@ -22,6 +22,7 @@ const EXPECTED_TABLES = [
   'device_security_transitions',
   'devices',
   'pairing_envelopes',
+  'pairing_request_totals',
   'pairing_requests',
   'recovery_challenges',
   'recovery_records',
@@ -58,7 +59,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(11);
+    expect(migrationCount).toBe(12);
 
     expect(
       await env.MIRNA_SYNC_DB.prepare(
@@ -171,6 +172,7 @@ describe('D1 migration foundation', () => {
       'idx_auth_challenges_device_audience_expiry',
       'idx_auth_challenges_expiry',
       'idx_pairing_requests_vault_status_expiry',
+      'idx_pairing_requests_device_status_expiry',
       'idx_recovery_challenges_lookup_expiry',
       'idx_snapshots_vault_state_revision',
       'idx_sync_changes_vault_cursor',
@@ -191,6 +193,57 @@ describe('D1 migration foundation', () => {
     ]) {
       expect(names.has(requiredIndex), `${requiredIndex} should exist`).toBe(true);
     }
+  });
+
+  it('backfills and maintains the O(1) pairing request total', async () => {
+    const migration = env.TEST_MIGRATIONS.find((entry) => entry.name.includes('0012_'));
+    expect(migration?.queries.join('\n')).toContain(
+      'SELECT 1, COUNT(*), COALESCE(MAX(created_at), 0)',
+    );
+
+    const beforeActual = await env.MIRNA_SYNC_DB.prepare(
+      'SELECT COUNT(*) AS count FROM pairing_requests',
+    ).first<number>('count');
+    const beforeTotal = await env.MIRNA_SYNC_DB.prepare(
+      'SELECT total_count FROM pairing_request_totals WHERE singleton_id = 1',
+    ).first<number>('total_count');
+    expect(beforeTotal).toBe(beforeActual);
+
+    const now = 1_050_000;
+    const pairingRequestId = opaqueId(70);
+    await env.MIRNA_SYNC_DB.prepare(
+      `INSERT INTO pairing_requests (
+         pairing_request_id, new_device_id, new_signing_public_key_raw,
+         new_agreement_public_key_raw, pairing_salt, pairing_claim_token_hash,
+         polling_token_hash, created_at, expires_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+    )
+      .bind(
+        pairingRequestId,
+        opaqueId(71),
+        rawP256PublicKey(72),
+        rawP256PublicKey(73),
+        bytes(32, 74),
+        bytes(32, 75),
+        bytes(32, 76),
+        now,
+        now + 300_000,
+      )
+      .run();
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT total_count FROM pairing_request_totals WHERE singleton_id = 1',
+      ).first<number>('total_count'),
+    ).toBe((beforeTotal ?? 0) + 1);
+
+    await env.MIRNA_SYNC_DB.prepare('DELETE FROM pairing_requests WHERE pairing_request_id = ?1')
+      .bind(pairingRequestId)
+      .run();
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT total_count FROM pairing_request_totals WHERE singleton_id = 1',
+      ).first<number>('total_count'),
+    ).toBe(beforeTotal);
   });
 
   it('requires exact device identity and raw keys from the JSON manifest membership', async () => {

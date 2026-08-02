@@ -18,6 +18,11 @@ export interface SyncBetaDiagnosticEventRecord {
   readonly accountingReason?: string;
   readonly reservationPhase?: string;
   readonly route?: string;
+  readonly faultRole?: string;
+  readonly originRequestId?: string;
+  readonly originRoute?: string;
+  readonly lifecycleOperation?: string;
+  readonly businessWorkStarted?: boolean;
   readonly businessCommitted?: boolean;
   readonly serviceFlagsChanged?: boolean;
   readonly workerBuild?: string;

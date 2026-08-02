@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { resumePendingVaultDeletions } from '../src/deletion';
 import { canonicalizeJson } from '../../../src/domain/sync/canonical';
 import {
   SYNC_CRYPTO_SUITE,
@@ -621,11 +622,12 @@ describe('Phase 3 device security transitions', () => {
     expect(bearerOnly.status).toBe(400);
 
     const deleted = await authenticatedDelete('/v1/vault', accessToken, request);
-    expect(deleted.status).toBe(200);
+    expect(deleted.status).toBe(202);
     expect(vaultDeletionResponseSchema.parse(await deleted.json())).toMatchObject({
-      state: 'completed',
-      deleted: true,
+      state: 'pending',
+      deleted: false,
     });
+    expect(await resumePendingVaultDeletions(env, [request.transcript.idempotencyKey])).toBe(1);
     expect(
       (await env.MIRNA_SYNC_BUCKET.list({ prefix: `v1/${fixture.vaultId}/` })).objects,
     ).toEqual([]);

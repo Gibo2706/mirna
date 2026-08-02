@@ -151,17 +151,19 @@ The staging accounting tools are intentionally separated:
 
 ```sh
 npm run sync:budget:diagnose -- --env staging --since 6h
-npm run sync:budget:repair -- --env staging --request <REQUEST_ID> --apply
+npm run sync:budget:repair -- --env staging --request <REQUEST_ID> \
+  --operation pairing-create --pairing-request <PAIRING_REQUEST_ID> --apply
 ```
 
 Diagnosis is read-only. Both commands write a mode-`0600`, ignored evidence
-snapshot under `.private/sync-budget-evidence/`. Repair accepts only staging,
-requires one exact Request ID and `--apply`, refuses unresolved non-target
-incidents or reached hard limits, reconciles only exact stale measurements,
-rebuilds existing daily/rolling totals from settled reservations, and restores
-service flags only after those checks. Add `--business-committed` only when the
-inspected business rows prove that the protected operation committed. The tool
-never reads request bodies, financial rows, recovery envelopes, keys or tokens.
+snapshot under `.private/sync-budget-evidence/`. Repair accepts only staging and
+the proven `pairing-create` incident signature. It requires the exact HTTP and
+pairing request IDs plus `--apply`, derives the business commit from the single
+isolated pending D1 row, and refuses non-target incidents, counter drift or
+reached hard limits. Two exact CAS writes change only the three reservation
+reconciliation fields and the four accounting-fault fields; admission,
+maintenance and usage counters are never rewritten. The tool never reads
+request bodies, financial rows, recovery envelopes, keys or tokens.
 
 ## Cleanup and storage safety
 

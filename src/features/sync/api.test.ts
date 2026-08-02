@@ -51,6 +51,8 @@ const healthBody = {
     storage: 'ok',
     accountingSchema: 'ok',
     accountingState: 'ok',
+    routeBudgetConformance: 'ok',
+    routeBudgetRegistryVersion: '2026-08-02.1',
     writes: 'enabled',
   },
 } as const;

@@ -281,6 +281,49 @@ const hasAccountName = async (page: Page, name: string): Promise<boolean> =>
     { databaseName: DATABASE_NAME, expectedName: name },
   );
 
+interface LocalPairingFinalizationView {
+  readonly pendingCount: number;
+  readonly activeVaultCount: number;
+  readonly requestId?: string;
+  readonly vaultId?: string;
+  readonly deviceId?: string;
+}
+
+const readLocalPairingFinalizationView = (page: Page): Promise<LocalPairingFinalizationView> =>
+  page.evaluate(
+    ({ databaseName, vaultRecordId }) =>
+      new Promise<LocalPairingFinalizationView>((resolvePromise, reject) => {
+        const open = indexedDB.open(databaseName);
+        open.onerror = () => reject(new Error('Lokalna baza nije otvorena.'));
+        open.onsuccess = () => {
+          const database = open.result;
+          const transaction = database.transaction(['syncPairingFinalizations', 'syncVault']);
+          const pendingRequest = transaction.objectStore('syncPairingFinalizations').getAll();
+          const activeVaultRequest = transaction.objectStore('syncVault').count(vaultRecordId);
+          transaction.onerror = () =>
+            reject(new Error('Lokalni pairing checkpoint nije pročitan.'));
+          transaction.oncomplete = () => {
+            database.close();
+            const pending = (
+              pendingRequest.result as Array<{
+                requestId: string;
+                vaultId: string;
+                deviceId: string;
+              }>
+            )[0];
+            resolvePromise({
+              pendingCount: pendingRequest.result.length,
+              activeVaultCount: activeVaultRequest.result,
+              requestId: pending?.requestId,
+              vaultId: pending?.vaultId,
+              deviceId: pending?.deviceId,
+            });
+          };
+        };
+      }),
+    { databaseName: DATABASE_NAME, vaultRecordId: SYNC_VAULT_RECORD_ID },
+  );
+
 interface LocalFinanceMergeView {
   readonly transactions: readonly { readonly description: string; readonly notes?: string }[];
   readonly budgets: readonly { readonly name: string; readonly defaultAmount: number }[];
@@ -674,6 +717,131 @@ test('activation preserves the prepared setup and creates one vault after an acc
   expect((await readLocalSyncSecurityView(page)).displayName).toBe('Accounting retry telefon');
 
   await context.close();
+});
+
+test('pairing finalization survives response loss and reload without duplicate authorization', async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+
+  const desktopContext = await browser.newContext({
+    ...devices['Desktop Chrome'],
+    serviceWorkers: 'allow',
+    timezoneId: 'Europe/Belgrade',
+  });
+  const phoneContext = await browser.newContext({
+    ...devices['Pixel 7'],
+    viewport: { width: 360, height: 800 },
+    serviceWorkers: 'allow',
+    timezoneId: 'Europe/Belgrade',
+  });
+  captureSyncRequestBodies(desktopContext);
+  captureSyncRequestBodies(phoneContext);
+  const desktop = await desktopContext.newPage();
+  const phone = await phoneContext.newPage();
+
+  try {
+    const pairingCode = await startPairingRequest(desktop, 'Računar sa prekinutim odgovorom');
+    await seedSyntheticPlan(phone);
+    await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+    await phone.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
+    await phone.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
+    await expect(phone.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
+    await phone.getByLabel('Naziv ovog uređaja').fill('Telefon za izgubljeni odgovor');
+    await phone.getByRole('button', { name: 'Napravi recovery kod' }).click();
+    const recoveryCode = await readRecoveryCode(phone);
+    await confirmRecoveryGroups(phone, recoveryCode);
+    await phone.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
+    await phone.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+    await phone
+      .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
+      .click();
+    await expect
+      .poll(async () => (await readLocalSyncSecurityView(phone)).lastSnapshotRevision)
+      .toBe(1);
+    const phoneLocal = await readLocalSyncSecurityView(phone);
+
+    const existingSas = await inspectPairingOnExistingDevice(phone, pairingCode);
+    await phone.getByRole('button', { name: 'Poklapa se — odobri' }).click();
+    expect(await waitForNewDeviceSas(desktop)).toBe(existingSas);
+
+    let finalizeAttempts = 0;
+    await desktop.route(/\/v1\/pairings\/[A-Za-z0-9_-]{22}\/finalize$/u, async (route) => {
+      finalizeAttempts += 1;
+      if (finalizeAttempts > 1) {
+        await route.continue();
+        return;
+      }
+      const committedResponse = await route.fetch();
+      expect([200, 201]).toContain(committedResponse.status());
+      await route.abort('connectionreset');
+    });
+
+    await desktop.getByRole('button', { name: 'Poklapaju se — poveži' }).click();
+    await expect(desktop.getByRole('alert').last()).toBeVisible();
+    await expect
+      .poll(() => readLocalPairingFinalizationView(desktop))
+      .toMatchObject({ pendingCount: 1, activeVaultCount: 0 });
+    const pending = await readLocalPairingFinalizationView(desktop);
+    expect(pending.requestId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
+    expect(pending.vaultId).toBe(phoneLocal.vaultId);
+    expect(pending.deviceId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
+
+    const committedServerState = localD1(`
+      SELECT
+        (SELECT COUNT(*) FROM pairing_requests
+          WHERE pairing_request_id = ${sqlLiteral(pending.requestId ?? '')}
+            AND status = 'finalized') AS finalized_pairings,
+        (SELECT COUNT(*) FROM devices
+          WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
+            AND device_id = ${sqlLiteral(pending.deviceId ?? '')}
+            AND status = 'active') AS active_devices,
+        (SELECT COUNT(*) FROM device_grants
+          WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
+            AND device_id = ${sqlLiteral(pending.deviceId ?? '')}
+            AND revoked_at IS NULL) AS active_grants
+    `)[0];
+    expect(committedServerState).toEqual({
+      finalized_pairings: 1,
+      active_devices: 1,
+      active_grants: 1,
+    });
+
+    await desktop.reload();
+    const resume = desktop.getByRole('button', { name: 'Dovrši započeto povezivanje' });
+    await expect(resume).toBeVisible();
+    await resume.click();
+    await expect(desktop.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+    expect(finalizeAttempts).toBe(2);
+    expect(await readLocalPairingFinalizationView(desktop)).toMatchObject({
+      pendingCount: 0,
+      activeVaultCount: 1,
+    });
+    const desktopLocal = await readLocalSyncSecurityView(desktop);
+    expect(desktopLocal.vaultId).toBe(phoneLocal.vaultId);
+    expect(desktopLocal.deviceId).toBe(pending.deviceId);
+    expect(desktopLocal.signingPrivateKeyExtractable).toBe(false);
+    expect(desktopLocal.agreementPrivateKeyExtractable).toBe(false);
+    expect(desktopLocal.localWrappingKeyExtractable).toBe(false);
+
+    const retriedServerState = localD1(`
+      SELECT
+        (SELECT COUNT(*) FROM pairing_requests
+          WHERE pairing_request_id = ${sqlLiteral(pending.requestId ?? '')}
+            AND status = 'finalized') AS finalized_pairings,
+        (SELECT COUNT(*) FROM devices
+          WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
+            AND device_id = ${sqlLiteral(pending.deviceId ?? '')}
+            AND status = 'active') AS active_devices,
+        (SELECT COUNT(*) FROM device_grants
+          WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
+            AND device_id = ${sqlLiteral(pending.deviceId ?? '')}
+            AND revoked_at IS NULL) AS active_grants
+    `)[0];
+    expect(retriedServerState).toEqual(committedServerState);
+  } finally {
+    await Promise.all([desktopContext.close(), phoneContext.close()]);
+  }
 });
 
 test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths, and recover', async ({

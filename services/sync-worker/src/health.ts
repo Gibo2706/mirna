@@ -1,10 +1,12 @@
 import type { Env } from './env';
 import { jsonResponse, SYNC_PROTOCOL_VERSION } from './http';
+import { ROUTE_BUDGET_REGISTRY_VERSION, routeRegistryIsConformant } from './route-registry';
 
 type Reachability = 'ok' | 'unavailable';
 type ReadinessStatus = 'ok' | 'error';
 type AccountingState = 'ok' | 'fault';
 type WriteState = 'enabled' | 'disabled';
+type RouteBudgetConformance = 'ok' | 'fault';
 interface HealthCheckResult {
   d1: Reachability;
   r2: Reachability;
@@ -14,6 +16,8 @@ interface AccountingReadiness {
   accountingSchema: ReadinessStatus;
   accountingState: AccountingState;
   writes: WriteState;
+  routeBudgetConformance: RouteBudgetConformance;
+  routeBudgetRegistryVersion: string;
 }
 
 interface HealthCacheEntry {
@@ -60,6 +64,7 @@ const REQUIRED_ACCOUNTING_COLUMNS = Object.freeze({
     'accounting_fault_at',
   ],
   resource_totals: ['singleton_id', 'd1_storage_bytes'],
+  pairing_request_totals: ['singleton_id', 'total_count', 'updated_at'],
   usage_daily_buckets: [
     'scope_type',
     'scope_id',
@@ -115,10 +120,22 @@ export const checkAccountingReadiness = async (
       )
     ).every(Boolean);
     if (!schemaReady) {
-      return { accountingSchema: 'error', accountingState: 'fault', writes: 'disabled' };
+      return {
+        accountingSchema: 'error',
+        accountingState: 'fault',
+        writes: 'disabled',
+        routeBudgetConformance: 'fault',
+        routeBudgetRegistryVersion: ROUTE_BUDGET_REGISTRY_VERSION,
+      };
     }
   } catch {
-    return { accountingSchema: 'error', accountingState: 'fault', writes: 'disabled' };
+    return {
+      accountingSchema: 'error',
+      accountingState: 'fault',
+      writes: 'disabled',
+      routeBudgetConformance: 'fault',
+      routeBudgetRegistryVersion: ROUTE_BUDGET_REGISTRY_VERSION,
+    };
   }
 
   try {
@@ -144,8 +161,25 @@ export const checkAccountingReadiness = async (
           WHERE scope_type = 'global' AND scope_id = 'service'`,
       )
       .first<number>('count');
-    if (!state || resourceRow !== 1 || rollingRow !== 1) {
-      return { accountingSchema: 'ok', accountingState: 'fault', writes: 'disabled' };
+    const pairingTotalRow = await database
+      .prepare('SELECT singleton_id FROM pairing_request_totals WHERE singleton_id = 1')
+      .first<number>('singleton_id');
+    const unresolvedRouteBudgetFaults = await database
+      .prepare(
+        `SELECT COUNT(*) AS count
+           FROM usage_reservations
+          WHERE settlement_failure_code = 'USAGE_RESERVATION_UNDERESTIMATED'
+            AND reconciled_at IS NULL`,
+      )
+      .first<number>('count');
+    if (!state || resourceRow !== 1 || rollingRow !== 1 || pairingTotalRow !== 1) {
+      return {
+        accountingSchema: 'ok',
+        accountingState: 'fault',
+        writes: 'disabled',
+        routeBudgetConformance: 'fault',
+        routeBudgetRegistryVersion: ROUTE_BUDGET_REGISTRY_VERSION,
+      };
     }
     const accountingState = state.accounting_fault === 0 ? 'ok' : 'fault';
     const writes =
@@ -156,9 +190,22 @@ export const checkAccountingReadiness = async (
       state.maintenance_mode === 0
         ? 'enabled'
         : 'disabled';
-    return { accountingSchema: 'ok', accountingState, writes };
+    return {
+      accountingSchema: 'ok',
+      accountingState,
+      writes,
+      routeBudgetConformance:
+        routeRegistryIsConformant() && unresolvedRouteBudgetFaults === 0 ? 'ok' : 'fault',
+      routeBudgetRegistryVersion: ROUTE_BUDGET_REGISTRY_VERSION,
+    };
   } catch {
-    return { accountingSchema: 'ok', accountingState: 'fault', writes: 'disabled' };
+    return {
+      accountingSchema: 'ok',
+      accountingState: 'fault',
+      writes: 'disabled',
+      routeBudgetConformance: 'fault',
+      routeBudgetRegistryVersion: ROUTE_BUDGET_REGISTRY_VERSION,
+    };
   }
 };
 
@@ -199,12 +246,15 @@ export const handleHealth = async (
           accountingSchema: 'error',
           accountingState: 'fault',
           writes: 'disabled',
+          routeBudgetConformance: 'fault',
+          routeBudgetRegistryVersion: ROUTE_BUDGET_REGISTRY_VERSION,
         } satisfies AccountingReadiness);
   const storage = d1 === 'ok' && r2 === 'ok' ? 'ok' : 'error';
   const healthy =
     storage === 'ok' &&
     accounting.accountingSchema === 'ok' &&
     accounting.accountingState === 'ok' &&
+    accounting.routeBudgetConformance === 'ok' &&
     accounting.writes === 'enabled';
 
   return jsonResponse(

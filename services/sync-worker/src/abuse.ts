@@ -1,56 +1,17 @@
 import { bytesToBase64Url, utf8 } from '../../../src/domain/sync/encoding';
 import type { Env } from './env';
 import { HttpError } from './errors';
+import { matchApiPath, matchApiRequest, type RateLimitBindingName } from './route-registry';
 import { domainHashBytes } from './server-crypto';
 
-type RateLimitBindingName =
-  | 'MIRNA_HEALTH_RATE_LIMITER'
-  | 'MIRNA_SETUP_RATE_LIMITER'
-  | 'MIRNA_PAIRING_CREATE_RATE_LIMITER'
-  | 'MIRNA_PAIRING_ACTION_RATE_LIMITER'
-  | 'MIRNA_AUTH_CHALLENGE_RATE_LIMITER'
-  | 'MIRNA_AUTH_SESSION_RATE_LIMITER'
-  | 'MIRNA_RECOVERY_INIT_RATE_LIMITER'
-  | 'MIRNA_RECOVERY_ACTION_RATE_LIMITER'
-  | 'MIRNA_SYNC_READ_RATE_LIMITER'
-  | 'MIRNA_SNAPSHOT_UPLOAD_RATE_LIMITER'
-  | 'MIRNA_OPERATION_WRITE_RATE_LIMITER'
-  | 'MIRNA_DIAGNOSTICS_RATE_LIMITER';
-
-const bindingForPath = (pathname: string): RateLimitBindingName | null => {
-  if (pathname === '/v1/health') return 'MIRNA_HEALTH_RATE_LIMITER';
-  if (pathname === '/v1/diagnostics/events') return 'MIRNA_DIAGNOSTICS_RATE_LIMITER';
-  if (pathname === '/v1/vaults') return 'MIRNA_SETUP_RATE_LIMITER';
-  if (pathname === '/v1/pairings') return 'MIRNA_PAIRING_CREATE_RATE_LIMITER';
-  if (pathname.startsWith('/v1/pairings/')) return 'MIRNA_PAIRING_ACTION_RATE_LIMITER';
-  if (pathname === '/v1/auth/challenge') return 'MIRNA_AUTH_CHALLENGE_RATE_LIMITER';
-  if (pathname === '/v1/auth/session') return 'MIRNA_AUTH_SESSION_RATE_LIMITER';
-  if (pathname === '/v1/recovery/challenge') return 'MIRNA_RECOVERY_INIT_RATE_LIMITER';
-  if (
-    pathname === '/v1/recovery/bundle' ||
-    pathname === '/v1/recovery/snapshot' ||
-    pathname === '/v1/vault' ||
-    /^\/v1\/devices\/[^/]+\/(renew|revoke)$/u.test(pathname) ||
-    /^\/v1\/vaults\/[^/]+\/recover$/u.test(pathname)
-  ) {
-    return 'MIRNA_RECOVERY_ACTION_RATE_LIMITER';
-  }
-  if (
-    pathname === '/v1/vault/manifest' ||
-    pathname === '/v1/snapshots/current' ||
-    pathname === '/v1/changes' ||
-    pathname === '/v1/manifests' ||
-    /^\/v1\/key-epochs\/(current|[1-9][0-9]*)$/u.test(pathname)
-  ) {
-    return 'MIRNA_SYNC_READ_RATE_LIMITER';
-  }
-  if (/^\/v1\/snapshots\/[^/]+$/u.test(pathname)) {
-    return 'MIRNA_SNAPSHOT_UPLOAD_RATE_LIMITER';
-  }
-  if (pathname === '/v1/operations' || pathname === '/v1/acks') {
-    return 'MIRNA_OPERATION_WRITE_RATE_LIMITER';
-  }
-  return null;
+const bindingForRequest = (request: Request): RateLimitBindingName => {
+  const exactRoute = matchApiRequest(request);
+  if (exactRoute) return exactRoute.definition.rateLimit;
+  const registeredPath = matchApiPath(new URL(request.url).pathname)[0];
+  // Invalid methods, preflights and unknown paths still consume edge capacity.
+  // The health limiter is the deliberately cheap catch-all for traffic that
+  // cannot be assigned to a registered method-specific route.
+  return registeredPath?.definition.rateLimit ?? 'MIRNA_HEALTH_RATE_LIMITER';
 };
 
 const ephemeralNetworkKey = async (request: Request, bindingName: string): Promise<string> => {
@@ -70,8 +31,7 @@ const ephemeralNetworkKey = async (request: Request, bindingName: string): Promi
  * route-class binding and fails closed if one is unavailable.
  */
 export const enforceEdgeRateLimit = async (request: Request, env: Env): Promise<void> => {
-  const bindingName = bindingForPath(new URL(request.url).pathname);
-  if (bindingName === null) return;
+  const bindingName = bindingForRequest(request);
   const binding = env[bindingName];
   if (binding === undefined) {
     if (env.MIRNA_ENVIRONMENT === 'staging') {

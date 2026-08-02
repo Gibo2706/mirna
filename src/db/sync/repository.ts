@@ -27,8 +27,10 @@ import {
   ACTIVE_SYNC_VAULT_RECORD_ID,
   LOCAL_SYNC_DEVICE_RECORD_ID,
   SYNC_METADATA_RECORD_ID,
+  SYNC_PAIRING_FINALIZATION_RECORD_ID,
   localVaultKeyRecordId,
   type LocalSyncSetup,
+  type SyncPairingFinalizationRecord,
   type SyncDeviceRecord,
   type SyncVaultRecord,
 } from './records';
@@ -273,7 +275,7 @@ const validateManifestPublicKeys = async (vault: SyncVaultRecord): Promise<void>
   ]);
 };
 
-const validateSetup = async (input: unknown): Promise<LocalSyncSetup> => {
+export const validateLocalSyncSetup = async (input: unknown): Promise<LocalSyncSetup> => {
   const setup = parseSetup(input);
   const { vault, device, vaultKey, metadata } = setup;
   if (
@@ -382,6 +384,7 @@ const syncTables = (database: FinanceDatabase) => [
   database.syncMetadata,
   database.syncCheckpoints,
   database.syncEntityStates,
+  database.syncPairingFinalizations,
 ];
 
 const assertCompatibleExistingVault = async (
@@ -436,13 +439,73 @@ export const writeLocalSyncSetup = async (
   setup: LocalSyncSetup,
   database: FinanceDatabase = db,
 ): Promise<void> => {
-  const validatedSetup = await validateSetup(setup);
+  const validatedSetup = await validateLocalSyncSetup(setup);
   await database.transaction(
     'rw',
     [database.syncVault, database.syncDevice, database.syncKeys, database.syncMetadata],
     async () => {
       await assertCompatibleExistingVault(database, validatedSetup);
       await putSetupRecords(database, validatedSetup);
+    },
+  );
+};
+
+export const promotePairingFinalizationSetup = async (
+  checkpoint: SyncPairingFinalizationRecord,
+  database: FinanceDatabase = db,
+): Promise<LocalSyncSetup> => {
+  const setup = await validateLocalSyncSetup(checkpoint.setup);
+  if (
+    checkpoint.id !== SYNC_PAIRING_FINALIZATION_RECORD_ID ||
+    setup.vault.vaultId !== checkpoint.vaultId ||
+    setup.device.deviceId !== checkpoint.deviceId ||
+    setup.vault.manifest.manifestVersion !== checkpoint.manifestVersion ||
+    setup.metadata.lastManifestHash !== checkpoint.manifestHash
+  ) {
+    throw new InvalidLocalSyncSetupError('Pairing checkpoint does not match its staged setup.');
+  }
+  return database.transaction(
+    'rw',
+    [
+      database.syncVault,
+      database.syncDevice,
+      database.syncKeys,
+      database.syncMetadata,
+      database.syncPairingFinalizations,
+    ],
+    async () => {
+      const stored = await database.syncPairingFinalizations.get(
+        SYNC_PAIRING_FINALIZATION_RECORD_ID,
+      );
+      if (!stored) {
+        const [vault, device, metadata] = await Promise.all([
+          database.syncVault.get(ACTIVE_SYNC_VAULT_RECORD_ID),
+          database.syncDevice.get(LOCAL_SYNC_DEVICE_RECORD_ID),
+          database.syncMetadata.get(SYNC_METADATA_RECORD_ID),
+        ]);
+        if (
+          vault?.vaultId === checkpoint.vaultId &&
+          device?.deviceId === checkpoint.deviceId &&
+          metadata?.lastManifestHash === checkpoint.manifestHash
+        ) {
+          return setup;
+        }
+        throw new InvalidLocalSyncSetupError('Pairing checkpoint disappeared before promotion.');
+      }
+      if (
+        stored.requestId !== checkpoint.requestId ||
+        stored.vaultId !== checkpoint.vaultId ||
+        stored.deviceId !== checkpoint.deviceId ||
+        stored.manifestHash !== checkpoint.manifestHash ||
+        stored.nonce !== checkpoint.nonce ||
+        stored.ciphertext !== checkpoint.ciphertext
+      ) {
+        throw new InvalidLocalSyncSetupError('Pairing checkpoint lost its local state race.');
+      }
+      await assertCompatibleExistingVault(database, setup);
+      await putSetupRecords(database, setup);
+      await database.syncPairingFinalizations.delete(SYNC_PAIRING_FINALIZATION_RECORD_ID);
+      return setup;
     },
   );
 };
@@ -457,8 +520,8 @@ export const writeAdvancedLocalSyncSetup = async (
   database: FinanceDatabase = db,
 ): Promise<LocalSyncSetup> => {
   const [validatedCurrent, validatedNext] = await Promise.all([
-    validateSetup(current),
-    validateSetup(next),
+    validateLocalSyncSetup(current),
+    validateLocalSyncSetup(next),
   ]);
   assertSameLocalIdentity(validatedCurrent, validatedNext);
   if (
@@ -509,7 +572,7 @@ export const writeRotatedLocalSyncSetup = async (
   database: FinanceDatabase = db,
 ): Promise<LocalSyncSetup> => {
   const [validatedSetup, current] = await Promise.all([
-    validateSetup(setup),
+    validateLocalSyncSetup(setup),
     readLocalSyncSetup(database),
   ]);
   if (!current) throw new IncompleteLocalSyncSetupError();
@@ -563,7 +626,7 @@ export const writeRecoveredLocalSyncSetup = async (
   database: FinanceDatabase = db,
 ): Promise<void> => {
   const [validatedSetup, validatedData] = await Promise.all([
-    validateSetup(setup),
+    validateLocalSyncSetup(setup),
     Promise.resolve(validateFinanceData(data)),
   ]);
   await database.transaction(
@@ -609,7 +672,7 @@ export const readLocalSyncSetup = async (
       return { vault, device, vaultKey, metadata };
     },
   );
-  return records ? validateSetup(records) : undefined;
+  return records ? validateLocalSyncSetup(records) : undefined;
 };
 
 /**

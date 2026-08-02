@@ -109,6 +109,12 @@ import {
   writeRecoveredLocalSyncSetup,
 } from '@/db/sync/repository';
 import {
+  completePendingPairingFinalization,
+  readPendingPairingFinalization,
+  stagePairingFinalization,
+  type PendingPairingFinalization,
+} from '@/db/sync/pairing-finalization-checkpoint';
+import {
   ACTIVE_SYNC_VAULT_RECORD_ID,
   LOCAL_SYNC_DEVICE_RECORD_ID,
   SYNC_METADATA_RECORD_ID,
@@ -171,6 +177,15 @@ export interface SyncLifecycleRepositoryPort {
   writeRecovered?(setup: LocalSyncSetup, data: FinanceData): Promise<void>;
 }
 
+export interface PairingFinalizationCheckpointPort {
+  stage(
+    setup: LocalSyncSetup,
+    request: PairingFinalizeRequestV1,
+  ): Promise<PendingPairingFinalization>;
+  read(): Promise<PendingPairingFinalization | undefined>;
+  complete(pending: PendingPairingFinalization): Promise<LocalSyncSetup>;
+}
+
 const defaultRepository: SyncLifecycleRepositoryPort = {
   read: () => readLocalSyncSetup(),
   write: (setup) => writeLocalSyncSetup(setup),
@@ -224,6 +239,7 @@ interface CommonDependencies {
   readonly runtime?: CryptoRuntime;
   readonly now?: () => Date;
   readonly selectRecoveryConfirmationGroups?: RecoveryConfirmationSelector;
+  readonly pairingFinalizationCheckpoints?: PairingFinalizationCheckpointPort;
 }
 
 interface ResolvedDependencies {
@@ -233,6 +249,7 @@ interface ResolvedDependencies {
   readonly runtime: CryptoRuntime;
   readonly now: () => Date;
   readonly selectRecoveryConfirmationGroups: RecoveryConfirmationSelector;
+  readonly pairingFinalizationCheckpoints: PairingFinalizationCheckpointPort;
 }
 
 const deviceIdComparator = (left: { deviceId: string }, right: { deviceId: string }): number =>
@@ -278,6 +295,11 @@ const resolveDependencies = (dependencies: CommonDependencies): ResolvedDependen
     now: dependencies.now ?? (() => new Date()),
     selectRecoveryConfirmationGroups:
       dependencies.selectRecoveryConfirmationGroups ?? defaultConfirmationSelector,
+    pairingFinalizationCheckpoints: dependencies.pairingFinalizationCheckpoints ?? {
+      stage: (setup, request) => stagePairingFinalization(setup, request),
+      read: () => readPendingPairingFinalization(),
+      complete: (pending) => completePendingPairingFinalization(pending),
+    },
   };
 };
 
@@ -869,6 +891,7 @@ type NewPairingState =
   | { readonly kind: 'creating'; readonly material: NewPairingMaterial }
   | { readonly kind: 'polling'; readonly material: NewPairingMaterial; readonly expiresAt: string }
   | { readonly kind: 'awaiting-sas-confirmation'; readonly material: AcceptedPairingMaterial }
+  | { readonly kind: 'finalizing'; readonly pending: PendingPairingFinalization }
   | { readonly kind: 'active'; readonly setup: LocalSyncSetup }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'ended' };
@@ -1069,23 +1092,6 @@ export class NewDevicePairingLifecycle {
         runtime,
       ),
     });
-    const response = pairingFinalizeResponseSchema.parse(
-      await this.#dependencies.api.finalizePairing(
-        material.envelope.context.pairingRequestId,
-        material.finalization,
-      ),
-    );
-    if (
-      !response.finalized ||
-      response.vaultId !== material.candidateManifest.vaultId ||
-      response.deviceId !== material.deviceId ||
-      response.manifestVersion !== material.candidateManifest.manifestVersion
-    ) {
-      throw new SyncLifecycleError(
-        'server-ack-mismatch',
-        'Server nije potvrdio tačno uparivanje uređaja.',
-      );
-    }
     const device = material.candidateManifest.devices.find(
       (candidate) => candidate.deviceId === material.deviceId,
     );
@@ -1102,10 +1108,30 @@ export class NewDevicePairingLifecycle {
       snapshotCommitId: material.envelope.context.snapshotCommitId,
       runtime,
     });
-    await this.#dependencies.repository.write(setup);
+    const pending = await this.#dependencies.pairingFinalizationCheckpoints.stage(
+      setup,
+      material.finalization,
+    );
     clearBytes(material.pollingToken, material.vaultMasterKey);
-    this.#state = { kind: 'active', setup };
-    return setup;
+    this.#state = { kind: 'finalizing', pending };
+    return this.#finishFinalization(pending);
+  }
+
+  async resumeFinalization(): Promise<LocalSyncSetup> {
+    if (this.#state.kind === 'active') return this.#state.setup;
+    if (this.#state.kind !== 'idle' && this.#state.kind !== 'finalizing') {
+      throw new SyncLifecycleError('invalid-state', 'Drugo povezivanje je već aktivno.');
+    }
+    await assertNoExistingVault(this.#dependencies.repository);
+    const pending =
+      this.#state.kind === 'finalizing'
+        ? this.#state.pending
+        : await this.#dependencies.pairingFinalizationCheckpoints.read();
+    if (!pending) {
+      throw new SyncLifecycleError('invalid-state', 'Nema sačuvanog povezivanja za nastavak.');
+    }
+    this.#state = { kind: 'finalizing', pending };
+    return this.#finishFinalization(pending);
   }
 
   async cancel(): Promise<void> {
@@ -1132,6 +1158,26 @@ export class NewDevicePairingLifecycle {
       else clearBytes(material.pollingToken, material.vaultMasterKey);
       this.#state = { kind: 'cancelled' };
     }
+  }
+
+  async #finishFinalization(pending: PendingPairingFinalization): Promise<LocalSyncSetup> {
+    const response = pairingFinalizeResponseSchema.parse(
+      await this.#dependencies.api.finalizePairing(pending.record.requestId, pending.request),
+    );
+    if (
+      !response.finalized ||
+      response.vaultId !== pending.record.vaultId ||
+      response.deviceId !== pending.record.deviceId ||
+      response.manifestVersion !== pending.record.manifestVersion
+    ) {
+      throw new SyncLifecycleError(
+        'server-ack-mismatch',
+        'Server nije potvrdio tačno uparivanje uređaja.',
+      );
+    }
+    const setup = await this.#dependencies.pairingFinalizationCheckpoints.complete(pending);
+    this.#state = { kind: 'active', setup };
+    return setup;
   }
 
   async #openApprovedPairing(

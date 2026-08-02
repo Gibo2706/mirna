@@ -26,6 +26,7 @@ import type {
   SyncKeyRecord,
   SyncMetadataRecord,
   SyncOutboxRecord,
+  SyncPairingFinalizationRecord,
   SyncVaultRecord,
 } from './sync/records';
 import type {
@@ -59,6 +60,7 @@ export class FinanceDatabase extends Dexie {
   syncEntityStates!: EntityTable<SyncEntityStateRecord, 'id'>;
   syncBetaSupport!: EntityTable<SyncBetaSupportRecord, 'id'>;
   syncBetaDiagnosticEvents!: EntityTable<SyncBetaDiagnosticEventRecord, 'id'>;
+  syncPairingFinalizations!: EntityTable<SyncPairingFinalizationRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -336,6 +338,10 @@ export class FinanceDatabase extends Dexie {
     this.version(11).stores({
       syncBetaSupport: 'id, &supportId, createdAt',
       syncBetaDiagnosticEvents: 'id, createdAt, eventType, requestId',
+    });
+
+    this.version(12).stores({
+      syncPairingFinalizations: 'id, &requestId, createdAt',
     });
   }
 }
