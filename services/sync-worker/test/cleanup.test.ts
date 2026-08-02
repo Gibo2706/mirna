@@ -307,6 +307,7 @@ describe('scheduled cleanup', () => {
     });
     const empty = plan({});
     const oneItem = plan({ authChallenges: 1 });
+    const reconciliationOnly = plan({ reconcileR2: true });
     const maximumConfiguredBatch = plan({
       authChallenges: 1_000,
       snapshots: 10,
@@ -318,6 +319,9 @@ describe('scheduled cleanup', () => {
     expect(scheduledCleanupHasWork(empty)).toBe(false);
     expect(scheduledCleanupHasWork(oneItem)).toBe(true);
     const oneUsage = estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(oneItem));
+    expect(
+      estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(reconciliationOnly)),
+    ).toMatchObject({ d1RowsRead: 514, d1RowsWritten: 64, r2ClassA: 1 });
     const maximumUsage = estimateScheduledCleanupUsage(
       scheduledCleanupEstimateInput(maximumConfiguredBatch),
     );

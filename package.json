@@ -39,6 +39,7 @@
     "sync:logs": "node scripts/query-sync-beta-logs.mjs",
     "sync:budget:diagnose": "node scripts/sync-budget-accounting.mjs diagnose",
     "sync:budget:repair": "node scripts/sync-budget-accounting.mjs repair",
+    "sync:staging:verify": "node scripts/sync-staging-verify.mjs",
     "docs:assets": "node scripts/generate-readme-assets.mjs",
     "public:check": "node scripts/public-repo-check.mjs",
     "public:history": "node scripts/public-history-check.mjs",

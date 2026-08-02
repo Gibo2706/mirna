@@ -1,5 +1,7 @@
+import { env } from 'cloudflare:workers';
 import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { checkAccountingReadiness } from '../src/health';
 
 const request = (path: string, init?: RequestInit): Request =>
   new Request(`https://sync.invalid${path}`, init);
@@ -13,9 +15,15 @@ describe('Worker HTTP foundation', () => {
       environment: string;
       writesEnabled: boolean;
       services: { d1: string; r2: string };
+      readiness: {
+        storage: string;
+        accountingSchema: string;
+        accountingState: string;
+        writes: string;
+      };
     }>();
 
-    expect(response.status).toBe(200);
+    expect(response.status, JSON.stringify(body)).toBe(200);
     expect(body).toEqual({
       status: 'ok',
       protocolVersion: 1,
@@ -23,13 +31,67 @@ describe('Worker HTTP foundation', () => {
       buildCommit: 'local',
       writesEnabled: true,
       services: { d1: 'ok', r2: 'ok' },
+      readiness: {
+        storage: 'ok',
+        accountingSchema: 'ok',
+        accountingState: 'ok',
+        writes: 'enabled',
+      },
     });
-    expect(JSON.stringify(body)).not.toMatch(/database|bucket|account|LOCAL_MINIFLARE/u);
+    expect(JSON.stringify(body)).not.toMatch(
+      /database[_-]?id|bucket[_-]?name|account[_-]?(?:id|tag)|LOCAL_MINIFLARE/u,
+    );
     expect(response.headers.get('Cache-Control')).toBe('no-store');
     expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
     expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
     expect(response.headers.get('X-Mirna-Protocol-Version')).toBe('1');
     expect(response.headers.get('X-Request-Id')).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  it('keeps reachability distinct from accounting schema and state readiness', async () => {
+    const missingSchema = {
+      prepare: () => ({ all: () => Promise.reject(new Error('no such table')) }),
+    } as unknown as D1Database;
+    await expect(checkAccountingReadiness(missingSchema)).resolves.toEqual({
+      accountingSchema: 'error',
+      accountingState: 'fault',
+      writes: 'disabled',
+    });
+
+    try {
+      await env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 1,
+                state_reason = 'USAGE_RESERVATION_UNDERESTIMATED',
+                state_request_id = ?1,
+                accounting_fault_at = ?2,
+                updated_at = ?2
+          WHERE singleton_id = 1`,
+      )
+        .bind(crypto.randomUUID(), Date.now())
+        .run();
+      const response = await SELF.fetch(request('/v1/health'));
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        status: 'degraded',
+        services: { d1: 'ok', r2: 'ok' },
+        readiness: {
+          storage: 'ok',
+          accountingSchema: 'ok',
+          accountingState: 'fault',
+          writes: 'disabled',
+        },
+      });
+    } finally {
+      await env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+                accounting_fault_at = NULL, updated_at = ?1
+          WHERE singleton_id = 1`,
+      )
+        .bind(Date.now())
+        .run();
+    }
   });
 
   it('allows only the exact configured CORS origin', async () => {

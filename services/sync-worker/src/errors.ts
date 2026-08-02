@@ -15,8 +15,29 @@ export type AccountingCategory =
   | 'USAGE_SETTLEMENT_FAILED'
   | 'D1_STORAGE_LIMIT_REACHED';
 
+export type AccountingReason =
+  | 'FLAGS_READ_FAILED'
+  | 'RESOURCE_TOTALS_READ_FAILED'
+  | 'ROLLING_TOTALS_REFRESH_FAILED'
+  | 'DAILY_BUCKET_INITIALIZATION_FAILED'
+  | 'GLOBAL_RESERVATION_INSERT_FAILED'
+  | 'VAULT_RESERVATION_INSERT_FAILED'
+  | 'RESERVATION_BATCH_FAILED'
+  | 'RESERVATION_CONSTRAINT_FAILED'
+  | 'RESERVATION_RESULT_EMPTY'
+  | 'RESERVATION_METADATA_INVALID'
+  | 'SCHEMA_NOT_READY'
+  | 'REQUIRED_ACCOUNTING_ROW_MISSING'
+  | 'ACCOUNTING_FAULT_ACTIVE'
+  | 'SERVICE_FLAGS_DISABLED'
+  | 'HARD_LIMIT_REACHED'
+  | 'D1_STORAGE_LIMIT_REACHED'
+  | 'USAGE_RESERVATION_UNDERESTIMATED'
+  | 'USAGE_SETTLEMENT_FAILED';
+
 export interface AccountingFailureDetails {
   readonly category: AccountingCategory;
+  readonly reason: AccountingReason;
   readonly phase: 'request-reservation' | 'route-reservation' | 'settlement';
   readonly route: string;
   readonly businessCommitted: boolean;

@@ -58,7 +58,20 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(10);
+    expect(migrationCount).toBe(11);
+
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT COUNT(*) AS count FROM usage_rolling_totals
+          WHERE scope_type = 'global' AND scope_id = 'service'`,
+      ).first<number>('count'),
+    ).toBe(1);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT COUNT(*) AS count FROM usage_daily_buckets
+          WHERE scope_type = 'global' AND scope_id = 'service' AND utc_day = date('now')`,
+      ).first<number>('count'),
+    ).toBe(1);
 
     const reservationColumns = await env.MIRNA_SYNC_DB.prepare(
       "PRAGMA table_info('usage_reservations')",

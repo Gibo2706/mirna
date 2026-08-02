@@ -234,6 +234,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
               status: health.status,
               environment: health.environment,
               services: health.services,
+              readiness: health.readiness,
             }
           : null,
         events: snapshot.events,
@@ -297,7 +298,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
           <dt className="text-xs font-semibold text-muted">Health</dt>
           <dd className="mt-1 font-bold">
             {health
-              ? `${health.status}; D1 ${health.services.d1}; R2 ${health.services.r2}`
+              ? `${health.status}; D1 ${health.services.d1}; R2 ${health.services.r2}; schema ${health.readiness?.accountingSchema ?? 'nije dostupna'}; accounting ${health.readiness?.accountingState ?? 'nije dostupan'}; writes ${health.readiness?.writes ?? (health.writesEnabled ? 'enabled' : 'disabled')}`
               : 'Nije dostupan'}
           </dd>
         </div>
@@ -309,7 +310,8 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
         </p>
         {latestError?.accountingCategory ? (
           <p>
-            Accounting: {latestError.accountingCategory}; faza{' '}
+            Accounting: {latestError.accountingCategory}; razlog{' '}
+            {latestError.accountingReason ?? 'nije zabeležen'}; faza{' '}
             {latestError.reservationPhase ?? 'nije zabeležena'}; ruta{' '}
             {latestError.route ?? 'nije zabeležena'}
           </p>
@@ -344,6 +346,9 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
                 {event.verificationReason ? <div>Razlog: {event.verificationReason}</div> : null}
                 {event.accountingCategory ? (
                   <div>Accounting kategorija: {event.accountingCategory}</div>
+                ) : null}
+                {event.accountingReason ? (
+                  <div>Accounting razlog: {event.accountingReason}</div>
                 ) : null}
                 {event.reservationPhase ? <div>Faza: {event.reservationPhase}</div> : null}
                 {event.route ? <div>Ruta: {event.route}</div> : null}
@@ -516,6 +521,7 @@ const EnablePanel = ({
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [activationError, setActivationError] = useState<SyncApiError>();
   const [activationRetryAvailable, setActivationRetryAvailable] = useState(false);
   const activationInFlight = useRef(false);
 
@@ -534,6 +540,7 @@ const EnablePanel = ({
     if (capability !== 'supported' || busy) return;
     setBusy(true);
     setError('');
+    setActivationError(undefined);
     const nextLifecycle = services.createEnableLifecycle();
     lifecycle.current = nextLifecycle;
     try {
@@ -572,14 +579,22 @@ const EnablePanel = ({
     activationInFlight.current = true;
     setBusy(true);
     setError('');
+    setActivationError(undefined);
     try {
       await lifecycle.current.activate();
+      void services.diagnostics?.record?.({
+        eventType: 'sync_activation_succeeded',
+        severity: 'info',
+        action: 'mirna_vault_create',
+      });
       setActivationRetryAvailable(false);
+      setActivationError(undefined);
       setPresentation(undefined);
       setConfirmationValues({});
       success('Šifrovana sinhronizacija je aktivirana na ovom uređaju.');
       await onActivated();
     } catch (caught) {
+      setActivationError(caught instanceof SyncApiError ? caught : undefined);
       setActivationRetryAvailable(
         caught instanceof SyncApiError &&
           (caught.code.startsWith('TURNSTILE_') ||
@@ -710,6 +725,18 @@ const EnablePanel = ({
         </Card>
       ) : null}
       <InlineError message={error} />
+      {activationError?.accounting ? (
+        <dl
+          className="grid gap-1 rounded-xl border border-danger/20 bg-danger-soft p-3 text-xs text-danger"
+          data-testid="sync-activation-accounting-error"
+        >
+          <div>Kod: {activationError.code}</div>
+          <div>Accounting razlog: {activationError.accounting.reason ?? 'nije zabeležen'}</div>
+          <div>Faza: {activationError.accounting.phase}</div>
+          <div>Ruta: {activationError.accounting.route}</div>
+          {activationError.requestId ? <div>Request ID: {activationError.requestId}</div> : null}
+        </dl>
+      ) : null}
     </div>
   );
 };

@@ -199,8 +199,28 @@ if (mode === 'diagnose') {
 
 if (before.reservations.length === 0)
   throw new Error('Za Request ID ne postoje accounting rezervacije.');
-if (!before.reservations.some((row) => row.route_key === 'vault-create')) {
-  throw new Error('Repair je odbijen: zahtev nema vault-create route rezervaciju.');
+const isVaultCreateIncident = before.reservations.some((row) => row.route_key === 'vault-create');
+const isScheduledCleanupIncident = before.reservations.some(
+  (row) => row.route_key === 'scheduled-cleanup',
+);
+if (!isVaultCreateIncident && !isScheduledCleanupIncident) {
+  throw new Error('Repair je odbijen: zahtev nema podržanu accounting incident rezervaciju.');
+}
+if (
+  isScheduledCleanupIncident &&
+  (before.reservations.some(
+    (row) =>
+      row.scope_type !== 'global' || row.scope_id !== 'service' || row.business_committed !== 0,
+  ) ||
+    !before.reservations.some(
+      (row) =>
+        row.route_key === 'scheduled-cleanup' &&
+        row.measurement_exact === 1 &&
+        row.settlement_failure_code === 'USAGE_RESERVATION_UNDERESTIMATED' &&
+        row.measured_d1_rows_read > row.reserved_d1_rows_read,
+    ))
+) {
+  throw new Error('Repair je odbijen: scheduled-cleanup dokaz nije tačan i potpun.');
 }
 if (before.reservations.some((row) => row.state === 'reserved' && row.measurement_exact !== 1)) {
   throw new Error('Repair je odbijen: rezervisana potrošnja nema exact metadata dokaz.');
@@ -260,6 +280,9 @@ if (
 
 const requestPattern = sqlText(`${requestId}:%`);
 const cutoffDay = new Date(now - ROLLING_WINDOW_MS).toISOString().slice(0, 10);
+if (isScheduledCleanupIncident && switches.has('--business-committed')) {
+  throw new Error('Repair je odbijen: scheduled-cleanup ne može imati business commit.');
+}
 const businessCommitted = switches.has('--business-committed') ? 1 : 0;
 const statements = [
   `UPDATE usage_reservations

@@ -3,7 +3,7 @@ import { STAGING_BUDGETS, ZERO_USAGE } from './config/staging-budgets';
 import type { RequestContext } from './context';
 import { recordBetaDiagnostic } from './diagnostics';
 import type { Env } from './env';
-import type { AccountingCategory, AccountingFailureDetails } from './errors';
+import type { AccountingCategory, AccountingFailureDetails, AccountingReason } from './errors';
 import { HttpError } from './errors';
 
 export type BudgetAccess = 'read' | 'diagnostic' | 'write' | 'new-vault' | 'pairing';
@@ -104,6 +104,7 @@ export const estimateScheduledCleanupUsage = (
   return Object.freeze(
     usage(
       512 +
+        (input.reconcileR2 ? 2 : 0) +
         input.expiredUsageBuckets * 32 +
         input.inspectedRows * 4 +
         input.ordinaryRows * 32 +
@@ -171,6 +172,8 @@ const routeBudget = (request: Request): RouteBudget => {
   return { key: 'sync-write', access: 'write', usage: usage(192, 48) };
 };
 
+export const budgetRouteKey = (request: Request): string => routeBudget(request).key;
+
 const utcDay = (timestamp: number): string => new Date(timestamp).toISOString().slice(0, 10);
 
 const dailyLimit = (ceilings: UsageCeilings, key: keyof MeteredUsage): number => {
@@ -212,11 +215,13 @@ const safeBuild = (env: Env): string =>
 const accountingDetails = (
   context: RequestContext,
   category: AccountingCategory,
+  reason: AccountingReason,
   phase: AccountingFailureDetails['phase'],
   route: string,
   serviceFlagsChanged = false,
 ): AccountingFailureDetails => ({
   category,
+  reason,
   phase,
   route,
   businessCommitted: context.businessCommit?.committed === true,
@@ -232,14 +237,37 @@ const accountingError = (
   phase: AccountingFailureDetails['phase'],
   route: string,
   serviceFlagsChanged = false,
+  reason: AccountingReason = 'RESERVATION_BATCH_FAILED',
 ): HttpError =>
   new HttpError(
     status,
     category,
     message,
     undefined,
-    accountingDetails(context, category, phase, route, serviceFlagsChanged),
+    accountingDetails(context, category, reason, phase, route, serviceFlagsChanged),
   );
+
+const diagnosticErrorClass = (error: unknown): string => {
+  if (!(error instanceof Error)) return 'UnknownError';
+  return /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(error.name) ? error.name : 'Error';
+};
+
+const reservationFailureReason = (error: unknown): AccountingReason => {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (message.includes('no such table') || message.includes('no such column')) {
+    return 'SCHEMA_NOT_READY';
+  }
+  if (message.includes('constraint')) return 'RESERVATION_CONSTRAINT_FAILED';
+  return 'RESERVATION_BATCH_FAILED';
+};
+
+const activeFaultReason = (stateReason: string): AccountingReason => {
+  if (stateReason === 'USAGE_RESERVATION_UNDERESTIMATED') {
+    return 'USAGE_RESERVATION_UNDERESTIMATED';
+  }
+  if (stateReason === 'USAGE_SETTLEMENT_FAILED') return 'USAGE_SETTLEMENT_FAILED';
+  return 'ACCOUNTING_FAULT_ACTIVE';
+};
 
 const classifyReservationFailure = async (
   context: RequestContext,
@@ -250,80 +278,20 @@ const classifyReservationFailure = async (
   route: string,
 ): Promise<HttpError> => {
   const env = context.accountingEnv ?? context.env;
+  let state: {
+    accept_new_vaults: number;
+    accept_pairings: number;
+    accept_writes: number;
+    maintenance_mode: number;
+    accounting_fault: number;
+    state_reason: string;
+  } | null;
   try {
-    const state = await env.MIRNA_SYNC_DB.prepare(
+    state = await env.MIRNA_SYNC_DB.prepare(
       `SELECT accept_new_vaults, accept_pairings, accept_writes, maintenance_mode,
               accounting_fault, state_reason
          FROM service_flags WHERE singleton_id = 1`,
-    ).first<{
-      accept_new_vaults: number;
-      accept_pairings: number;
-      accept_writes: number;
-      maintenance_mode: number;
-      accounting_fault: number;
-      state_reason: string;
-    }>();
-    if (!state) {
-      return accountingError(
-        context,
-        503,
-        'USAGE_ACCOUNTING_UNAVAILABLE',
-        'Staging usage accounting is unavailable.',
-        phase,
-        route,
-      );
-    }
-    if (state.state_reason === 'D1_STORAGE_LIMIT_REACHED') {
-      return accountingError(
-        context,
-        503,
-        'D1_STORAGE_LIMIT_REACHED',
-        'Staging database storage limit is reached.',
-        phase,
-        route,
-      );
-    }
-    if (state.accounting_fault === 1 && !['read', 'diagnostic', 'new-vault'].includes(access)) {
-      return accountingError(
-        context,
-        503,
-        'USAGE_ACCOUNTING_UNAVAILABLE',
-        'Staging usage accounting requires reconciliation.',
-        phase,
-        route,
-      );
-    }
-    const disabled =
-      (!['read', 'diagnostic'].includes(access) &&
-        (state.maintenance_mode !== 0 || state.accept_writes !== 1)) ||
-      (access === 'new-vault' && state.accept_new_vaults !== 1) ||
-      (access === 'pairing' && state.accept_pairings !== 1);
-    if (disabled) {
-      return accountingError(
-        context,
-        503,
-        'SERVICE_MAINTENANCE',
-        'Staging synchronization is in maintenance mode.',
-        phase,
-        route,
-      );
-    }
-    const d1Bytes = await env.MIRNA_SYNC_DB.prepare(
-      'SELECT d1_storage_bytes FROM resource_totals WHERE singleton_id = 1',
-    ).first<number>('d1_storage_bytes');
-    if (
-      access !== 'read' &&
-      (d1Bytes ?? budgets.resources.d1StorageBytes) >= budgets.resources.d1StorageBytes
-    ) {
-      return accountingError(
-        context,
-        503,
-        'D1_STORAGE_LIMIT_REACHED',
-        'Staging database storage limit is reached.',
-        phase,
-        route,
-      );
-    }
+    ).first();
   } catch {
     return accountingError(
       context,
@@ -332,6 +300,102 @@ const classifyReservationFailure = async (
       'Staging usage accounting is unavailable.',
       phase,
       route,
+      false,
+      'FLAGS_READ_FAILED',
+    );
+  }
+  if (!state) {
+    return accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      phase,
+      route,
+      false,
+      'REQUIRED_ACCOUNTING_ROW_MISSING',
+    );
+  }
+  if (state.state_reason === 'D1_STORAGE_LIMIT_REACHED') {
+    return accountingError(
+      context,
+      503,
+      'D1_STORAGE_LIMIT_REACHED',
+      'Staging database storage limit is reached.',
+      phase,
+      route,
+      false,
+      'D1_STORAGE_LIMIT_REACHED',
+    );
+  }
+  if (state.accounting_fault === 1 && !['read', 'diagnostic', 'new-vault'].includes(access)) {
+    return accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting requires reconciliation.',
+      phase,
+      route,
+      false,
+      activeFaultReason(state.state_reason),
+    );
+  }
+  const disabled =
+    (!['read', 'diagnostic'].includes(access) &&
+      (state.maintenance_mode !== 0 || state.accept_writes !== 1)) ||
+    (access === 'new-vault' && state.accept_new_vaults !== 1) ||
+    (access === 'pairing' && state.accept_pairings !== 1);
+  if (disabled) {
+    return accountingError(
+      context,
+      503,
+      'SERVICE_MAINTENANCE',
+      'Staging synchronization is in maintenance mode.',
+      phase,
+      route,
+      false,
+      'SERVICE_FLAGS_DISABLED',
+    );
+  }
+  let d1Bytes: number | null;
+  try {
+    d1Bytes = await env.MIRNA_SYNC_DB.prepare(
+      'SELECT d1_storage_bytes FROM resource_totals WHERE singleton_id = 1',
+    ).first<number>('d1_storage_bytes');
+  } catch {
+    return accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      phase,
+      route,
+      false,
+      'RESOURCE_TOTALS_READ_FAILED',
+    );
+  }
+  if (d1Bytes === null) {
+    return accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      phase,
+      route,
+      false,
+      'REQUIRED_ACCOUNTING_ROW_MISSING',
+    );
+  }
+  if (access !== 'read' && d1Bytes >= budgets.resources.d1StorageBytes) {
+    return accountingError(
+      context,
+      503,
+      'D1_STORAGE_LIMIT_REACHED',
+      'Staging database storage limit is reached.',
+      phase,
+      route,
+      false,
+      'D1_STORAGE_LIMIT_REACHED',
     );
   }
   return scopeType === 'vault'
@@ -342,6 +406,8 @@ const classifyReservationFailure = async (
         'Vault staging quota is exhausted.',
         phase,
         route,
+        false,
+        'HARD_LIMIT_REACHED',
       )
     : accountingError(
         context,
@@ -350,6 +416,8 @@ const classifyReservationFailure = async (
         'Staging service quota is exhausted.',
         phase,
         route,
+        false,
+        'HARD_LIMIT_REACHED',
       );
 };
 
@@ -480,7 +548,25 @@ const reserve = async (
         reservationId,
       ),
     ]);
-  } catch {
+  } catch (error) {
+    const reason = reservationFailureReason(error);
+    await recordBetaDiagnostic(
+      { ...context, env: accountingEnv },
+      {
+        eventType: 'request_error',
+        severity: 'error',
+        category: 'budget_reservation_failed',
+        requestId: context.requestId,
+        details: {
+          accountingCategory: 'USAGE_ACCOUNTING_UNAVAILABLE',
+          accountingReason: reason,
+          databaseErrorClass: diagnosticErrorClass(error),
+          businessCommitted: context.businessCommit?.committed === true,
+          route: input.routeKey,
+          serviceFlagsChanged: false,
+        },
+      },
+    );
     throw accountingError(
       context,
       503,
@@ -488,9 +574,35 @@ const reserve = async (
       'Staging usage accounting is unavailable.',
       phase,
       input.routeKey,
+      false,
+      reason,
     );
   }
-  if (results[2]?.meta.changes !== 1) {
+  if (!results[2]) {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      phase,
+      input.routeKey,
+      false,
+      'RESERVATION_RESULT_EMPTY',
+    );
+  }
+  if (typeof results[2].meta?.changes !== 'number') {
+    throw accountingError(
+      context,
+      503,
+      'USAGE_ACCOUNTING_UNAVAILABLE',
+      'Staging usage accounting is unavailable.',
+      phase,
+      input.routeKey,
+      false,
+      'RESERVATION_METADATA_INVALID',
+    );
+  }
+  if (results[2].meta.changes !== 1) {
     throw await classifyReservationFailure(
       context,
       input.scopeType,
@@ -782,6 +894,7 @@ export class UsageBudgetController {
             requestId: context.requestId,
             details: {
               accountingCategory: 'USAGE_RESERVATION_UNDERESTIMATED',
+              accountingReason: 'USAGE_RESERVATION_UNDERESTIMATED',
               businessCommitted: context.businessCommit?.committed === true,
               route: activeRoute,
               serviceFlagsChanged: true,
@@ -796,6 +909,7 @@ export class UsageBudgetController {
           'settlement',
           activeRoute,
           true,
+          'USAGE_RESERVATION_UNDERESTIMATED',
         );
       }
     } catch (error) {
@@ -810,6 +924,7 @@ export class UsageBudgetController {
           requestId: context.requestId,
           details: {
             accountingCategory: 'USAGE_SETTLEMENT_FAILED',
+            accountingReason: 'USAGE_SETTLEMENT_FAILED',
             businessCommitted: context.businessCommit?.committed === true,
             route: activeRoute,
             serviceFlagsChanged: flagsChanged,
@@ -824,6 +939,7 @@ export class UsageBudgetController {
         'settlement',
         activeRoute,
         flagsChanged,
+        'USAGE_SETTLEMENT_FAILED',
       );
     }
   }
@@ -870,6 +986,8 @@ export const assertNewVaultCreationAllowed = async (context: RequestContext): Pr
       'Staging usage accounting is unavailable.',
       'route-reservation',
       'vault-create',
+      false,
+      'FLAGS_READ_FAILED',
     );
   }
   if (!state) {
@@ -880,6 +998,8 @@ export const assertNewVaultCreationAllowed = async (context: RequestContext): Pr
       'Staging usage accounting is unavailable.',
       'route-reservation',
       'vault-create',
+      false,
+      'REQUIRED_ACCOUNTING_ROW_MISSING',
     );
   }
   if (state.state_reason === 'D1_STORAGE_LIMIT_REACHED') {
@@ -890,6 +1010,8 @@ export const assertNewVaultCreationAllowed = async (context: RequestContext): Pr
       'Staging database storage limit is reached.',
       'route-reservation',
       'vault-create',
+      false,
+      'D1_STORAGE_LIMIT_REACHED',
     );
   }
   if (state.accounting_fault === 1) {
@@ -900,6 +1022,8 @@ export const assertNewVaultCreationAllowed = async (context: RequestContext): Pr
       'Staging usage accounting requires reconciliation.',
       'route-reservation',
       'vault-create',
+      false,
+      activeFaultReason(state.state_reason),
     );
   }
   if (state.maintenance_mode !== 0 || state.accept_writes !== 1 || state.accept_new_vaults !== 1) {
@@ -910,6 +1034,8 @@ export const assertNewVaultCreationAllowed = async (context: RequestContext): Pr
       'Staging synchronization is in maintenance mode.',
       'route-reservation',
       'vault-create',
+      false,
+      'SERVICE_FLAGS_DISABLED',
     );
   }
 };

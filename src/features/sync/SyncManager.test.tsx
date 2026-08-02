@@ -364,6 +364,59 @@ describe('Phase 1 sync UI', () => {
     await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
   });
 
+  it('shows accounting reason, phase, route and Request ID immediately before a safe retry', async () => {
+    const user = userEvent.setup();
+    const requestId = '123e4567-e89b-42d3-a456-426614174000';
+    const activate = vi
+      .fn<() => Promise<LocalSyncSetup>>()
+      .mockRejectedValueOnce(
+        new SyncApiError('USAGE_ACCOUNTING_UNAVAILABLE', 503, requestId, null, {
+          category: 'USAGE_ACCOUNTING_UNAVAILABLE',
+          reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+          phase: 'route-reservation',
+          route: 'vault-create',
+          businessCommitted: false,
+          serviceFlagsChanged: false,
+          workerBuild: 'abcdef1',
+        }),
+      )
+      .mockResolvedValue(localSetup());
+    const services = baseServices({
+      createEnableLifecycle: () => ({
+        begin: vi.fn(() =>
+          Promise.resolve({
+            recoveryCode: 'MR1-AAAA-BBBB-CCCC-DDDD',
+            confirmationGroupNumbers: [2, 4],
+          }),
+        ),
+        confirmRecoveryCode: vi.fn(() => Promise.resolve()),
+        activate,
+      }),
+    });
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
+    await user.click(screen.getByRole('button', { name: /Proveri ovaj uređaj/i }));
+    await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
+    await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
+    await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'BBBB');
+    await user.type(screen.getByTestId('sync-recovery-confirmation-4'), 'DDDD');
+    await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
+    await user.click(
+      await screen.findByRole('button', { name: /Aktiviraj šifrovanu sinhronizaciju/i }),
+    );
+
+    const details = await screen.findByTestId('sync-activation-accounting-error');
+    expect(details).toHaveTextContent('Accounting razlog: USAGE_RESERVATION_UNDERESTIMATED');
+    expect(details).toHaveTextContent('Faza: route-reservation');
+    expect(details).toHaveTextContent('Ruta: vault-create');
+    expect(details).toHaveTextContent(`Request ID: ${requestId}`);
+    expect(screen.getByTestId('sync-recovery-code')).toHaveTextContent('MR1-AAAA-BBBB-CCCC-DDDD');
+
+    await user.click(screen.getByRole('button', { name: 'Pokušaj aktivaciju ponovo' }));
+    await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
+  });
+
   it('cancels a new-device request when the user reports a SAS mismatch', async () => {
     const user = userEvent.setup();
     const cancel = vi.fn(() => Promise.resolve());

@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { StagingBudgets } from '../src/config/staging-budgets';
 import { STAGING_BUDGETS } from '../src/config/staging-budgets';
 import type { RequestContext } from '../src/context';
@@ -276,6 +276,109 @@ describe('staging usage budgets', () => {
     )
       .bind(Date.now())
       .run();
+  });
+
+  it('maps a D1 reservation constraint without exposing SQL values', async () => {
+    const database = {
+      prepare: vi.fn(() => ({ bind: vi.fn().mockReturnThis() })),
+      batch: vi.fn().mockRejectedValue(new Error('D1_ERROR: CHECK constraint failed')),
+    } as unknown as D1Database;
+    const accountingEnv = Object.create(env) as typeof env;
+    Object.defineProperty(accountingEnv, 'MIRNA_SYNC_DB', { value: database });
+    const request = context('/v1/vaults', 'POST');
+    request.accountingEnv = accountingEnv;
+
+    await expect(new UsageBudgetController().reserveRoute(request)).rejects.toMatchObject({
+      code: 'USAGE_ACCOUNTING_UNAVAILABLE',
+      accounting: { reason: 'RESERVATION_CONSTRAINT_FAILED', businessCommitted: false },
+    });
+  });
+
+  it.each([
+    ['RESERVATION_RESULT_EMPTY', []],
+    [
+      'RESERVATION_METADATA_INVALID',
+      [{ meta: { changes: 0 } }, { meta: { changes: 0 } }, { meta: {} }],
+    ],
+  ])('fails closed with %s for malformed D1 batch results', async (reason, results) => {
+    const database = {
+      prepare: vi.fn(() => ({ bind: vi.fn().mockReturnThis() })),
+      batch: vi.fn().mockResolvedValue(results),
+    } as unknown as D1Database;
+    const accountingEnv = Object.create(env) as typeof env;
+    Object.defineProperty(accountingEnv, 'MIRNA_SYNC_DB', { value: database });
+    const request = context('/v1/vaults', 'POST');
+    request.accountingEnv = accountingEnv;
+
+    await expect(new UsageBudgetController().reserveRoute(request)).rejects.toMatchObject({
+      code: 'USAGE_ACCOUNTING_UNAVAILABLE',
+      accounting: { reason },
+    });
+  });
+
+  it('reports missing required accounting singleton rows and restores deterministic seeds', async () => {
+    const configured = new UsageBudgetController();
+    try {
+      await env.MIRNA_SYNC_DB.prepare('DELETE FROM service_flags WHERE singleton_id = 1').run();
+      await expect(
+        configured.reserveRoute(context('/v1/operations', 'POST')),
+      ).rejects.toMatchObject({
+        accounting: { reason: 'REQUIRED_ACCOUNTING_ROW_MISSING' },
+      });
+    } finally {
+      await env.MIRNA_SYNC_DB.prepare(
+        `INSERT OR IGNORE INTO service_flags (
+           singleton_id, accept_new_vaults, accept_pairings, accept_writes,
+           maintenance_mode, updated_at
+         ) VALUES (1, 1, 1, 1, 0, ?1)`,
+      )
+        .bind(Date.now())
+        .run();
+    }
+
+    try {
+      await env.MIRNA_SYNC_DB.prepare('DELETE FROM resource_totals WHERE singleton_id = 1').run();
+      await expect(
+        configured.reserveRoute(context('/v1/operations', 'POST')),
+      ).rejects.toMatchObject({
+        accounting: { reason: 'REQUIRED_ACCOUNTING_ROW_MISSING' },
+      });
+    } finally {
+      await env.MIRNA_SYNC_DB.prepare(
+        `INSERT OR IGNORE INTO resource_totals (
+           singleton_id, r2_stored_bytes, r2_object_count, d1_storage_bytes, updated_at
+         ) VALUES (1, 0, 0, 0, ?1)`,
+      )
+        .bind(Date.now())
+        .run();
+    }
+  });
+
+  it('initializes missing current daily and global rolling rows before reserving', async () => {
+    const now = Date.parse('2026-08-02T12:00:00.000Z');
+    await env.MIRNA_SYNC_DB.batch([
+      env.MIRNA_SYNC_DB.prepare(
+        `DELETE FROM usage_daily_buckets
+          WHERE scope_type = 'global' AND scope_id = 'service' AND utc_day = '2026-08-02'`,
+      ),
+      env.MIRNA_SYNC_DB.prepare(
+        `DELETE FROM usage_rolling_totals
+          WHERE scope_type = 'global' AND scope_id = 'service'`,
+      ),
+    ]);
+    const request = context();
+    const configured = new UsageBudgetController(STAGING_BUDGETS, () => now);
+    await configured.reserveRequest(request);
+    await configured.settle(request);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM usage_daily_buckets
+             WHERE scope_type = 'global' AND scope_id = 'service' AND utc_day = '2026-08-02') AS daily,
+           (SELECT COUNT(*) FROM usage_rolling_totals
+             WHERE scope_type = 'global' AND scope_id = 'service') AS rolling`,
+      ).first(),
+    ).toEqual({ daily: 1, rolling: 1 });
   });
 
   it('persists exact underestimation evidence without pretending the provider quota is exhausted', async () => {

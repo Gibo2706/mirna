@@ -202,6 +202,7 @@ Before remote work, also run:
 
 ```sh
 npm run sync:types
+npm run sync:staging:verify -- --expected-build <currently-deployed-commit>
 npx wrangler deploy --dry-run --env staging \
   --config services/sync-worker/wrangler.jsonc
 ```
@@ -237,13 +238,21 @@ InfrequentAccess, `r2.dev`, a custom bucket domain or lifecycle rules.
 After reviewing the binding diff and regenerating types:
 
 ```sh
+npm run sync:staging:verify -- --expected-build <currently-deployed-commit>
 npx wrangler d1 migrations list mirna-sync-staging-eu --remote \
   --env staging --config services/sync-worker/wrangler.jsonc
 npx wrangler d1 migrations apply mirna-sync-staging-eu --remote \
   --env staging --config services/sync-worker/wrangler.jsonc
 npx wrangler deploy --env staging \
   --config services/sync-worker/wrangler.jsonc
+npm run sync:staging:verify -- --expected-build <newly-deployed-commit>
 ```
+
+`sync:staging:verify` is read-only and fails closed unless local migration files,
+actual remote columns/indexes, required singleton/global rows, accounting fault
+state, unreconciled reservations, source-controlled hard limits, private R2
+inventory and the deployed Worker build all agree. Its output contains only
+aggregate safe status and never prints credentials, resource UUIDs or user data.
 
 Set/rotate the real Turnstile secret without putting it in a command argument,
 tracked file or report. Verify the secret binding only by name. Never print its

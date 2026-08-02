@@ -596,6 +596,86 @@ test('Turnstile activation UI fits 320-430 px and rerenders at the supported bre
   await context.close();
 });
 
+test('activation preserves the prepared setup and creates one vault after an accounting retry', async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    ...devices['Pixel 7'],
+    viewport: { width: 360, height: 800 },
+    serviceWorkers: 'block',
+    timezoneId: 'Europe/Belgrade',
+  });
+  captureSyncRequestBodies(context);
+
+  const failedRequestId = '386f51bc-bdc3-4da9-a952-5cc878f1a340';
+  let vaultCreateAttempts = 0;
+  await context.route(`${SYNC_API_ORIGIN}/v1/vaults`, async (route) => {
+    vaultCreateAttempts += 1;
+    if (vaultCreateAttempts > 1) {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json; charset=utf-8',
+      headers: {
+        'Access-Control-Allow-Origin': ENABLED_APP_ORIGIN,
+        'Access-Control-Expose-Headers': 'X-Mirna-Protocol-Version, X-Request-Id',
+        'Cache-Control': 'no-store',
+        'X-Mirna-Protocol-Version': '1',
+        'X-Request-Id': failedRequestId,
+      },
+      body: JSON.stringify({
+        protocolVersion: 1,
+        error: {
+          code: 'USAGE_ACCOUNTING_UNAVAILABLE',
+          message: 'Accounting is unavailable.',
+          requestId: failedRequestId,
+          accounting: {
+            category: 'USAGE_ACCOUNTING_UNAVAILABLE',
+            reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+            phase: 'route-reservation',
+            route: 'vault-create',
+            businessCommitted: false,
+            serviceFlagsChanged: false,
+            workerBuild: 'abcdef1',
+          },
+        },
+      }),
+    });
+  });
+
+  const page = await context.newPage();
+  await seedSyntheticPlan(page);
+  await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
+  await page.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
+  await page.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
+  await expect(page.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
+  await page.getByLabel('Naziv ovog uređaja').fill('Accounting retry telefon');
+  await page.getByRole('button', { name: 'Napravi recovery kod' }).click();
+  const recoveryCode = await readRecoveryCode(page);
+  await confirmRecoveryGroups(page, recoveryCode);
+  await page.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
+  await page.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+
+  const accountingError = page.getByTestId('sync-activation-accounting-error');
+  await expect(accountingError).toContainText('USAGE_RESERVATION_UNDERESTIMATED');
+  await expect(accountingError).toContainText('route-reservation');
+  await expect(accountingError).toContainText('vault-create');
+  await expect(accountingError).toContainText(failedRequestId);
+  await expect(page.getByTestId('sync-recovery-code')).toHaveText(recoveryCode);
+  expect(Number(localD1('SELECT COUNT(*) AS count FROM vaults')[0]?.count)).toBe(0);
+
+  await page.getByRole('button', { name: 'Pokušaj aktivaciju ponovo' }).click();
+  await expect(page.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  expect(vaultCreateAttempts).toBe(2);
+  expect(Number(localD1('SELECT COUNT(*) AS count FROM vaults')[0]?.count)).toBe(1);
+  expect((await readLocalSyncSecurityView(page)).displayName).toBe('Accounting retry telefon');
+
+  await context.close();
+});
+
 test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths, and recover', async ({
   browser,
 }) => {

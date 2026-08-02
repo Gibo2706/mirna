@@ -156,6 +156,96 @@ describe('Phase 1 vault initialization', () => {
     }
   });
 
+  it('keeps a pre-work accounting fault write-free and creates exactly one vault on retry', async () => {
+    const fixture = await createInitialVaultFixture();
+    const first = vaultCreateContext(fixture);
+    const firstController = new UsageBudgetController();
+
+    try {
+      await env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 1,
+                state_reason = 'USAGE_RESERVATION_UNDERESTIMATED',
+                state_request_id = ?1,
+                accounting_fault_at = ?2,
+                updated_at = ?2
+          WHERE singleton_id = 1`,
+      )
+        .bind(crypto.randomUUID(), Date.now())
+        .run();
+
+      await firstController.reserveRequest(first);
+      await firstController.reserveRoute(first);
+      const firstMeter = new RouteUsageMeter();
+      first.usageMeter = firstMeter;
+      first.env = firstMeter.wrapEnvironment(env);
+      await expect(handleCreateVault(first)).rejects.toMatchObject({
+        code: 'USAGE_ACCOUNTING_UNAVAILABLE',
+        accounting: {
+          reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+          phase: 'route-reservation',
+          route: 'vault-create',
+          businessCommitted: false,
+        },
+      });
+      await firstController.settle(first);
+
+      expect(
+        await env.MIRNA_SYNC_DB.prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM vaults WHERE vault_id = ?1) AS vaults,
+             (SELECT COUNT(*) FROM devices WHERE vault_id = ?1) AS devices,
+             (SELECT COUNT(*) FROM vault_manifests WHERE vault_id = ?1) AS manifests,
+             (SELECT COUNT(*) FROM recovery_records WHERE vault_id = ?1) AS recovery_records,
+             (SELECT COUNT(*) FROM device_grants WHERE vault_id = ?1) AS grants`,
+        )
+          .bind(fixture.vaultId)
+          .first(),
+      ).toEqual({ vaults: 0, devices: 0, manifests: 0, recovery_records: 0, grants: 0 });
+
+      await env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+                accounting_fault_at = NULL, updated_at = ?1
+          WHERE singleton_id = 1`,
+      )
+        .bind(Date.now())
+        .run();
+
+      const retry = vaultCreateContext(fixture);
+      const retryController = new UsageBudgetController();
+      await retryController.reserveRequest(retry);
+      await retryController.reserveRoute(retry);
+      const retryMeter = new RouteUsageMeter();
+      retry.usageMeter = retryMeter;
+      retry.env = retryMeter.wrapEnvironment(env);
+      expect((await handleCreateVault(retry)).status).toBe(201);
+      await retryController.settle(retry);
+
+      expect(
+        await env.MIRNA_SYNC_DB.prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM vaults WHERE vault_id = ?1) AS vaults,
+             (SELECT COUNT(*) FROM devices WHERE vault_id = ?1) AS devices,
+             (SELECT COUNT(*) FROM vault_manifests WHERE vault_id = ?1) AS manifests,
+             (SELECT COUNT(*) FROM recovery_records WHERE vault_id = ?1) AS recovery_records,
+             (SELECT COUNT(*) FROM device_grants WHERE vault_id = ?1) AS grants`,
+        )
+          .bind(fixture.vaultId)
+          .first(),
+      ).toEqual({ vaults: 1, devices: 1, manifests: 1, recovery_records: 1, grants: 1 });
+    } finally {
+      await env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags
+            SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+                accounting_fault_at = NULL, updated_at = ?1
+          WHERE singleton_id = 1`,
+      )
+        .bind(Date.now())
+        .run();
+    }
+  });
+
   it('creates the initial vault atomically and treats an exact retry as idempotent', async () => {
     const fixture = await createInitialVaultFixture();
 

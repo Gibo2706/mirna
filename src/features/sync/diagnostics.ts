@@ -29,6 +29,26 @@ const ACCOUNTING_CATEGORIES = new Set([
   'USAGE_SETTLEMENT_FAILED',
   'D1_STORAGE_LIMIT_REACHED',
 ]);
+const ACCOUNTING_REASONS = new Set([
+  'FLAGS_READ_FAILED',
+  'RESOURCE_TOTALS_READ_FAILED',
+  'ROLLING_TOTALS_REFRESH_FAILED',
+  'DAILY_BUCKET_INITIALIZATION_FAILED',
+  'GLOBAL_RESERVATION_INSERT_FAILED',
+  'VAULT_RESERVATION_INSERT_FAILED',
+  'RESERVATION_BATCH_FAILED',
+  'RESERVATION_CONSTRAINT_FAILED',
+  'RESERVATION_RESULT_EMPTY',
+  'RESERVATION_METADATA_INVALID',
+  'SCHEMA_NOT_READY',
+  'REQUIRED_ACCOUNTING_ROW_MISSING',
+  'ACCOUNTING_FAULT_ACTIVE',
+  'SERVICE_FLAGS_DISABLED',
+  'HARD_LIMIT_REACHED',
+  'D1_STORAGE_LIMIT_REACHED',
+  'USAGE_RESERVATION_UNDERESTIMATED',
+  'USAGE_SETTLEMENT_FAILED',
+]);
 const RESERVATION_PHASES = new Set(['request-reservation', 'route-reservation', 'settlement']);
 
 export const BETA_DIAGNOSTIC_EVENT_TYPES = [
@@ -43,6 +63,11 @@ export const BETA_DIAGNOSTIC_EVENT_TYPES = [
   'turnstile_network_error',
   'turnstile_configuration_error',
   'sync_request_error',
+  'budget_request_reservation_succeeded',
+  'budget_route_reservation_succeeded',
+  'vault_create_business_committed',
+  'budget_settlement_succeeded',
+  'sync_activation_succeeded',
   'health_result',
 ] as const;
 
@@ -57,6 +82,7 @@ export interface BetaDiagnosticEventInput {
   readonly verificationReason?: string;
   readonly verificationAttemptId?: string;
   readonly accountingCategory?: string;
+  readonly accountingReason?: string;
   readonly reservationPhase?: string;
   readonly route?: string;
   readonly businessCommitted?: boolean;
@@ -112,6 +138,10 @@ const safeEvent = (input: BetaDiagnosticEventInput): SyncBetaDiagnosticEventReco
     input.accountingCategory && ACCOUNTING_CATEGORIES.has(input.accountingCategory)
       ? input.accountingCategory
       : undefined,
+  accountingReason:
+    input.accountingReason && ACCOUNTING_REASONS.has(input.accountingReason)
+      ? input.accountingReason
+      : undefined,
   reservationPhase:
     input.reservationPhase && RESERVATION_PHASES.has(input.reservationPhase)
       ? input.reservationPhase
@@ -125,7 +155,11 @@ const safeEvent = (input: BetaDiagnosticEventInput): SyncBetaDiagnosticEventReco
 });
 
 const anonymousServerEvent = (eventType: BetaDiagnosticEventType): boolean =>
-  eventType.startsWith('turnstile_') || eventType === 'health_result';
+  eventType.startsWith('turnstile_') ||
+  eventType === 'health_result' ||
+  eventType.startsWith('budget_') ||
+  eventType === 'vault_create_business_committed' ||
+  eventType === 'sync_activation_succeeded';
 
 export class BetaDiagnosticsService {
   readonly #database: FinanceDatabase;
@@ -221,6 +255,7 @@ export class BetaDiagnosticsService {
       if (event.accountingCategory !== undefined) {
         payload.accountingCategory = event.accountingCategory;
       }
+      if (event.accountingReason !== undefined) payload.accountingReason = event.accountingReason;
       if (event.reservationPhase !== undefined) payload.reservationPhase = event.reservationPhase;
       if (event.route !== undefined) payload.route = event.route;
       if (event.businessCommitted !== undefined) {

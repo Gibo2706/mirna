@@ -5,7 +5,12 @@ import {
   scheduledCleanupHasWork,
 } from './cleanup';
 import { enforceEdgeRateLimit } from './abuse';
-import { estimateScheduledCleanupUsage, runBudgetWindowMaintenance, usageBudget } from './budget';
+import {
+  budgetRouteKey,
+  estimateScheduledCleanupUsage,
+  runBudgetWindowMaintenance,
+  usageBudget,
+} from './budget';
 import type { RequestContext } from './context';
 import type { Env } from './env';
 import { HttpError } from './errors';
@@ -22,8 +27,66 @@ import {
 } from './http';
 import { allowedMethodsForPath, isSnapshotUploadPath, routeRequest } from './router';
 import { RouteUsageMeter } from './metering';
+import { recordBetaDiagnostic } from './diagnostics';
 
 const HEALTH_PATH = '/v1/health';
+
+const recordAccountingSuccess = (
+  context: RequestContext,
+  category:
+    | 'budget_request_reservation_succeeded'
+    | 'budget_route_reservation_succeeded'
+    | 'budget_settlement_succeeded',
+  route: string,
+): Promise<void> =>
+  recordBetaDiagnostic(
+    { ...context, env: context.accountingEnv ?? context.env },
+    {
+      eventType: 'request_error',
+      severity: 'info',
+      category,
+      requestId: context.requestId,
+      details: {
+        businessCommitted: context.businessCommit?.committed === true,
+        route,
+        serviceFlagsChanged: false,
+      },
+    },
+  );
+
+const recordAccountingFailure = (
+  request: Request,
+  env: Env,
+  requestId: string,
+  allowedOrigin: string | null,
+  error: HttpError,
+): Promise<void> => {
+  if (!error.accounting) return Promise.resolve();
+  return recordBetaDiagnostic(
+    {
+      request,
+      env,
+      accountingEnv: env,
+      requestId,
+      allowedOrigin,
+      budgetReservationIds: [],
+    },
+    {
+      eventType: 'request_error',
+      severity: 'error',
+      category: 'budget_request_failed',
+      requestId,
+      details: {
+        accountingCategory: error.accounting.category,
+        accountingReason: error.accounting.reason,
+        businessCommitted: error.accounting.businessCommitted,
+        phase: error.accounting.phase,
+        route: error.accounting.route,
+        serviceFlagsChanged: error.accounting.serviceFlagsChanged,
+      },
+    },
+  );
+};
 
 const handlePreflight = (
   request: Request,
@@ -104,7 +167,13 @@ const executeRoute = async (context: RequestContext): Promise<Response> => {
   }
 
   await enforceEdgeRateLimit(request, context.accountingEnv ?? context.env);
+  if (pathname === HEALTH_PATH && request.method === 'GET') return routeRequest(context);
   await usageBudget.reserveRoute(context);
+  await recordAccountingSuccess(
+    context,
+    'budget_route_reservation_succeeded',
+    budgetRouteKey(request),
+  );
 
   const usageMeter = new RouteUsageMeter();
   context.usageMeter = usageMeter;
@@ -146,7 +215,15 @@ const fetchHandler = async (
     allowedOrigin,
     budgetReservationIds: [],
   };
+  if (request.method === 'GET' && new URL(request.url).pathname === HEALTH_PATH) {
+    return executeRoute(context);
+  }
   await usageBudget.reserveRequest(context);
+  await recordAccountingSuccess(
+    context,
+    'budget_request_reservation_succeeded',
+    'request-ledger-overhead',
+  );
   let response: Response | undefined;
   let routeError: unknown;
   try {
@@ -158,6 +235,11 @@ const fetchHandler = async (
   let settlementError: unknown;
   try {
     await usageBudget.settle(context);
+    await recordAccountingSuccess(
+      context,
+      'budget_settlement_succeeded',
+      budgetRouteKey(context.request),
+    );
   } catch (error) {
     settlementError = error;
   }
@@ -182,6 +264,7 @@ const worker: ExportedHandler<Env> = {
       return await fetchHandler(request, env, requestId, allowedOrigin);
     } catch (error) {
       if (error instanceof HttpError) {
+        await recordAccountingFailure(request, env, requestId, allowedOrigin, error);
         const allowedMethods = allowedMethodsForPath(new URL(request.url).pathname);
         return errorResponse(error.code, error.message, error.status, {
           requestId,

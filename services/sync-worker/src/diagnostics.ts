@@ -31,6 +31,11 @@ const clientEventSchema = z.strictObject({
     'turnstile_network_error',
     'turnstile_configuration_error',
     'sync_request_error',
+    'budget_request_reservation_succeeded',
+    'budget_route_reservation_succeeded',
+    'vault_create_business_committed',
+    'budget_settlement_succeeded',
+    'sync_activation_succeeded',
     'health_result',
   ]),
   occurredAt: z.string().datetime({ offset: true }),
@@ -57,6 +62,28 @@ const clientEventSchema = z.strictObject({
       'USAGE_RESERVATION_UNDERESTIMATED',
       'USAGE_SETTLEMENT_FAILED',
       'D1_STORAGE_LIMIT_REACHED',
+    ])
+    .optional(),
+  accountingReason: z
+    .enum([
+      'FLAGS_READ_FAILED',
+      'RESOURCE_TOTALS_READ_FAILED',
+      'ROLLING_TOTALS_REFRESH_FAILED',
+      'DAILY_BUCKET_INITIALIZATION_FAILED',
+      'GLOBAL_RESERVATION_INSERT_FAILED',
+      'VAULT_RESERVATION_INSERT_FAILED',
+      'RESERVATION_BATCH_FAILED',
+      'RESERVATION_CONSTRAINT_FAILED',
+      'RESERVATION_RESULT_EMPTY',
+      'RESERVATION_METADATA_INVALID',
+      'SCHEMA_NOT_READY',
+      'REQUIRED_ACCOUNTING_ROW_MISSING',
+      'ACCOUNTING_FAULT_ACTIVE',
+      'SERVICE_FLAGS_DISABLED',
+      'HARD_LIMIT_REACHED',
+      'D1_STORAGE_LIMIT_REACHED',
+      'USAGE_RESERVATION_UNDERESTIMATED',
+      'USAGE_SETTLEMENT_FAILED',
     ])
     .optional(),
   reservationPhase: z.enum(['request-reservation', 'route-reservation', 'settlement']).optional(),
@@ -201,7 +228,11 @@ export const recordBetaDiagnostic = async (
 };
 
 const isAnonymousClientEvent = (event: ClientEvent): boolean =>
-  event.eventType.startsWith('turnstile_') || event.eventType === 'health_result';
+  event.eventType.startsWith('turnstile_') ||
+  event.eventType === 'health_result' ||
+  event.eventType.startsWith('budget_') ||
+  event.eventType === 'vault_create_business_committed' ||
+  event.eventType === 'sync_activation_succeeded';
 
 const optionalAuthentication = async (
   context: RequestContext,
@@ -244,6 +275,7 @@ export const handleBetaDiagnosticEvent = async (context: RequestContext): Promis
       verificationAttemptId: event.verificationAttemptId ?? 'NONE',
       verificationReason: event.verificationReason ?? 'NONE',
       ...(event.accountingCategory ? { accountingCategory: event.accountingCategory } : {}),
+      ...(event.accountingReason ? { accountingReason: event.accountingReason } : {}),
       ...(event.reservationPhase ? { reservationPhase: event.reservationPhase } : {}),
       ...(event.route ? { route: event.route } : {}),
       ...(event.businessCommitted !== undefined

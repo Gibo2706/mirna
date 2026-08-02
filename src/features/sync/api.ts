@@ -68,6 +68,27 @@ const SUPPORT_ID = /^MIRNA-(?:[0-9A-HJKMNP-TV-Z]{4}-){6}[0-9A-HJKMNP-TV-Z]{2}$/u
 const SUPPORT_ID_WAIT_MS = 500;
 const SNAPSHOT_ENVELOPE_HEADER = 'X-Mirna-Snapshot-Envelope';
 
+const accountingReasonSchema = z.enum([
+  'FLAGS_READ_FAILED',
+  'RESOURCE_TOTALS_READ_FAILED',
+  'ROLLING_TOTALS_REFRESH_FAILED',
+  'DAILY_BUCKET_INITIALIZATION_FAILED',
+  'GLOBAL_RESERVATION_INSERT_FAILED',
+  'VAULT_RESERVATION_INSERT_FAILED',
+  'RESERVATION_BATCH_FAILED',
+  'RESERVATION_CONSTRAINT_FAILED',
+  'RESERVATION_RESULT_EMPTY',
+  'RESERVATION_METADATA_INVALID',
+  'SCHEMA_NOT_READY',
+  'REQUIRED_ACCOUNTING_ROW_MISSING',
+  'ACCOUNTING_FAULT_ACTIVE',
+  'SERVICE_FLAGS_DISABLED',
+  'HARD_LIMIT_REACHED',
+  'D1_STORAGE_LIMIT_REACHED',
+  'USAGE_RESERVATION_UNDERESTIMATED',
+  'USAGE_SETTLEMENT_FAILED',
+]);
+
 const accountingFailureSchema = z.strictObject({
   category: z.enum([
     'SERVICE_QUOTA_EXHAUSTED',
@@ -78,6 +99,7 @@ const accountingFailureSchema = z.strictObject({
     'USAGE_SETTLEMENT_FAILED',
     'D1_STORAGE_LIMIT_REACHED',
   ]),
+  reason: accountingReasonSchema.optional(),
   phase: z.enum(['request-reservation', 'route-reservation', 'settlement']),
   route: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
   businessCommitted: z.boolean(),
@@ -121,6 +143,14 @@ const healthResponseSchema = z.strictObject({
     d1: z.enum(['ok', 'unavailable']),
     r2: z.enum(['ok', 'unavailable']),
   }),
+  readiness: z
+    .strictObject({
+      storage: z.enum(['ok', 'error']),
+      accountingSchema: z.enum(['ok', 'error']),
+      accountingState: z.enum(['ok', 'fault']),
+      writes: z.enum(['enabled', 'disabled']),
+    })
+    .optional(),
 });
 
 const pairingApprovedResponseSchema = z.strictObject({
@@ -1258,21 +1288,21 @@ export class MirnaSyncApi {
     } catch (error) {
       if (timedOut) {
         const timeoutError = new SyncApiError('REQUEST_TIMEOUT');
-        await this.#recordRequestError(timeoutError);
+        void this.#recordRequestError(timeoutError);
         throw timeoutError;
       }
       if (controller.signal.aborted) {
         const abortedError = new SyncApiError('REQUEST_ABORTED');
-        await this.#recordRequestError(abortedError);
+        void this.#recordRequestError(abortedError);
         throw abortedError;
       }
       if (error instanceof SyncApiError) {
         if (spec.authenticated === true && error.status === 401) this.#session.clear();
-        await this.#recordRequestError(error);
+        void this.#recordRequestError(error);
         throw error;
       }
       const networkError = new SyncApiError('NETWORK_FAILURE');
-      await this.#recordRequestError(networkError);
+      void this.#recordRequestError(networkError);
       throw networkError;
     } finally {
       clearTimeout(timer);
@@ -1289,6 +1319,7 @@ export class MirnaSyncApi {
         safeCode: error.code,
         verificationReason: error.verificationReason ?? undefined,
         accountingCategory: error.accounting?.category,
+        accountingReason: error.accounting?.reason,
         reservationPhase: error.accounting?.phase,
         route: error.accounting?.route,
         businessCommitted: error.accounting?.businessCommitted,

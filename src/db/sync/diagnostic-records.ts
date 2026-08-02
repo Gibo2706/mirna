@@ -15,6 +15,7 @@ export interface SyncBetaDiagnosticEventRecord {
   readonly verificationReason?: string;
   readonly verificationAttemptId?: string;
   readonly accountingCategory?: string;
+  readonly accountingReason?: string;
   readonly reservationPhase?: string;
   readonly route?: string;
   readonly businessCommitted?: boolean;

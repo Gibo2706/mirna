@@ -98,6 +98,7 @@ export interface SyncUiServices {
     snapshot(): Promise<BetaDiagnosticsSnapshot>;
     subscribe(listener: () => void): () => void;
     clear(): Promise<void>;
+    record?(input: Parameters<BetaDiagnosticsService['record']>[0]): Promise<void>;
     health(): ReturnType<MirnaSyncApi['health']>;
   };
 }
@@ -254,6 +255,7 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
       snapshot: () => diagnostics.snapshot(),
       subscribe: (listener) => diagnostics.subscribe(listener),
       clear: () => diagnostics.clear(),
+      record: (input) => diagnostics.record(input),
       health: () => api.health(),
     },
   };

@@ -47,6 +47,12 @@ const healthBody = {
   buildCommit: 'abcdef1',
   writesEnabled: true,
   services: { d1: 'ok', r2: 'ok' },
+  readiness: {
+    storage: 'ok',
+    accountingSchema: 'ok',
+    accountingState: 'ok',
+    writes: 'enabled',
+  },
 } as const;
 
 const authChallenge = {
@@ -326,6 +332,66 @@ describe('Mirna sync API transport', () => {
     });
     expect(caught).toBeInstanceOf(SyncApiError);
     expect((caught as SyncApiError).message).toMatch(/Cloudflare je odbio rezultat provere/u);
+  });
+
+  it('preserves a safe accounting reason and records diagnostics without delaying rejection', async () => {
+    const requestId = '123e4567-e89b-42d3-a456-426614174000';
+    const diagnostics = {
+      supportId: vi.fn().mockResolvedValue('MIRNA-0123-4567-89AB-CDEF-GHJK-MNPQ-RS'),
+      record: vi.fn().mockResolvedValue(undefined),
+    };
+    const api = new MirnaSyncApi(enabledConfig, {
+      diagnostics,
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        protocolResponse(
+          {
+            protocolVersion: SYNC_PROTOCOL_VERSION,
+            error: {
+              code: 'USAGE_ACCOUNTING_UNAVAILABLE',
+              message: 'Accounting is unavailable.',
+              requestId,
+              accounting: {
+                category: 'USAGE_ACCOUNTING_UNAVAILABLE',
+                reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+                phase: 'route-reservation',
+                route: 'vault-create',
+                businessCommitted: false,
+                serviceFlagsChanged: false,
+                workerBuild: 'abcdef1',
+              },
+            },
+          },
+          503,
+        ),
+      ),
+    });
+
+    await expect(
+      api.requestAuthChallenge({
+        protocolVersion: SYNC_PROTOCOL_VERSION,
+        suite: SYNC_CRYPTO_SUITE,
+        vaultId: authChallenge.vaultId,
+        deviceId: authChallenge.deviceId,
+        audience: authChallenge.audience,
+        origin: APP_ORIGIN,
+      }),
+    ).rejects.toMatchObject({
+      code: 'USAGE_ACCOUNTING_UNAVAILABLE',
+      requestId,
+      accounting: {
+        reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+        phase: 'route-reservation',
+        route: 'vault-create',
+      },
+    });
+    await vi.waitFor(() =>
+      expect(diagnostics.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId,
+          accountingReason: 'USAGE_RESERVATION_UNDERESTIMATED',
+        }),
+      ),
+    );
   });
 
   it('fails closed before fetch when a protected route has no Turnstile provider', async () => {
