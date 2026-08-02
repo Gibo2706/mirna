@@ -36,7 +36,7 @@
     "sync:test:e2e": "playwright test --config playwright.sync.config.ts",
     "sync:migrations:local": "wrangler d1 migrations apply mirna-sync-local --local --config services/sync-worker/wrangler.jsonc",
     "sync:dev": "wrangler dev --config services/sync-worker/wrangler.jsonc",
-    "sync:deploy:staging": "wrangler deploy --env staging --config services/sync-worker/wrangler.jsonc",
+    "sync:deploy:staging": "wrangler deploy --env staging --config services/sync-worker/wrangler.jsonc --var MIRNA_BUILD_COMMIT:$(git rev-parse HEAD)",
     "sync:logs": "node scripts/query-sync-beta-logs.mjs",
     "sync:budget:diagnose": "node scripts/sync-budget-accounting.mjs diagnose",
     "sync:budget:repair": "node scripts/sync-budget-accounting.mjs repair",

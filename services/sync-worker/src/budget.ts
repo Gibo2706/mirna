@@ -92,9 +92,11 @@ export interface ScheduledCleanupEstimateInput {
 
 /**
  * Reserves from the inspected bounded work set, not from every category's
- * maximum at once. Per-item factors cover indexed selection, claim/delete
- * writes and accounting-trigger/index amplification; settlement still records
- * the exact provider metadata and releases the margin.
+ * maximum at once. The fixed base covers budget-window maintenance, the large
+ * planning scan, optional deletion-resume lookups and R2 reconciliation cursor
+ * checks; the per-item factors then cover bounded cleanup execution and the
+ * remaining provider/index amplification. Settlement still records the exact
+ * provider metadata and releases the margin.
  */
 export const estimateScheduledCleanupUsage = (
   input: ScheduledCleanupEstimateInput,
@@ -113,7 +115,7 @@ export const estimateScheduledCleanupUsage = (
   }
   return Object.freeze(
     usage(
-      512 +
+      1_024 +
         (input.reconcileR2 ? 2 : 0) +
         input.expiredUsageBuckets * 32 +
         input.inspectedRows * 4 +
@@ -121,7 +123,7 @@ export const estimateScheduledCleanupUsage = (
         input.snapshotRows * 256 +
         input.deletionRequests * 512 +
         input.deletionRows * 16,
-      64 +
+      128 +
         input.expiredUsageBuckets * 12 +
         input.ordinaryRows * 12 +
         input.snapshotRows * 64 +

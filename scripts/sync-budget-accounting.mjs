@@ -6,6 +6,7 @@ import {
   assertPairingRepairPostconditions,
   assertPairingRequestId,
   assertProjectedUsageBelowLimits,
+  validateScheduledCleanupRepair,
   validatePairingCreateRepair,
 } from './sync-budget-repair-contract.mjs';
 
@@ -23,7 +24,7 @@ const BUDGETS = Object.freeze({
   r2_class_b: 4_000_000,
   worker_requests_daily: 50_000,
   d1_rows_read_daily: 2_000_000,
-  d1_rows_written_daily: 40_000,
+  d1_rows_written_daily: 80_000,
   r2_class_a_daily: 20_000,
   r2_class_b_daily: 200_000,
   d1_storage_bytes: 256 * 1_024 * 1_024,
@@ -286,6 +287,141 @@ if (mode === 'diagnose') {
         globalRolling: before.globalRolling[0] ?? null,
         resources: before.resources[0] ?? null,
         unresolved: before.unresolved[0] ?? null,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  process.exit(0);
+}
+
+if (mode === 'repair' && operation === 'scheduled-cleanup') {
+  const reservationId = `${requestId}:scheduled-cleanup`;
+  const unresolvedCount = query(
+    `SELECT COUNT(*) AS count FROM usage_reservations
+      WHERE settlement_failure_code IS NOT NULL AND reconciled_at IS NULL`,
+  )[0]?.count;
+  const faultTimestamp = Number(before.serviceFlags[0]?.accounting_fault_at ?? 0);
+  const scheduled = validateScheduledCleanupRepair({
+    requestId,
+    reservations: before.reservations,
+    serviceFlags: before.serviceFlags[0],
+    unresolvedIncidentCount: unresolvedCount,
+  });
+  if (!scheduled.reservationNeedsUpdate) {
+    process.stdout.write(`${JSON.stringify({ changed: false, evidence: backupPath }, null, 2)}\n`);
+    process.exit(0);
+  }
+  const targetBefore = before.reservations.find((row) => row.reservation_id === reservationId);
+  if (!targetBefore) {
+    throw new Error('Repair je odbijen: scheduled-cleanup reservation nije pronađena.');
+  }
+  const outsideUnresolved = query(
+    `SELECT COUNT(*) AS count FROM usage_reservations
+      WHERE settlement_failure_code IS NOT NULL AND reconciled_at IS NULL
+        AND reservation_id <> ${sqlText(reservationId)}`,
+  )[0]?.count;
+  if (Number(outsideUnresolved ?? 0) !== 0) {
+    throw new Error('Repair je odbijen: postoji drugi nerešen accounting incident.');
+  }
+  if (scheduled.reservationNeedsUpdate) {
+    const reservationUpdate = wrangler(
+      `UPDATE usage_reservations
+          SET reconciled_at = ${now},
+              reconciliation_code = ${sqlText(scheduled.reconciliationCode)}
+        WHERE reservation_id = ${sqlText(reservationId)}
+          AND route_key = 'scheduled-cleanup'
+          AND state = 'committed'
+          AND measurement_exact = 1
+          AND settlement_failure_code = 'USAGE_RESERVATION_UNDERESTIMATED'
+          AND business_committed = 0
+          AND reconciled_at IS NULL
+          AND reserved_d1_rows_read = 1090
+          AND reserved_d1_rows_written = 256
+          AND reserved_r2_class_a = 1
+          AND reserved_r2_class_b = 0
+          AND measured_d1_rows_read = 1388
+          AND measured_d1_rows_written = 19
+          AND measured_r2_class_a = 1
+          AND measured_r2_class_b = 0
+          AND committed_d1_rows_read = 1388
+          AND committed_d1_rows_written = 19
+          AND committed_r2_class_a = 1
+          AND committed_r2_class_b = 0
+          AND released_d1_rows_read = 0
+          AND released_d1_rows_written = 237
+          AND released_r2_class_a = 0
+          AND released_r2_class_b = 0`,
+    );
+    if (changedRows(reservationUpdate) !== 1) {
+      throw new Error('Repair je zaustavljen: scheduled-cleanup reservation CAS nije promenio tačno jedan red.');
+    }
+  }
+
+  const after = snapshot();
+  const afterFlags = after.serviceFlags[0];
+  const afterTarget = after.reservations.find((row) => row.reservation_id === reservationId);
+  if (
+    !afterTarget ||
+    afterTarget.reconciled_at === null ||
+    afterTarget.reconciliation_code !== scheduled.reconciliationCode ||
+    afterTarget.business_committed !== 0
+  ) {
+    throw new Error('Repair postcheck nije sačuvao scheduled-cleanup exact dokaz.');
+  }
+  if (
+    after.unresolved.some(
+      (row) =>
+        Number(row.reserved_count ?? 0) !== 0 || Number(row.unreconciled_failure_count ?? 0) !== 0,
+    )
+  ) {
+    throw new Error('Repair postcheck je otkrio nerešeni accounting incident nakon scheduled-cleanup repair-a.');
+  }
+  const flagUpdate = wrangler(
+    `UPDATE service_flags
+        SET accounting_fault = 0, state_reason = 'NONE', state_request_id = NULL,
+            accounting_fault_at = NULL, updated_at = ${now}
+      WHERE singleton_id = 1
+        AND accounting_fault = 1
+        AND state_reason = 'USAGE_RESERVATION_UNDERESTIMATED'
+        AND state_request_id = ${sqlText(requestId)}
+        AND accounting_fault_at = ${faultTimestamp}
+        AND accept_new_vaults = 1 AND accept_pairings = 1 AND accept_writes = 1
+        AND maintenance_mode = 0
+        AND EXISTS (
+          SELECT 1 FROM usage_reservations
+           WHERE reservation_id = ${sqlText(reservationId)}
+             AND reconciled_at IS NOT NULL
+             AND reconciliation_code = ${sqlText(scheduled.reconciliationCode)}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM usage_reservations
+           WHERE settlement_failure_code IS NOT NULL AND reconciled_at IS NULL
+        )`,
+  );
+  if (changedRows(flagUpdate) !== 1) {
+    throw new Error('Repair je ostao fail-closed: scheduled-cleanup service flags CAS nije promenio tačno jedan red; bezbedno ponovite isti zahtev.');
+  }
+  const afterRepair = snapshot();
+  const afterRepairFlags = afterRepair.serviceFlags[0];
+  const afterRepairTarget = afterRepair.reservations.find((row) => row.reservation_id === reservationId);
+  const afterRepairUnresolved = query(
+    `SELECT COUNT(*) AS count FROM usage_reservations
+      WHERE settlement_failure_code IS NOT NULL AND reconciled_at IS NULL`,
+  )[0]?.count;
+  const afterPath = writeEvidence('post-repair', afterRepair);
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        changed: true,
+        requestId,
+        operation,
+        beforeEvidence: backupPath,
+        afterEvidence: afterPath,
+        reconciledReservations: 1,
+        serviceFlags: afterRepairFlags,
+        reservation: afterRepairTarget,
+        unresolvedFailures: afterRepairUnresolved,
       },
       null,
       2,

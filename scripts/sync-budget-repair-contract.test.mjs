@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertPairingRepairPostconditions,
   assertProjectedUsageBelowLimits,
+  validateScheduledCleanupRepair,
   validatePairingCreateRepair,
 } from './sync-budget-repair-contract.mjs';
 
@@ -96,6 +97,54 @@ const pairingEvidence = {
   grant_count: 0,
   interval_candidate_count: 1,
   created_at: 1_500,
+};
+
+const scheduledCleanupRequestId = '47d4310a-b7fe-48ff-9ace-f715ad4a396d';
+const scheduledCleanupReservation = {
+  reservation_id: `${scheduledCleanupRequestId}:scheduled-cleanup`,
+  scope_type: 'global',
+  scope_id: 'service',
+  route_key: 'scheduled-cleanup',
+  state: 'committed',
+  reserved_worker_requests: 0,
+  reserved_d1_rows_read: 1090,
+  reserved_d1_rows_written: 256,
+  reserved_r2_class_a: 1,
+  reserved_r2_class_b: 0,
+  committed_worker_requests: 0,
+  committed_d1_rows_read: 1388,
+  committed_d1_rows_written: 19,
+  committed_r2_class_a: 1,
+  committed_r2_class_b: 0,
+  released_worker_requests: 0,
+  released_d1_rows_read: 0,
+  released_d1_rows_written: 237,
+  released_r2_class_a: 0,
+  released_r2_class_b: 0,
+  measurement_exact: 1,
+  measured_worker_requests: 0,
+  measured_d1_rows_read: 1388,
+  measured_d1_rows_written: 19,
+  measured_r2_class_a: 1,
+  measured_r2_class_b: 0,
+  settlement_failure_code: 'USAGE_RESERVATION_UNDERESTIMATED',
+  business_committed: 0,
+  reconciled_at: null,
+  reconciliation_code: null,
+  created_at: 1785683268328,
+  settled_at: 1785683270149,
+};
+
+const scheduledCleanupServiceFlags = {
+  accounting_fault: 1,
+  state_reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+  state_request_id: scheduledCleanupRequestId,
+  accept_new_vaults: 1,
+  accept_pairings: 1,
+  accept_writes: 1,
+  maintenance_mode: 0,
+  accounting_fault_at: 1785683270149,
+  updated_at: 1785683270149,
 };
 
 describe('pairing-create accounting repair contract', () => {
@@ -255,5 +304,59 @@ describe('pairing-create accounting repair contract', () => {
         reconciliationCode: 'PAIRING_CREATE_EXACT_RECONCILIATION',
       }),
     ).toThrow(/ciljnog incidenta/u);
+  });
+});
+
+describe('scheduled-cleanup accounting repair contract', () => {
+  it('accepts the exact live incident snapshot and returns the narrow reconciliation payload', () => {
+    expect(
+      validateScheduledCleanupRepair({
+        requestId: scheduledCleanupRequestId,
+        reservations: [scheduledCleanupReservation],
+        serviceFlags: scheduledCleanupServiceFlags,
+        unresolvedIncidentCount: 1,
+      }),
+    ).toEqual({
+      reservationId: `${scheduledCleanupRequestId}:scheduled-cleanup`,
+      reconciliationCode: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+      reservationNeedsUpdate: true,
+    });
+  });
+
+  it('rejects any divergence from the exact staged cleanup evidence', () => {
+    expect(() =>
+      validateScheduledCleanupRepair({
+        requestId: scheduledCleanupRequestId,
+        reservations: [
+          {
+            ...scheduledCleanupReservation,
+            reserved_d1_rows_read: 1091,
+          },
+        ],
+        serviceFlags: scheduledCleanupServiceFlags,
+        unresolvedIncidentCount: 1,
+      }),
+    ).toThrow(/Repair je odbijen/u);
+  });
+
+  it('keeps the target reservation immutable once reconciled', () => {
+    const reconciledReservation = {
+      ...scheduledCleanupReservation,
+      business_committed: 0,
+      reconciled_at: 1785683300000,
+      reconciliation_code: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+    };
+    expect(
+      validateScheduledCleanupRepair({
+        requestId: scheduledCleanupRequestId,
+        reservations: [reconciledReservation],
+        serviceFlags: { ...scheduledCleanupServiceFlags, accounting_fault: 0, state_reason: 'NONE', state_request_id: null, accounting_fault_at: null },
+        unresolvedIncidentCount: 0,
+      }),
+    ).toEqual({
+      reservationId: `${scheduledCleanupRequestId}:scheduled-cleanup`,
+      reconciliationCode: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+      reservationNeedsUpdate: false,
+    });
   });
 });

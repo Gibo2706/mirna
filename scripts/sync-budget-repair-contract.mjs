@@ -1,4 +1,5 @@
 const PAIRING_REQUEST_ID = /^[A-Za-z0-9_-]{22}$/u;
+const SCHEDULED_CLEANUP_RECONCILIATION_CODE = 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED';
 
 const numeric = (value, description) => {
   const parsed = Number(value);
@@ -22,6 +23,18 @@ const assertExactFields = (row, expected, description) => {
       throw new Error(`Repair je odbijen: ${description}.${field} ne odgovara incident dokazu.`);
     }
   }
+};
+
+const withoutReconciliationFields = ({
+  business_committed,
+  reconciled_at,
+  reconciliation_code,
+  ...row
+}) => {
+  void business_committed;
+  void reconciled_at;
+  void reconciliation_code;
+  return row;
 };
 
 export const assertPairingRequestId = (value) => {
@@ -186,6 +199,135 @@ export const validatePairingCreateRepair = ({
   };
 };
 
+export const validateScheduledCleanupRepair = ({
+  requestId,
+  reservations,
+  serviceFlags,
+  unresolvedIncidentCount,
+}) => {
+  const reservationId = `${requestId}:scheduled-cleanup`;
+  const reservation = exactReservation(reservations, reservationId);
+  const exactIncident =
+    reservation.scope_type === 'global' &&
+    reservation.scope_id === 'service' &&
+    reservation.route_key === 'scheduled-cleanup' &&
+    reservation.state === 'committed' &&
+    reservation.measurement_exact === 1 &&
+    reservation.settlement_failure_code === 'USAGE_RESERVATION_UNDERESTIMATED' &&
+    reservation.business_committed === 0 &&
+    reservation.reserved_worker_requests === 0 &&
+    reservation.reserved_d1_rows_read === 1090 &&
+    reservation.reserved_d1_rows_written === 256 &&
+    reservation.reserved_r2_class_a === 1 &&
+    reservation.reserved_r2_class_b === 0 &&
+    reservation.committed_worker_requests === 0 &&
+    reservation.committed_d1_rows_read === 1388 &&
+    reservation.committed_d1_rows_written === 19 &&
+    reservation.committed_r2_class_a === 1 &&
+    reservation.committed_r2_class_b === 0 &&
+    reservation.released_worker_requests === 0 &&
+    reservation.released_d1_rows_read === 0 &&
+    reservation.released_d1_rows_written === 237 &&
+    reservation.released_r2_class_a === 0 &&
+    reservation.released_r2_class_b === 0 &&
+    reservation.measured_worker_requests === 0 &&
+    reservation.measured_d1_rows_read === 1388 &&
+    reservation.measured_d1_rows_written === 19 &&
+    reservation.measured_r2_class_a === 1 &&
+    reservation.measured_r2_class_b === 0 &&
+    reservation.reconciled_at === null &&
+    reservation.reconciliation_code === null;
+  const reconciledState =
+    reservation.scope_type === 'global' &&
+    reservation.scope_id === 'service' &&
+    reservation.route_key === 'scheduled-cleanup' &&
+    reservation.state === 'committed' &&
+    reservation.measurement_exact === 1 &&
+    reservation.settlement_failure_code === 'USAGE_RESERVATION_UNDERESTIMATED' &&
+    reservation.business_committed === 0 &&
+    reservation.reserved_worker_requests === 0 &&
+    reservation.reserved_d1_rows_read === 1090 &&
+    reservation.reserved_d1_rows_written === 256 &&
+    reservation.reserved_r2_class_a === 1 &&
+    reservation.reserved_r2_class_b === 0 &&
+    reservation.committed_worker_requests === 0 &&
+    reservation.committed_d1_rows_read === 1388 &&
+    reservation.committed_d1_rows_written === 19 &&
+    reservation.committed_r2_class_a === 1 &&
+    reservation.committed_r2_class_b === 0 &&
+    reservation.released_worker_requests === 0 &&
+    reservation.released_d1_rows_read === 0 &&
+    reservation.released_d1_rows_written === 237 &&
+    reservation.released_r2_class_a === 0 &&
+    reservation.released_r2_class_b === 0 &&
+    reservation.measured_worker_requests === 0 &&
+    reservation.measured_d1_rows_read === 1388 &&
+    reservation.measured_d1_rows_written === 19 &&
+    reservation.measured_r2_class_a === 1 &&
+    reservation.measured_r2_class_b === 0 &&
+    reservation.reconciled_at !== null &&
+    reservation.reconciliation_code === SCHEDULED_CLEANUP_RECONCILIATION_CODE;
+  if (!exactIncident && !reconciledState) {
+    throw new Error('Repair je odbijen: scheduled-cleanup incident nije exact dokaz.');
+  }
+  assertExactFields(
+    reservation,
+    {
+      reserved_worker_requests: 0,
+      reserved_d1_rows_read: 1090,
+      reserved_d1_rows_written: 256,
+      reserved_r2_class_a: 1,
+      reserved_r2_class_b: 0,
+      committed_worker_requests: 0,
+      committed_d1_rows_read: 1388,
+      committed_d1_rows_written: 19,
+      committed_r2_class_a: 1,
+      committed_r2_class_b: 0,
+      released_worker_requests: 0,
+      released_d1_rows_read: 0,
+      released_d1_rows_written: 237,
+      released_r2_class_a: 0,
+      released_r2_class_b: 0,
+      measured_worker_requests: 0,
+      measured_d1_rows_read: 1388,
+      measured_d1_rows_written: 19,
+      measured_r2_class_a: 1,
+      measured_r2_class_b: 0,
+    },
+    'scheduled-cleanup reservation',
+  );
+  if (
+    !serviceFlags ||
+    !(
+      (serviceFlags.accounting_fault === 1 &&
+        serviceFlags.state_reason === 'USAGE_RESERVATION_UNDERESTIMATED' &&
+        serviceFlags.state_request_id === requestId &&
+        serviceFlags.accept_new_vaults === 1 &&
+        serviceFlags.accept_pairings === 1 &&
+        serviceFlags.accept_writes === 1 &&
+        serviceFlags.maintenance_mode === 0) ||
+      (serviceFlags.accounting_fault === 0 &&
+        serviceFlags.state_reason === 'NONE' &&
+        serviceFlags.state_request_id === null &&
+        serviceFlags.accept_new_vaults === 1 &&
+        serviceFlags.accept_pairings === 1 &&
+        serviceFlags.accept_writes === 1 &&
+        serviceFlags.maintenance_mode === 0)
+    )
+  ) {
+    throw new Error('Repair je odbijen: scheduled-cleanup service flags ne pripadaju incidentu.');
+  }
+  if (numeric(unresolvedIncidentCount, 'unresolved accounting incident count') > 1) {
+    throw new Error('Repair je odbijen: postoji više od jednog nerešenog accounting incidenta.');
+  }
+
+  return {
+    reservationId,
+    reconciliationCode: SCHEDULED_CLEANUP_RECONCILIATION_CODE,
+    reservationNeedsUpdate: exactIncident,
+  };
+};
+
 export const assertProjectedUsageBelowLimits = ({ rolling, daily, resources, budgets }) => {
   if (!rolling || !daily || !resources) {
     throw new Error('Repair je odbijen: projektovano accounting stanje nije potpuno.');
@@ -206,18 +348,6 @@ export const assertProjectedUsageBelowLimits = ({ rolling, daily, resources, bud
   if (checks.some(([row, field, limit]) => numeric(row[field], field) >= limit)) {
     throw new Error('Repair je odbijen: najmanje jedan projektovani hard limit nije bezbedan.');
   }
-};
-
-const withoutReconciliationFields = ({
-  business_committed,
-  reconciled_at,
-  reconciliation_code,
-  ...row
-}) => {
-  void business_committed;
-  void reconciled_at;
-  void reconciliation_code;
-  return row;
 };
 
 export const assertPairingRepairPostconditions = ({
