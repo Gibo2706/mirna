@@ -56,9 +56,8 @@ interface ReservationRow {
 const MAX_SQL_INTEGER = 9_007_199_254_740_991;
 const LEDGER_OVERHEAD: MeteredUsage = Object.freeze({
   workerRequests: 1,
-  // Covers the fixed reservation/settlement ledger plus at most three indexed
-  // platform diagnostic inserts which intentionally occur outside the route
-  // meter. It does not include application-handler work.
+  // Covers the fixed reservation/settlement ledger and rare accounting faults.
+  // Routine success diagnostics are intentionally coalesced away.
   d1RowsRead: 1_024,
   d1RowsWritten: 128,
   r2ClassA: 0,

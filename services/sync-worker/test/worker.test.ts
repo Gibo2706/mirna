@@ -1,10 +1,48 @@
 import { env } from 'cloudflare:workers';
 import { SELF } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import {
+  createAccessSession,
+  createInitialVaultFixture,
+  registerInitialVault,
+} from './protocol-fixtures';
 import { checkAccountingReadiness } from '../src/health';
 
 const request = (path: string, init?: RequestInit): Request =>
   new Request(`https://sync.invalid${path}`, init);
+
+const SUPPORT_ID = 'MIRNA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AA';
+const ALLOWED_ORIGIN = 'http://localhost:5173';
+
+const dailyBucketRow = async (day: string) =>
+  env.MIRNA_SYNC_DB.prepare(
+    `SELECT worker_requests, d1_rows_read, d1_rows_written, r2_class_a, r2_class_b, updated_at
+       FROM usage_daily_buckets
+      WHERE scope_type = 'global' AND scope_id = 'service' AND utc_day = ?1`,
+  )
+    .bind(day)
+    .first<{
+      worker_requests: number;
+      d1_rows_read: number;
+      d1_rows_written: number;
+      r2_class_a: number;
+      r2_class_b: number;
+      updated_at: number;
+    }>();
+
+const rollingTotalsRow = async () =>
+  env.MIRNA_SYNC_DB.prepare(
+    `SELECT worker_requests, d1_rows_read, d1_rows_written, r2_class_a, r2_class_b, refreshed_at
+       FROM usage_rolling_totals
+      WHERE scope_type = 'global' AND scope_id = 'service'`,
+  ).first<{
+    worker_requests: number;
+    d1_rows_read: number;
+    d1_rows_written: number;
+    r2_class_a: number;
+    r2_class_b: number;
+    refreshed_at: number;
+  }>();
 
 describe('Worker HTTP foundation', () => {
   it('reports D1 and R2 reachability without exposing binding identifiers', async () => {
@@ -140,6 +178,224 @@ describe('Worker HTTP foundation', () => {
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('http://localhost:5173');
     expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET, OPTIONS');
     expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+  it('handles valid preflight before accounting, rejects invalid preflights, and blocks exhausted writes', async () => {
+    const day = new Date().toISOString().slice(0, 10);
+    const now = Date.now();
+    const dailyBefore = await dailyBucketRow(day);
+    const rollingBefore = await rollingTotalsRow();
+
+    try {
+      await env.MIRNA_SYNC_DB.batch([
+        env.MIRNA_SYNC_DB.prepare(
+          `INSERT INTO usage_daily_buckets (
+             scope_type, scope_id, utc_day, worker_requests, d1_rows_read,
+             d1_rows_written, r2_class_a, r2_class_b, updated_at
+           ) VALUES ('global', 'service', ?1, 0, 0, 80000, 0, 0, ?2)
+           ON CONFLICT(scope_type, scope_id, utc_day) DO UPDATE SET
+             worker_requests = excluded.worker_requests,
+             d1_rows_read = excluded.d1_rows_read,
+             d1_rows_written = excluded.d1_rows_written,
+             r2_class_a = excluded.r2_class_a,
+             r2_class_b = excluded.r2_class_b,
+             updated_at = excluded.updated_at`,
+        ).bind(day, now),
+        env.MIRNA_SYNC_DB.prepare(
+          `INSERT INTO usage_rolling_totals (
+             scope_type, scope_id, worker_requests, d1_rows_read,
+             d1_rows_written, r2_class_a, r2_class_b, refreshed_at
+           ) VALUES ('global', 'service', 0, 0, 80000, 0, 0, ?1)
+           ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+             worker_requests = excluded.worker_requests,
+             d1_rows_read = excluded.d1_rows_read,
+             d1_rows_written = excluded.d1_rows_written,
+             r2_class_a = excluded.r2_class_a,
+             r2_class_b = excluded.r2_class_b,
+             refreshed_at = excluded.refreshed_at`,
+        ).bind(now),
+      ]);
+
+      const valid = await SELF.fetch(
+        request('/v1/health', {
+          method: 'OPTIONS',
+          headers: {
+            Origin: ALLOWED_ORIGIN,
+            'Access-Control-Request-Method': 'GET',
+            'Access-Control-Request-Headers': 'x-mirna-protocol-version,x-mirna-support-id',
+          },
+        }),
+      );
+      const validRequestId = valid.headers.get('X-Request-Id');
+      expect(valid.status).toBe(204);
+      expect(valid.headers.get('Access-Control-Allow-Origin')).toBe(ALLOWED_ORIGIN);
+      expect(valid.headers.get('Access-Control-Allow-Methods')).toBe('GET, OPTIONS');
+      expect(valid.headers.get('Access-Control-Allow-Headers')).toContain(
+        'x-mirna-protocol-version',
+      );
+      expect(valid.headers.get('Access-Control-Allow-Headers')).toContain('x-mirna-support-id');
+      expect(validRequestId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(
+        await env.MIRNA_SYNC_DB.prepare(
+          `SELECT COUNT(*) AS count FROM usage_reservations WHERE reservation_id LIKE ?1`,
+        )
+          .bind(`${validRequestId}:%`)
+          .first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+      expect(
+        await env.MIRNA_SYNC_DB.prepare(
+          `SELECT COUNT(*) AS count FROM beta_diagnostic_events WHERE request_id = ?1`,
+        )
+          .bind(validRequestId)
+          .first<{ count: number }>(),
+      ).toEqual({ count: 0 });
+
+      const invalidOrigin = await SELF.fetch(
+        request('/v1/health', {
+          method: 'OPTIONS',
+          headers: {
+            Origin: 'https://attacker.invalid',
+            'Access-Control-Request-Method': 'GET',
+            'Access-Control-Request-Headers': 'x-mirna-protocol-version',
+          },
+        }),
+      );
+      expect(invalidOrigin.status).toBe(403);
+
+      const invalidMethod = await SELF.fetch(
+        request('/v1/health', {
+          method: 'OPTIONS',
+          headers: {
+            Origin: ALLOWED_ORIGIN,
+            'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'x-mirna-protocol-version',
+          },
+        }),
+      );
+      expect(invalidMethod.status).toBe(403);
+
+      const invalidHeader = await SELF.fetch(
+        request('/v1/health', {
+          method: 'OPTIONS',
+          headers: {
+            Origin: ALLOWED_ORIGIN,
+            'Access-Control-Request-Method': 'GET',
+            'Access-Control-Request-Headers': 'x-not-allowed',
+          },
+        }),
+      );
+      expect(invalidHeader.status).toBe(403);
+
+      const exhaustedWrite = await SELF.fetch(
+        request('/v1/operations', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: ALLOWED_ORIGIN,
+            'X-Mirna-Protocol-Version': '1',
+          },
+          body: '{}',
+        }),
+      );
+      expect(exhaustedWrite.status).toBe(503);
+      expect(await exhaustedWrite.json()).toMatchObject({
+        error: {
+          code: 'SERVICE_QUOTA_EXHAUSTED',
+          message: 'Staging service quota is exhausted.',
+        },
+      });
+    } finally {
+      if (dailyBefore === null) {
+        await env.MIRNA_SYNC_DB.prepare(
+          `DELETE FROM usage_daily_buckets
+            WHERE scope_type = 'global' AND scope_id = 'service' AND utc_day = ?1`,
+        )
+          .bind(day)
+          .run();
+      } else {
+        await env.MIRNA_SYNC_DB.prepare(
+          `UPDATE usage_daily_buckets
+              SET worker_requests = ?2,
+                  d1_rows_read = ?3,
+                  d1_rows_written = ?4,
+                  r2_class_a = ?5,
+                  r2_class_b = ?6,
+                  updated_at = ?7
+            WHERE scope_type = 'global' AND scope_id = 'service' AND utc_day = ?1`,
+        )
+          .bind(
+            day,
+            dailyBefore.worker_requests,
+            dailyBefore.d1_rows_read,
+            dailyBefore.d1_rows_written,
+            dailyBefore.r2_class_a,
+            dailyBefore.r2_class_b,
+            dailyBefore.updated_at,
+          )
+          .run();
+      }
+
+      if (rollingBefore === null) {
+        await env.MIRNA_SYNC_DB.prepare(
+          `DELETE FROM usage_rolling_totals
+            WHERE scope_type = 'global' AND scope_id = 'service'`,
+        ).run();
+      } else {
+        await env.MIRNA_SYNC_DB.prepare(
+          `UPDATE usage_rolling_totals
+              SET worker_requests = ?1,
+                  d1_rows_read = ?2,
+                  d1_rows_written = ?3,
+                  r2_class_a = ?4,
+                  r2_class_b = ?5,
+                  refreshed_at = ?6
+            WHERE scope_type = 'global' AND scope_id = 'service'`,
+        )
+          .bind(
+            rollingBefore.worker_requests,
+            rollingBefore.d1_rows_read,
+            rollingBefore.d1_rows_written,
+            rollingBefore.r2_class_a,
+            rollingBefore.r2_class_b,
+            rollingBefore.refreshed_at,
+          )
+          .run();
+      }
+    }
+  });
+
+  it('keeps routine successful requests out of persistent beta diagnostics while still settling budget', async () => {
+    const fixture = await createInitialVaultFixture();
+    expect((await registerInitialVault(fixture)).status).toBe(201);
+    const { accessToken } = await createAccessSession(fixture);
+    const response = await SELF.fetch(
+      request('/v1/vault/manifest', {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Origin: ALLOWED_ORIGIN,
+          'X-Mirna-Protocol-Version': '1',
+          'X-Mirna-Support-Id': SUPPORT_ID,
+        },
+      }),
+    );
+    const requestId = response.headers.get('X-Request-Id');
+    expect(response.status).toBe(200);
+    expect(requestId).not.toBeNull();
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT COUNT(*) AS count FROM beta_diagnostic_events WHERE request_id = ?1`,
+      )
+        .bind(requestId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        `SELECT state, settled_at FROM usage_reservations WHERE reservation_id = ?1`,
+      )
+        .bind(`${requestId!}:route`)
+        .first<{ state: string; settled_at: number }>(),
+    ).toMatchObject({ state: 'committed' });
   });
 
   it('rejects unsupported methods, content types and routes with safe JSON', async () => {

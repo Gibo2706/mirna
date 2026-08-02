@@ -49,7 +49,8 @@ export const STAGING_BUDGETS: StagingBudgets = Object.freeze({
     d1RowsRead: 25_000_000,
     d1RowsReadPerUtcDay: 2_000_000,
     d1RowsWritten: 500_000,
-    d1RowsWrittenPerUtcDay: 40_000,
+    // Keep headroom below Cloudflare Free's 100000 D1 rows-written/day allowance.
+    d1RowsWrittenPerUtcDay: 80_000,
   }),
   perVault: Object.freeze({
     workerRequests: 25_000,

@@ -32,28 +32,7 @@ import { recordBetaDiagnostic } from './diagnostics';
 
 const HEALTH_PATH = '/v1/health';
 
-const recordAccountingSuccess = (
-  context: RequestContext,
-  category:
-    | 'budget_request_reservation_succeeded'
-    | 'budget_route_reservation_succeeded'
-    | 'budget_settlement_succeeded',
-  route: string,
-): Promise<void> =>
-  recordBetaDiagnostic(
-    { ...context, env: context.accountingEnv ?? context.env },
-    {
-      eventType: 'request_error',
-      severity: 'info',
-      category,
-      requestId: context.requestId,
-      details: {
-        businessCommitted: context.businessCommit?.committed === true,
-        route,
-        serviceFlagsChanged: false,
-      },
-    },
-  );
+const recordAccountingSuccess = (..._args: unknown[]): Promise<void> => Promise.resolve();
 
 const recordAccountingFailure = (
   request: Request,
@@ -96,11 +75,12 @@ const recordAccountingFailure = (
   );
 };
 
-const handlePreflight = (
+const handlePreflight = async (
   request: Request,
+  env: Env,
   requestId: string,
   allowedOrigin: string | null,
-): Response => {
+): Promise<Response> => {
   if (allowedOrigin === null) {
     return errorResponse('ORIGIN_NOT_ALLOWED', 'Origin is not allowed.', 403, { requestId });
   }
@@ -125,13 +105,15 @@ const handlePreflight = (
     });
   }
 
+  await enforceEdgeRateLimit(request, env);
+
   return noContentResponse({ requestId, allowedOrigin, allowedMethods: [...methods, 'OPTIONS'] });
 };
 
 const executeRoute = async (context: RequestContext): Promise<Response> => {
   const { request, requestId, allowedOrigin } = context;
   if (request.method === 'OPTIONS') {
-    return handlePreflight(request, requestId, allowedOrigin);
+    return handlePreflight(request, context.accountingEnv ?? context.env, requestId, allowedOrigin);
   }
 
   const requestedProtocol = request.headers.get('X-Mirna-Protocol-Version');
@@ -217,6 +199,9 @@ const fetchHandler = async (
   requestId: string,
   allowedOrigin: string | null,
 ): Promise<Response> => {
+  if (request.method === 'OPTIONS') {
+    return handlePreflight(request, env, requestId, allowedOrigin);
+  }
   if (hasDisallowedOrigin(request, env)) {
     return errorResponse('ORIGIN_NOT_ALLOWED', 'Origin is not allowed.', 403, { requestId });
   }
