@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import {
+  assertPairingRepairPostconditions,
   assertPairingRequestId,
   assertProjectedUsageBelowLimits,
   validatePairingCreateRepair,
@@ -510,12 +511,6 @@ if (
   throw new Error('Repair batch nije bezbedno obnovio staging service flagove.');
 }
 if (
-  !afterTarget ||
-  afterTarget.reconciled_at === null ||
-  afterTarget.reconciliation_code !== pairingRepair.reconciliationCode ||
-  afterTarget.business_committed !== 1 ||
-  afterTarget.committed_d1_rows_read !== afterTarget.measured_d1_rows_read ||
-  afterTarget.committed_d1_rows_written !== afterTarget.measured_d1_rows_written ||
   after.unresolved.some(
     (row) =>
       Number(row.reserved_count ?? 0) !== 0 || Number(row.unreconciled_failure_count ?? 0) !== 0,
@@ -523,26 +518,19 @@ if (
 ) {
   throw new Error('Repair batch nije sačuvao exact pairing-create reconciliation dokaz.');
 }
-const immutableRoute = ({ business_committed, reconciled_at, reconciliation_code, ...row }) => {
-  void business_committed;
-  void reconciled_at;
-  void reconciliation_code;
-  return row;
-};
-if (
-  JSON.stringify(afterRequest) !== JSON.stringify(requestBefore) ||
-  JSON.stringify(immutableRoute(afterTarget)) !== JSON.stringify(immutableRoute(routeBefore)) ||
-  JSON.stringify(after.pairingBusinessEvidence) !==
-    JSON.stringify(before.pairingBusinessEvidence) ||
-  JSON.stringify(after.globalRolling) !== JSON.stringify(before.globalRolling) ||
-  JSON.stringify(after.recentGlobalDaily) !== JSON.stringify(before.recentGlobalDaily) ||
-  JSON.stringify(after.pairingTotals) !== JSON.stringify(before.pairingTotals)
-) {
-  throw new Error('Repair postcheck je otkrio promenu izvan tri dozvoljena reconciliation polja.');
-}
-if (!after.pairingTotals || after.pairingTotals.total_count !== after.pairingTotals.actual_count) {
-  throw new Error('Repair postcheck je otkrio neusklađen pairing request counter.');
-}
+assertPairingRepairPostconditions({
+  beforeRequest: requestBefore,
+  afterRequest,
+  beforeRoute: routeBefore,
+  afterRoute: afterTarget,
+  beforePairingEvidence: before.pairingBusinessEvidence,
+  afterPairingEvidence: after.pairingBusinessEvidence,
+  afterPairingTotals: after.pairingTotals,
+  reconciliationCode: pairingRepair.reconciliationCode,
+});
+// Global usage and the singleton pairing count may advance legitimately while this multi-read
+// postcheck is running. SQL-level CAS predicates and the exact target snapshots above prove repair
+// scope; hard-limit and singleton consistency checks below remain safe under concurrent traffic.
 assertProjectedUsageBelowLimits({
   rolling: after.projectedGlobalRolling,
   daily: after.projectedGlobalDaily,

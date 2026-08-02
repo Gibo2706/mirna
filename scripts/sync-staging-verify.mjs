@@ -1,7 +1,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
-import { verifyStagingSnapshot } from './sync-staging-contract.mjs';
+import {
+  parseCloudflareBucketBytes,
+  parseCloudflareCount,
+  verifyStagingSnapshot,
+} from './sync-staging-contract.mjs';
 
 const DATABASE = 'mirna-sync-staging-eu';
 const BUCKET = 'mirna-sync-staging-eu';
@@ -53,33 +57,6 @@ const runWrangler = (args) => {
   } catch {
     throw new Error('Cloudflare read-only provera nije vratila očekivani JSON.');
   }
-};
-
-const parseNonNegativeInteger = (value, label) => {
-  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${label} nije ispravan.`);
-  return parsed;
-};
-
-const parseBucketBytes = (value) => {
-  if (typeof value === 'number') {
-    return { bytes: parseNonNegativeInteger(value, 'R2 size'), exact: true };
-  }
-  const match = /^(\d+(?:\.\d+)?)\s+(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/u.exec(String(value));
-  if (!match) throw new Error('R2 size nije ispravan.');
-  const multipliers = {
-    B: 1,
-    KB: 1_000,
-    MB: 1_000 ** 2,
-    GB: 1_000 ** 3,
-    TB: 1_000 ** 4,
-    KiB: 1_024,
-    MiB: 1_024 ** 2,
-    GiB: 1_024 ** 3,
-    TiB: 1_024 ** 4,
-  };
-  const bytes = Math.ceil(Number(match[1]) * multipliers[match[2]]);
-  return { bytes: parseNonNegativeInteger(bytes, 'R2 size'), exact: match[2] === 'B' };
 };
 
 const sql = `
@@ -139,8 +116,8 @@ const columns = (index) => resultSets[index].map(({ name }) => name);
 const first = (index) => resultSets[index][0] ?? null;
 const r2Payload = runWrangler(['r2', 'bucket', 'info', BUCKET, '--jurisdiction', 'eu', '--json']);
 const r2 = r2Payload.result ?? r2Payload;
-const objectCount = parseNonNegativeInteger(r2.object_count ?? r2.objectCount, 'R2 object count');
-const parsedBucketSize = parseBucketBytes(r2.bucket_size ?? r2.bucketSize ?? r2.size);
+const objectCount = parseCloudflareCount(r2.object_count ?? r2.objectCount, 'R2 object count');
+const parsedBucketSize = parseCloudflareBucketBytes(r2.bucket_size ?? r2.bucketSize ?? r2.size);
 const bucketBytes = parsedBucketSize.bytes;
 
 let health;

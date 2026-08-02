@@ -71,6 +71,42 @@ export const STAGING_VERIFY_LIMITS = Object.freeze({
   r2ObjectCount: 100_000,
 });
 
+export const parseCloudflareCount = (value, label) => {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
+  const text = String(value);
+  if (!/^(?:\d+|\d{1,3}(?:[,\u00A0\u202F]\d{3})+)$/u.test(text)) {
+    throw new Error(`${label} nije ispravan.`);
+  }
+  const parsed = Number(text.replaceAll(/[,\u00A0\u202F]/gu, ''));
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${label} nije ispravan.`);
+  return parsed;
+};
+
+export const parseCloudflareBucketBytes = (value) => {
+  if (typeof value === 'number') {
+    return { bytes: parseCloudflareCount(value, 'R2 size'), exact: true };
+  }
+  const match = /^(\d+(?:[.,]\d+)?)\s+(B|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/u.exec(String(value));
+  if (!match) throw new Error('R2 size nije ispravan.');
+  const multipliers = {
+    B: 1,
+    kB: 1_000,
+    KB: 1_000,
+    MB: 1_000 ** 2,
+    GB: 1_000 ** 3,
+    TB: 1_000 ** 4,
+    KiB: 1_024,
+    MiB: 1_024 ** 2,
+    GiB: 1_024 ** 3,
+    TiB: 1_024 ** 4,
+  };
+  const bytes = Math.ceil(Number(match[1].replace(',', '.')) * multipliers[match[2]]);
+  return {
+    bytes: parseCloudflareCount(bytes, 'R2 size'),
+    exact: match[2] === 'B',
+  };
+};
+
 const isNonNegativeInteger = (value) => Number.isSafeInteger(value) && value >= 0;
 
 const verifyUsage = (errors, label, usage, limits) => {

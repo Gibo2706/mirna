@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { REQUIRED_ACCOUNTING_COLUMNS, verifyStagingSnapshot } from './sync-staging-contract.mjs';
+import {
+  parseCloudflareBucketBytes,
+  parseCloudflareCount,
+  REQUIRED_ACCOUNTING_COLUMNS,
+  verifyStagingSnapshot,
+} from './sync-staging-contract.mjs';
 
 const migrations = Array.from(
   { length: 10 },
@@ -59,6 +64,14 @@ const validSnapshot = () => ({
 });
 
 describe('staging schema and accounting contract', () => {
+  it('parses current Wrangler R2 metric formatting without losing count precision', () => {
+    expect(parseCloudflareCount('12,345', 'R2 object count')).toBe(12_345);
+    expect(parseCloudflareBucketBytes('1.24 kB')).toEqual({ bytes: 1_240, exact: false });
+    expect(parseCloudflareBucketBytes('614 B')).toEqual({ bytes: 614, exact: true });
+    expect(() => parseCloudflareCount('12.5', 'R2 object count')).toThrow(/nije ispravan/u);
+    expect(() => parseCloudflareBucketBytes('1.2 nonsense')).toThrow(/nije ispravan/u);
+  });
+
   it('accepts a fully migrated, ready and internally consistent staging snapshot', () => {
     expect(verifyStagingSnapshot(validSnapshot(), migrations, build, registryVersion)).toEqual({
       ok: true,

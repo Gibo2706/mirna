@@ -207,3 +207,50 @@ export const assertProjectedUsageBelowLimits = ({ rolling, daily, resources, bud
     throw new Error('Repair je odbijen: najmanje jedan projektovani hard limit nije bezbedan.');
   }
 };
+
+const withoutReconciliationFields = ({
+  business_committed,
+  reconciled_at,
+  reconciliation_code,
+  ...row
+}) => {
+  void business_committed;
+  void reconciled_at;
+  void reconciliation_code;
+  return row;
+};
+
+export const assertPairingRepairPostconditions = ({
+  beforeRequest,
+  afterRequest,
+  beforeRoute,
+  afterRoute,
+  beforePairingEvidence,
+  afterPairingEvidence,
+  afterPairingTotals,
+  reconciliationCode,
+}) => {
+  if (
+    !afterRoute ||
+    afterRoute.reconciled_at === null ||
+    afterRoute.reconciliation_code !== reconciliationCode ||
+    afterRoute.business_committed !== 1 ||
+    afterRoute.committed_d1_rows_read !== afterRoute.measured_d1_rows_read ||
+    afterRoute.committed_d1_rows_written !== afterRoute.measured_d1_rows_written
+  ) {
+    throw new Error('Repair postcheck nije sačuvao exact pairing-create reconciliation dokaz.');
+  }
+  if (
+    JSON.stringify(afterRequest) !== JSON.stringify(beforeRequest) ||
+    JSON.stringify(withoutReconciliationFields(afterRoute)) !==
+      JSON.stringify(withoutReconciliationFields(beforeRoute)) ||
+    JSON.stringify(afterPairingEvidence) !== JSON.stringify(beforePairingEvidence)
+  ) {
+    throw new Error(
+      'Repair postcheck je otkrio promenu ciljnog incidenta izvan dozvoljenog CAS-a.',
+    );
+  }
+  if (!afterPairingTotals || afterPairingTotals.total_count !== afterPairingTotals.actual_count) {
+    throw new Error('Repair postcheck je otkrio neusklađen pairing request counter.');
+  }
+};

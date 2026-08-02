@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertPairingRepairPostconditions,
   assertProjectedUsageBelowLimits,
   validatePairingCreateRepair,
 } from './sync-budget-repair-contract.mjs';
@@ -213,5 +214,46 @@ describe('pairing-create accounting repair contract', () => {
         budgets,
       }),
     ).toThrow(/projektovani hard limit/u);
+  });
+
+  it('keeps the incident immutable while allowing unrelated live aggregate advancement', () => {
+    const reconciledRoute = {
+      ...routeReservation,
+      business_committed: 1,
+      reconciled_at: 3_000,
+      reconciliation_code: 'PAIRING_CREATE_EXACT_RECONCILIATION',
+    };
+    expect(() =>
+      assertPairingRepairPostconditions({
+        beforeRequest: requestReservation,
+        afterRequest: { ...requestReservation },
+        beforeRoute: routeReservation,
+        afterRoute: reconciledRoute,
+        beforePairingEvidence: pairingEvidence,
+        afterPairingEvidence: { ...pairingEvidence },
+        afterPairingTotals: { total_count: 2, actual_count: 2, updated_at: 4_000 },
+        reconciliationCode: 'PAIRING_CREATE_EXACT_RECONCILIATION',
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects any target change outside the exact reconciliation fields', () => {
+    expect(() =>
+      assertPairingRepairPostconditions({
+        beforeRequest: requestReservation,
+        afterRequest: { ...requestReservation, committed_d1_rows_read: 129 },
+        beforeRoute: routeReservation,
+        afterRoute: {
+          ...routeReservation,
+          business_committed: 1,
+          reconciled_at: 3_000,
+          reconciliation_code: 'PAIRING_CREATE_EXACT_RECONCILIATION',
+        },
+        beforePairingEvidence: pairingEvidence,
+        afterPairingEvidence: pairingEvidence,
+        afterPairingTotals: { total_count: 1, actual_count: 1 },
+        reconciliationCode: 'PAIRING_CREATE_EXACT_RECONCILIATION',
+      }),
+    ).toThrow(/ciljnog incidenta/u);
   });
 });
