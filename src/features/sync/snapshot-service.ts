@@ -133,6 +133,7 @@ const metadataChanges = (
   metadata: SyncMetadataRecord,
   overrides: Partial<SnapshotMetadataChanges>,
 ): SnapshotMetadataChanges => ({
+  bootstrapMode: metadata.bootstrapMode,
   firstUploadConsent: metadata.firstUploadConsent,
   lastServerCursor: metadata.lastServerCursor,
   lastSnapshotServerCursor: metadata.lastSnapshotServerCursor,
@@ -189,6 +190,21 @@ export class SnapshotSyncService {
     if (!setup) {
       throw new SnapshotSyncError('not-enabled', 'Sinhronizacija nije uključena na ovom uređaju.');
     }
+    const pairedBootstrapPending =
+      setup.metadata.bootstrapMode === 'paired-download' &&
+      setup.metadata.lastSnapshotRevision === 0 &&
+      setup.metadata.lastSnapshotHash === null &&
+      setup.metadata.lastSnapshotId !== null;
+
+    if (
+      pairedBootstrapPending &&
+      setup.metadata.syncBlockReason === 'local-remote-conflict'
+    ) {
+      setup = await this.#repository.preparePairedDeviceBootstrap(
+        setup,
+        this.#now().toISOString(),
+      );
+    }
     if (setup.metadata.syncBlockReason) {
       return {
         kind: 'blocked',
@@ -213,6 +229,12 @@ export class SnapshotSyncService {
       }
 
       if (!remote) {
+        if (setup.metadata.bootstrapMode === 'paired-download') {
+          throw new SnapshotSyncError(
+            'snapshot-invalid',
+            'Povezani uređaj još nema dostupan početni snapshot. Pokrenite prvi upload na postojećem uređaju.',
+          );
+        }
         if (setup.metadata.lastSnapshotRevision > 0) {
           return this.#block(setup, 'rollback-detected', 'REMOTE_SNAPSHOT_MISSING');
         }
@@ -491,6 +513,37 @@ export class SnapshotSyncService {
     });
     const acceptedDataHash = await computeSyncFinanceDataHash(ready);
     const syncedAt = this.#now().toISOString();
+    if (
+      bootstrapFromPairingPin &&
+      setup.metadata.bootstrapMode === 'paired-download'
+    ) {
+      await this.#repository.applyRemoteSnapshot(
+        setup,
+        ready,
+        metadataChanges(setup.metadata, {
+          bootstrapMode: 'complete',
+          firstUploadConsent: 'accepted',
+          lastServerCursor: snapshot.causalFrontier.serverCursor,
+          lastSnapshotServerCursor: snapshot.causalFrontier.serverCursor,
+          lastSnapshotRevision: envelope.revision,
+          lastSnapshotId: envelope.snapshotId,
+          lastSnapshotHash: remoteHash,
+          lastSnapshotContentHash: snapshot.contentIntegrityHash,
+          lastLocalDataHash: acceptedDataHash,
+          pendingKeyRotationSnapshotEpoch: undefined,
+          lastSyncAt: syncedAt,
+          lastSuccessfulSyncAt: syncedAt,
+          lastErrorCode: undefined,
+          syncBlockReason: undefined,
+        }),
+        snapshot.entityStates,
+      );
+
+      return {
+        kind: 'downloaded',
+        revision: envelope.revision,
+      };
+    }
     if (options.continuousOperations && localData) {
       const accepted = await this.#repository.acceptCompactionSnapshot(
         setup,
@@ -556,7 +609,7 @@ export class SnapshotSyncService {
     return { kind: 'downloaded', revision: envelope.revision };
   }
 
-  async #upload(
+async #upload(
     setup: LocalSyncSetup,
     vaultMasterKey: Uint8Array,
     options: SnapshotSyncOptions,
@@ -615,6 +668,7 @@ export class SnapshotSyncService {
       await this.#repository.commitLocalSnapshot(
         setup,
         metadataChanges(setup.metadata, {
+          bootstrapMode: 'complete',
           firstUploadConsent: 'accepted',
           lastServerCursor: causalFrontier.serverCursor,
           lastSnapshotServerCursor: causalFrontier.serverCursor,

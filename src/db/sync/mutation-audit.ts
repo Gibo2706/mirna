@@ -273,6 +273,10 @@ const loadAuditContext = async (database: FinanceDatabase): Promise<AuditContext
   ) {
     throw new Error('Lokalno sync stanje nije kompletno; finansijska izmena je zaustavljena.');
   }
+
+  if (metadata.bootstrapMode !== 'complete') {
+    return null;
+  }
   return { vaultId: vault.vaultId, deviceId: device.deviceId, keyEpoch: vault.keyEpoch };
 };
 

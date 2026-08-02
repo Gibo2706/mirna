@@ -139,10 +139,13 @@ export interface SyncFrontierRecord {
   updatedAt: string;
 }
 
+export type SyncBootstrapMode = 'creator-upload' | 'paired-download' | 'complete';
+
 export interface SyncMetadataRecord {
   id: typeof SYNC_METADATA_RECORD_ID;
   vaultId: string;
   localSchemaVersion: 1;
+  bootstrapMode: SyncBootstrapMode;
   firstUploadConsent: 'pending' | 'accepted' | 'declined';
   lastServerCursor: number;
   lastSnapshotServerCursor: number;

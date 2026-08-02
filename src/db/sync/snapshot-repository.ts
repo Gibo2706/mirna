@@ -32,6 +32,7 @@ export class LocalSnapshotRaceError extends Error {
 
 export type SnapshotMetadataChanges = Pick<
   SyncMetadataRecord,
+  | 'bootstrapMode'
   | 'firstUploadConsent'
   | 'lastServerCursor'
   | 'lastSnapshotServerCursor'
@@ -149,6 +150,89 @@ export class SyncSnapshotRepository {
           left.entityId.localeCompare(right.entityId),
       ),
     );
+  }
+
+  async preparePairedDeviceBootstrap(
+    setup: LocalSyncSetup,
+    createdAt: string,
+  ): Promise<LocalSyncSetup> {
+    const data = validateFinanceData(await this.readFinanceData());
+
+    const nextMetadata: SyncMetadataRecord = {
+      ...setup.metadata,
+      bootstrapMode: 'paired-download',
+      firstUploadConsent: 'declined',
+      lastSyncAt: createdAt,
+      lastErrorCode: undefined,
+      syncBlockReason: undefined,
+    };
+
+    await this.database.transaction(
+      'rw',
+      [
+        this.database.syncCheckpoints,
+        this.database.syncOutbox,
+        this.database.syncInbox,
+        this.database.syncFrontier,
+        this.database.syncEntityStates,
+        this.database.syncConflicts,
+        this.database.syncMetadata,
+      ],
+      async () => {
+        const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
+
+        if (
+          !current ||
+          current.vaultId !== setup.vault.vaultId ||
+          current.lastSnapshotRevision !== 0 ||
+          current.lastSnapshotHash !== null ||
+          current.lastSnapshotId === null
+        ) {
+          throw new LocalSnapshotRaceError();
+        }
+
+        // Čuva trenutno lokalno stanje pre nego što remote snapshot zameni podatke.
+        await this.database.syncCheckpoints.put({
+          id: SYNC_CHECKPOINT_RECORD_ID,
+          vaultId: setup.vault.vaultId,
+          replacedSnapshotRevision: 0,
+          data,
+          createdAt,
+        });
+
+        await this.database.syncOutbox
+          .where('vaultId')
+          .equals(setup.vault.vaultId)
+          .delete();
+
+        await this.database.syncInbox
+          .where('vaultId')
+          .equals(setup.vault.vaultId)
+          .delete();
+
+        await this.database.syncFrontier
+          .where('vaultId')
+          .equals(setup.vault.vaultId)
+          .delete();
+
+        await this.database.syncEntityStates
+          .where('vaultId')
+          .equals(setup.vault.vaultId)
+          .delete();
+
+        await this.database.syncConflicts
+          .where('vaultId')
+          .equals(setup.vault.vaultId)
+          .delete();
+
+        await this.database.syncMetadata.put(nextMetadata);
+      },
+    );
+
+    return {
+      ...setup,
+      metadata: nextMetadata,
+    };
   }
 
   async writeSafetyCheckpoint(

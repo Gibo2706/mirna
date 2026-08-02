@@ -132,6 +132,7 @@ const createSetup = async (): Promise<{ setup: LocalSyncSetup; vaultMasterKey: U
         lastManifestHash: manifestHash,
         lastLocalDataHash: null,
         enabledAt: authorizedAt,
+        bootstrapMode: 'complete',
       },
     },
   };

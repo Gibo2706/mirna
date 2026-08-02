@@ -343,6 +343,30 @@ export class FinanceDatabase extends Dexie {
     this.version(12).stores({
       syncPairingFinalizations: 'id, &requestId, createdAt',
     });
+
+    this.version(13)
+  .stores({
+    syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
+  })
+  .upgrade(async (transaction) => {
+    await transaction
+      .table<SyncMetadataRecord>('syncMetadata')
+      .toCollection()
+      .modify((metadata) => {
+        metadata.bootstrapMode ??=
+          metadata.lastSnapshotRevision > 0
+            ? 'complete'
+            : metadata.lastSnapshotId !== null
+              ? 'paired-download'
+              : 'creator-upload';
+
+        if (metadata.bootstrapMode === 'paired-download') {
+          // Novi uređaj nikada ne sme da uploaduje svoju praznu/default bazu
+          // kao prvi snapshot postojećeg trezora.
+          metadata.firstUploadConsent = 'declined';
+        }
+      });
+  });
   }
 }
 

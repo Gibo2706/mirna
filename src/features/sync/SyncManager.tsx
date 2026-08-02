@@ -1528,7 +1528,8 @@ const ActivePanel = ({
             Sinhronizovano.
           </p>
         ) : null}
-        {setup.metadata.firstUploadConsent === 'pending' ? (
+        {setup.metadata.bootstrapMode === 'creator-upload' &&
+          setup.metadata.firstUploadConsent === 'pending' ? (
           <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
             <p>
               Prvi upload čeka posebnu saglasnost. Mirna će lokalno napraviti snapshot, kompresovati
@@ -1537,6 +1538,20 @@ const ActivePanel = ({
             <Button disabled={busy} onClick={() => void synchronize(true)}>
               {busy ? <BusyIcon /> : <CloudUpload size={17} aria-hidden="true" />}
               Saglasan sam — pošalji prvi šifrovani snapshot
+            </Button>
+          </div>
+        ) : null}
+        {setup.metadata.bootstrapMode === 'paired-download' &&
+        setup.metadata.lastSnapshotRevision === 0 ? (
+          <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
+            <p>
+              Ovaj uređaj je povezan, ali još nije preuzeo početni šifrovani snapshot.
+              Lokalno stanje će prvo biti sačuvano kao safety checkpoint.
+            </p>
+
+            <Button disabled={busy} onClick={() => void synchronize(false)}>
+              {busy ? <BusyIcon /> : <CloudUpload size={17} aria-hidden="true" />}
+              Preuzmi podatke sa povezanog uređaja
             </Button>
           </div>
         ) : null}

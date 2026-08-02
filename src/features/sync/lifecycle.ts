@@ -120,6 +120,7 @@ import {
   SYNC_METADATA_RECORD_ID,
   localVaultKeyRecordId,
   type LocalSyncSetup,
+  type SyncBootstrapMode,
 } from '@/db/sync/records';
 
 type Parsed<T extends { parse(value: unknown): unknown }> = ReturnType<T['parse']>;
@@ -391,6 +392,7 @@ const createLocalSetup = async (input: {
   localWrappingKey: CryptoKey;
   vaultMasterKey: Uint8Array;
   enabledAt: string;
+  bootstrapMode: SyncBootstrapMode;
   snapshotCommitId?: string | null;
   runtime: CryptoRuntime;
 }): Promise<LocalSyncSetup> => {
@@ -449,7 +451,13 @@ const createLocalSetup = async (input: {
       id: SYNC_METADATA_RECORD_ID,
       vaultId: input.manifest.vaultId,
       localSchemaVersion: 1,
-      firstUploadConsent: 'pending',
+      bootstrapMode: input.bootstrapMode,
+      firstUploadConsent:
+        input.bootstrapMode === 'creator-upload'
+          ? 'pending'
+          : input.bootstrapMode === 'complete'
+            ? 'accepted'
+            : 'declined',
       lastServerCursor: 0,
       lastSnapshotServerCursor: 0,
       lastSnapshotRevision: 0,
@@ -841,6 +849,7 @@ export class EnableSyncLifecycle {
         vaultMasterKey: material.vaultMasterKey,
         enabledAt: authorizedAt,
         runtime,
+        bootstrapMode: 'creator-upload',
       });
       return {
         request: vaultCreateRequestSchema.parse({
@@ -1107,6 +1116,7 @@ export class NewDevicePairingLifecycle {
       enabledAt: material.finalizedAt,
       snapshotCommitId: material.envelope.context.snapshotCommitId,
       runtime,
+      bootstrapMode: 'paired-download',
     });
     const pending = await this.#dependencies.pairingFinalizationCheckpoints.stage(
       setup,
@@ -2299,6 +2309,7 @@ export class RecoverDeviceLifecycle {
           vaultMasterKey: newVaultMasterKey,
           enabledAt: occurredAt.toISOString(),
           runtime,
+          bootstrapMode: input.recoveredFinanceData ? 'complete' : 'paired-download',
         });
         if (input.recoveredFinanceData) {
           setup = {
@@ -2306,6 +2317,7 @@ export class RecoverDeviceLifecycle {
             metadata: {
               ...setup.metadata,
               firstUploadConsent: 'accepted',
+              bootstrapMode: 'complete',
               lastLocalDataHash: await computeSyncFinanceDataHash(
                 input.recoveredFinanceData,
                 runtime,
