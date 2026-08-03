@@ -64,9 +64,16 @@ dozvoljava da uvezeni planerski podaci naprave istoriju transakcija.
 
 ## Local-first po dizajnu
 
-Mirna čuva finansijske podatke u IndexedDB bazi trenutnog browser origin-a. Nema aplikacioni
-nalog, cloud sinhronizaciju, analitiku, bankarsku integraciju niti serversku kopiju finansijske
-baze. Izvoz nastaje samo kada ga korisnik zatraži.
+Mirna čuva finansijske podatke u IndexedDB bazi trenutnog browser origin-a. Objavljena stabilna
+aplikacija nema aplikacioni nalog, analitiku, bankarsku integraciju niti serversku kopiju
+finansijske baze. Izvoz nastaje samo kada ga korisnik zatraži.
+
+Beta izvor `2.4.0-beta.1` sadrži opcionu, accountless, end-to-end šifrovanu sinhronizaciju.
+Ona je isključena bez eksplicitnog feature flag-a i API URL-a, nije postavljena u produkciju i
+nije prošla nezavisan bezbednosni pregled. Sync servis dobija šifrat i operativne metapodatke,
+ali ne i ključeve za dešifrovanje sadržaja. Pogledajte [sync arhitekturu](docs/SYNC-ARCHITECTURE.md),
+[protokol](docs/SYNC-PROTOCOL.md), [oporavak](docs/SYNC-RECOVERY.md) i
+[bezbednosni model](docs/SYNC-SECURITY-MODEL.md).
 
 > **Čuvajte odvojen backup.** Promena profila, čišćenje skladišta, postupak operativnog sistema
 > ili uklanjanje PWA mogu da obrišu podatke iz browser-a. JSON, CSV i Markdown izvozi su
@@ -128,6 +135,7 @@ npm run public:history
 npm run check
 npm run test:coverage
 npm run test:e2e
+npm run sync:test:e2e
 npm audit --omit=dev
 ```
 
@@ -143,6 +151,9 @@ npm run docs:assets
 - [Finansijska pravila](docs/FINANCIAL-INVARIANTS.md)
 - [Bezbednosni model](docs/SECURITY-MODEL.md)
 - [AI Plan Bridge](docs/AI-PLAN-BRIDGE.md)
+- [Arhitektura šifrovanog sync-a](docs/SYNC-ARCHITECTURE.md)
+- [Protokol šifrovanog sync-a](docs/SYNC-PROTOCOL.md)
+- [Performanse šifrovanog sync-a](docs/SYNC-PERFORMANCE.md)
 - [Privatnost](PRIVACY.md)
 - [Doprinosi](CONTRIBUTING.md)
 

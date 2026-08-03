@@ -1,7 +1,8 @@
 import { lazy, Suspense } from 'react';
-import { Navigate, Route, Routes } from 'react-router';
+import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { AppShell } from '@/components/AppShell';
 import { useFinanceSnapshot } from '@/db/queries';
+import { isBetaApplication, readSyncClientConfig } from '@/features/sync/config';
 import { ThemeSync } from './ThemeSync';
 
 // Start fetching the first route while IndexedDB opens to avoid a network/DB waterfall on cold start.
@@ -35,6 +36,9 @@ const MorePage = lazy(() =>
 const SettingsPage = lazy(() =>
   import('@/pages/SettingsPage').then((module) => ({ default: module.SettingsPage })),
 );
+const SyncManager = lazy(() =>
+  import('@/features/sync/SyncManager').then((module) => ({ default: module.SyncManager })),
+);
 
 const StartupScreen = () => (
   <div className="grid min-h-dvh place-items-center text-center" role="status">
@@ -57,20 +61,54 @@ const PageLoader = () => (
   </div>
 );
 
+const BetaBanner = () => (
+  <aside className="border-b border-warning/30 bg-warning-soft px-4 py-2 text-center text-xs leading-5 text-warning">
+    <strong>Mirna Sync — Beta.</strong> Testni servis može privremeno pauzirati cloud sync; lokalni
+    podaci i JSON backup ostaju dostupni.{' '}
+    <a
+      className="font-bold underline underline-offset-2"
+      href="https://github.com/Gibo2706/mirna/blob/feat/e2ee-sync/docs/SYNC-SECURITY-MODEL.md"
+      target="_blank"
+      rel="noreferrer"
+    >
+      Bezbednosni model
+    </a>
+  </aside>
+);
+
 export const App = () => {
   const snapshot = useFinanceSnapshot();
+  const location = useLocation();
+  const syncConfig = readSyncClientConfig();
+  const betaApplication = isBetaApplication();
+  const withEnvironmentMarker = (content: React.ReactNode) => (
+    <>
+      {betaApplication ? <BetaBanner /> : null}
+      {content}
+    </>
+  );
 
-  if (snapshot === undefined) return <StartupScreen />;
+  if (snapshot === undefined) return withEnvironmentMarker(<StartupScreen />);
 
   if (snapshot === null || !snapshot.settingsRecord.onboardingCompleted) {
-    return (
+    if (syncConfig.enabled && location.pathname === '/more/sync') {
+      return withEnvironmentMarker(
+        <Suspense fallback={<StartupScreen />}>
+          <Routes>
+            <Route path="/more/sync" element={<SyncManager preOnboarding />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>,
+      );
+    }
+    return withEnvironmentMarker(
       <Suspense fallback={<StartupScreen />}>
         <OnboardingPage snapshot={snapshot} />
-      </Suspense>
+      </Suspense>,
     );
   }
 
-  return (
+  return withEnvironmentMarker(
     <>
       <ThemeSync appearance={snapshot.settingsRecord.appearance} />
       <Suspense fallback={<PageLoader />}>
@@ -80,12 +118,18 @@ export const App = () => {
             <Route path="month" element={<MonthPage snapshot={snapshot} />} />
             <Route path="goals" element={<GoalsPage snapshot={snapshot} />} />
             <Route path="forecast" element={<ForecastPage snapshot={snapshot} />} />
-            <Route path="more" element={<MorePage snapshot={snapshot} />} />
-            <Route path="more/:section" element={<SettingsPage snapshot={snapshot} />} />
+            <Route
+              path="more"
+              element={<MorePage snapshot={snapshot} syncEnabled={syncConfig.enabled} />}
+            />
+            <Route
+              path="more/:section"
+              element={<SettingsPage snapshot={snapshot} syncEnabled={syncConfig.enabled} />}
+            />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
-    </>
+    </>,
   );
 };

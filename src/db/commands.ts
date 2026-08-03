@@ -31,6 +31,7 @@ import type {
 } from '@/domain/types';
 import { createId } from '@/lib/id';
 import { db, financeTables } from './database';
+import { auditedFinanceTransaction } from './sync/mutation-audit';
 
 const nowIso = (): string => new Date().toISOString();
 
@@ -77,7 +78,11 @@ export async function saveAccount(account: Account): Promise<void> {
       'Početno stanje ne može biti negativno jer Mirna ne modeluje dozvoljeni minus.',
     );
   }
-  await db.accounts.put(account);
+  await auditedFinanceTransaction([db.accounts], async (audit) => {
+    const previous = await db.accounts.get(account.id);
+    await db.accounts.put(account);
+    await audit.upsert('account', previous, account);
+  });
 }
 
 export async function deleteAccount(accountId: string): Promise<void> {
@@ -102,12 +107,20 @@ export async function deleteAccount(accountId: string): Promise<void> {
       'Račun ima povezane podatke i ne može biti obrisan. Arhivirajte ga umesto toga.',
     );
   }
-  await db.accounts.delete(accountId);
+  await auditedFinanceTransaction([db.accounts], async (audit) => {
+    const previous = await db.accounts.get(accountId);
+    await db.accounts.delete(accountId);
+    await audit.delete('account', previous);
+  });
 }
 
 export async function saveCategory(category: Category): Promise<void> {
   categorySchema.parse(category);
-  await db.categories.put(category);
+  await auditedFinanceTransaction([db.categories], async (audit) => {
+    const previous = await db.categories.get(category.id);
+    await db.categories.put(category);
+    await audit.upsert('category', previous, category);
+  });
 }
 
 export async function deleteCategory(categoryId: string): Promise<void> {
@@ -122,7 +135,11 @@ export async function deleteCategory(categoryId: string): Promise<void> {
   if (references.some((count) => count > 0)) {
     throw new Error('Kategorija se koristi i ne može biti obrisana. Arhivirajte je umesto toga.');
   }
-  await db.categories.delete(categoryId);
+  await auditedFinanceTransaction([db.categories], async (audit) => {
+    const previous = await db.categories.get(categoryId);
+    await db.categories.delete(categoryId);
+    await audit.delete('category', previous);
+  });
 }
 
 export async function saveTransaction(transaction: LedgerTransaction): Promise<void> {
@@ -139,7 +156,7 @@ export async function saveTransaction(transaction: LedgerTransaction): Promise<v
   ) {
     throw new Error('Ručna transakcija ne sme preuzeti vezu sistemskog plana.');
   }
-  await db.transaction('rw', [db.accounts, db.categories, db.transactions], async () => {
+  await auditedFinanceTransaction([db.accounts, db.categories, db.transactions], async (audit) => {
     await requireAccount(transaction.accountId);
     if (transaction.toAccountId) await requireAccount(transaction.toAccountId);
     if (transaction.categoryId && transaction.type === 'income') {
@@ -176,14 +193,14 @@ export async function saveTransaction(transaction: LedgerTransaction): Promise<v
       }
     }
     await db.transactions.put(transaction);
+    await audit.upsert('transaction', existing, transaction);
   });
 }
 
 export async function deleteTransaction(transactionId: string): Promise<void> {
-  await db.transaction(
-    'rw',
+  await auditedFinanceTransaction(
     [db.transactions, db.plannedEvents, db.goals, db.debtPayments, db.debts],
-    async () => {
+    async (audit) => {
       const transaction = await db.transactions.get(transactionId);
       if (!transaction) return;
       if (transaction.occurrenceKey?.startsWith('event-funding:')) {
@@ -196,7 +213,9 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
       if (transaction.plannedEventId) {
         const event = await db.plannedEvents.get(transaction.plannedEventId);
         if (event?.paidTransactionId === transaction.id) {
-          await db.plannedEvents.update(event.id, { paidTransactionId: undefined });
+          const updatedEvent = { ...event, paidTransactionId: undefined };
+          await db.plannedEvents.put(updatedEvent);
+          await audit.upsert('planned-event', event, updatedEvent);
           const goal = event.linkedGoalId ? await db.goals.get(event.linkedGoalId) : undefined;
           if (goal?.usedAt && isGoalCompletionEvent(goal, event)) {
             const otherCompletion = (
@@ -207,19 +226,27 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
                 Boolean(candidate.paidTransactionId) &&
                 isGoalCompletionEvent(goal, candidate),
             );
-            if (!otherCompletion) await db.goals.update(goal.id, { usedAt: undefined });
+            if (!otherCompletion) {
+              const updatedGoal = { ...goal, usedAt: undefined };
+              await db.goals.put(updatedGoal);
+              await audit.upsert('goal', goal, updatedGoal);
+            }
           }
           const fundingTransfer = await db.transactions
             .where('occurrenceKey')
             .equals(eventFundingOccurrenceKey(event.id))
             .first();
-          if (fundingTransfer) await db.transactions.delete(fundingTransfer.id);
+          if (fundingTransfer) {
+            await db.transactions.delete(fundingTransfer.id);
+            await audit.delete('transaction', fundingTransfer);
+          }
         }
       }
       if (transaction.debtPaymentId) {
         const payment = await db.debtPayments.get(transaction.debtPaymentId);
         if (payment?.transactionId === transaction.id) {
           await db.debtPayments.delete(payment.id);
+          await audit.delete('debt-payment', payment);
           const debt = await db.debts.get(payment.debtId);
           if (debt) {
             const remainingPayments = await db.debtPayments
@@ -227,13 +254,17 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
               .equals(payment.debtId)
               .toArray();
             const remaining = calculateDebtProgress(debt, remainingPayments).remaining;
-            await db.debts.update(payment.debtId, {
-              status: remaining === 0 ? 'paid' : 'open',
-            });
+            const updatedDebt = {
+              ...debt,
+              status: remaining === 0 ? ('paid' as const) : ('open' as const),
+            };
+            await db.debts.put(updatedDebt);
+            await audit.upsert('debt', debt, updatedDebt);
           }
         }
       }
       await db.transactions.delete(transactionId);
+      await audit.delete('transaction', transaction);
     },
   );
 }
@@ -248,14 +279,14 @@ export async function adjustAccountBalance(
   if (targetBalance < 0) {
     throw new Error('Stanje ne može biti negativno jer Mirna ne modeluje dozvoljeni minus.');
   }
-  await db.transaction('rw', [db.accounts, db.transactions], async () => {
+  await auditedFinanceTransaction([db.accounts, db.transactions], async (audit) => {
     const account = await db.accounts.get(accountId);
     if (!account) throw new Error('Račun ne postoji.');
     const transactions = await db.transactions.toArray();
     const current = calculateAccountBalances([account], transactions)[account.id] ?? 0;
     const delta = targetBalance - current;
     if (delta === 0) return;
-    await db.transactions.add({
+    const transaction: LedgerTransaction = {
       id: createId('tx'),
       type: 'adjustment',
       amount: delta,
@@ -265,7 +296,9 @@ export async function adjustAccountBalance(
       notes: note || `Prethodno stanje: ${current}; novo stanje: ${targetBalance}`,
       source: 'adjustment',
       createdAt: nowIso(),
-    });
+    };
+    await db.transactions.add(transaction);
+    await audit.upsert('transaction', null, transaction);
   });
 }
 
@@ -277,10 +310,9 @@ export async function markCommitmentPaid(input: {
   accountId: string;
   categoryId: string;
 }): Promise<string> {
-  return db.transaction(
-    'rw',
+  return auditedFinanceTransaction(
     [db.commitments, db.accounts, db.categories, db.transactions],
-    async () => {
+    async (audit) => {
       const commitmentId = input.occurrenceKey.slice(0, input.occurrenceKey.lastIndexOf(':'));
       const commitment = await db.commitments.get(commitmentId);
       if (!commitment) throw new Error('Fiksna obaveza ne postoji.');
@@ -314,6 +346,7 @@ export async function markCommitmentPaid(input: {
       };
       transactionSchema.parse(transaction);
       await db.transactions.add(transaction);
+      await audit.upsert('transaction', null, transaction);
       return transaction.id;
     },
   );
@@ -328,10 +361,9 @@ export async function markPlannedIncomeReceived(input: {
   accountId?: string;
   notes?: string;
 }): Promise<string> {
-  return db.transaction(
-    'rw',
+  return auditedFinanceTransaction(
     [db.plannedIncomes, db.accounts, db.categories, db.transactions],
-    async () => {
+    async (audit) => {
       const existing = await db.transactions
         .where('occurrenceKey')
         .equals(input.occurrenceKey)
@@ -367,6 +399,7 @@ export async function markPlannedIncomeReceived(input: {
       transactionSchema.parse(transaction);
       try {
         await db.transactions.add(transaction);
+        await audit.upsert('transaction', null, transaction);
       } catch (caught) {
         const concurrent = await db.transactions
           .where('occurrenceKey')
@@ -387,23 +420,26 @@ export async function markPlannedEventPaid(input: {
   paymentAccountId?: string;
   topUpFromAccountId?: string;
 }): Promise<string> {
-  return db.transaction(
-    'rw',
+  return auditedFinanceTransaction(
     [db.plannedEvents, db.goals, db.accounts, db.categories, db.transactions],
-    async () => {
+    async (audit) => {
       const event = await db.plannedEvents.get(input.eventId);
       if (!event) throw new Error('Planirani događaj ne postoji.');
       if (event.paidTransactionId) return event.paidTransactionId;
       const existing = await db.transactions.where('plannedEventId').equals(event.id).first();
       if (existing) {
-        await db.plannedEvents.update(event.id, { paidTransactionId: existing.id });
+        const updatedEvent = { ...event, paidTransactionId: existing.id };
+        await db.plannedEvents.put(updatedEvent);
+        await audit.upsert('planned-event', event, updatedEvent);
         const linkedGoal = event.linkedGoalId ? await db.goals.get(event.linkedGoalId) : undefined;
         if (
           linkedGoal &&
           existing.accountId === event.accountId &&
           isGoalCompletionEvent(linkedGoal, event)
         ) {
-          await db.goals.update(linkedGoal.id, { usedAt: existing.date });
+          const updatedGoal = { ...linkedGoal, usedAt: existing.date };
+          await db.goals.put(updatedGoal);
+          await audit.upsert('goal', linkedGoal, updatedGoal);
         }
         return existing.id;
       }
@@ -458,6 +494,7 @@ export async function markPlannedEventPaid(input: {
         };
         transactionSchema.parse(fundingTransfer);
         await db.transactions.add(fundingTransfer);
+        await audit.upsert('transaction', null, fundingTransfer);
       }
 
       const transaction: LedgerTransaction = {
@@ -475,17 +512,23 @@ export async function markPlannedEventPaid(input: {
       };
       transactionSchema.parse(transaction);
       await db.transactions.add(transaction);
-      await db.plannedEvents.update(event.id, {
+      await audit.upsert('transaction', null, transaction);
+      const updatedEvent = {
+        ...event,
         accountId: paymentAccount.id,
         paidTransactionId: transaction.id,
-      });
+      };
+      await db.plannedEvents.put(updatedEvent);
+      await audit.upsert('planned-event', event, updatedEvent);
       const linkedGoal = event.linkedGoalId ? await db.goals.get(event.linkedGoalId) : undefined;
       if (
         linkedGoal &&
         paymentAccount.id === event.accountId &&
         isGoalCompletionEvent(linkedGoal, event)
       ) {
-        await db.goals.update(linkedGoal.id, { usedAt: transaction.date });
+        const updatedGoal = { ...linkedGoal, usedAt: transaction.date };
+        await db.goals.put(updatedGoal);
+        await audit.upsert('goal', linkedGoal, updatedGoal);
       }
       return transaction.id;
     },
@@ -498,7 +541,7 @@ export async function contributeToGoal(input: {
   amount: number;
   date: string;
 }): Promise<string> {
-  return db.transaction('rw', [db.goals, db.accounts, db.transactions], async () => {
+  return auditedFinanceTransaction([db.goals, db.accounts, db.transactions], async (audit) => {
     const goal = await db.goals.get(input.goalId);
     if (!goal) throw new Error('Cilj ne postoji.');
     if (goal.archived) throw new Error('Arhivirani cilj ne prima nove uplate.');
@@ -541,6 +584,7 @@ export async function contributeToGoal(input: {
     };
     transactionSchema.parse(transaction);
     await db.transactions.add(transaction);
+    await audit.upsert('transaction', null, transaction);
     return transaction.id;
   });
 }
@@ -554,10 +598,9 @@ export async function recordDebtPayment(input: {
   date: string;
   notes?: string;
 }): Promise<string> {
-  return db.transaction(
-    'rw',
+  return auditedFinanceTransaction(
     [db.debts, db.debtPayments, db.accounts, db.categories, db.transactions],
-    async () => {
+    async (audit) => {
       const debt = await db.debts.get(input.debtId);
       if (!debt) throw new Error('Dug ne postoji.');
       const payments = await db.debtPayments.where('debtId').equals(debt.id).toArray();
@@ -594,6 +637,7 @@ export async function recordDebtPayment(input: {
         };
         transactionSchema.parse(transaction);
         await db.transactions.add(transaction);
+        await audit.upsert('transaction', null, transaction);
       }
       const payment = {
         id: paymentId,
@@ -607,7 +651,12 @@ export async function recordDebtPayment(input: {
       };
       debtPaymentSchema.parse(payment);
       await db.debtPayments.add(payment);
-      if (input.amount === remaining) await db.debts.update(debt.id, { status: 'paid' });
+      await audit.upsert('debt-payment', null, payment);
+      if (input.amount === remaining) {
+        const updatedDebt = { ...debt, status: 'paid' as const };
+        await db.debts.put(updatedDebt);
+        await audit.upsert('debt', debt, updatedDebt);
+      }
       return transactionId ?? paymentId;
     },
   );
@@ -619,13 +668,21 @@ export async function saveCommitment(value: FixedCommitment): Promise<void> {
     throw new Error('Krajnji datum nije validan.');
   await requireAccount(value.accountId);
   await requireCategory(value.categoryId, 'expense');
-  await db.commitments.put(value);
+  await auditedFinanceTransaction([db.commitments], async (audit) => {
+    const previous = await db.commitments.get(value.id);
+    await db.commitments.put(value);
+    await audit.upsert('commitment', previous, value);
+  });
 }
 
 export async function saveVariableBudget(value: VariableBudget): Promise<void> {
   variableBudgetSchema.parse(value);
   await requireCategory(value.categoryId, 'expense');
-  await db.variableBudgets.put(value);
+  await auditedFinanceTransaction([db.variableBudgets], async (audit) => {
+    const previous = await db.variableBudgets.get(value.id);
+    await db.variableBudgets.put(value);
+    await audit.upsert('variable-budget', previous, value);
+  });
 }
 
 export async function saveGoal(value: SavingsGoal): Promise<void> {
@@ -644,7 +701,11 @@ export async function saveGoal(value: SavingsGoal): Promise<void> {
       throw new Error('Iskorišćeni namenski cilj mora imati plaćen povezani događaj.');
     }
   }
-  await db.goals.put(value);
+  await auditedFinanceTransaction([db.goals], async (audit) => {
+    const previous = await db.goals.get(value.id);
+    await db.goals.put(value);
+    await audit.upsert('goal', previous, value);
+  });
 }
 
 export async function saveDebt(value: Debt): Promise<void> {
@@ -660,7 +721,11 @@ export async function saveDebt(value: Debt): Promise<void> {
   ) {
     throw new Error('Status duga nije usklađen sa evidentiranim uplatama.');
   }
-  await db.debts.put(value);
+  await auditedFinanceTransaction([db.debts], async (audit) => {
+    const previous = await db.debts.get(value.id);
+    await db.debts.put(value);
+    await audit.upsert('debt', previous, value);
+  });
 }
 
 export async function savePlannedEvent(value: PlannedEvent): Promise<void> {
@@ -688,38 +753,51 @@ export async function savePlannedEvent(value: PlannedEvent): Promise<void> {
       throw new Error('Plaćeni događaj nema ispravnu povezanu transakciju.');
     }
   }
-  await db.plannedEvents.put(value);
+  await auditedFinanceTransaction([db.plannedEvents], async (audit) => {
+    await db.plannedEvents.put(value);
+    await audit.upsert('planned-event', current, value);
+  });
 }
 
 export async function savePreset(value: QuickAddPreset): Promise<void> {
   presetSchema.parse(value);
   if (value.defaultAccountId) await requireAccount(value.defaultAccountId);
   if (value.categoryId) await requireCategory(value.categoryId, value.type);
-  await db.presets.put(value);
+  await auditedFinanceTransaction([db.presets], async (audit) => {
+    const previous = await db.presets.get(value.id);
+    await db.presets.put(value);
+    await audit.upsert('quick-add-preset', previous, value);
+  });
 }
 
 export async function savePlannedIncome(value: PlannedIncome): Promise<void> {
   plannedIncomeSchema.parse(value);
   await requireAccount(value.accountId);
   await requireCategory(value.categoryId, 'income');
-  await db.transaction('rw', db.plannedIncomes, async () => {
+  await auditedFinanceTransaction([db.plannedIncomes], async (audit) => {
     if (value.isPrimarySalary) {
       const duplicate = await db.plannedIncomes
         .filter((plannedIncome) => plannedIncome.isPrimarySalary && plannedIncome.id !== value.id)
         .first();
       if (duplicate) throw new Error('Može postojati samo jedan primarni plan plate.');
     }
+    const previous = await db.plannedIncomes.get(value.id);
     await db.plannedIncomes.put(value);
+    await audit.upsert('planned-income', previous, value);
   });
 }
 
 export async function saveSalaryScenario(value: SalaryScenario): Promise<void> {
   salaryScenarioSchema.parse(value);
-  await db.salaryScenarios.put(value);
+  await auditedFinanceTransaction([db.salaryScenarios], async (audit) => {
+    const previous = await db.salaryScenarios.get(value.id);
+    await db.salaryScenarios.put(value);
+    await audit.upsert('salary-scenario', previous, value);
+  });
 }
 
 export async function deleteGoal(goalId: string): Promise<'deleted' | 'archived'> {
-  return db.transaction('rw', [db.goals, db.transactions, db.plannedEvents], async () => {
+  return auditedFinanceTransaction([db.goals, db.transactions, db.plannedEvents], async (audit) => {
     const goal = await db.goals.get(goalId);
     if (!goal) return 'deleted';
     const [transactionCount, eventCount] = await Promise.all([
@@ -727,10 +805,13 @@ export async function deleteGoal(goalId: string): Promise<'deleted' | 'archived'
       db.plannedEvents.where('linkedGoalId').equals(goalId).count(),
     ]);
     if (transactionCount > 0 || eventCount > 0) {
-      await db.goals.update(goalId, { archived: true });
+      const updatedGoal = { ...goal, archived: true };
+      await db.goals.put(updatedGoal);
+      await audit.upsert('goal', goal, updatedGoal);
       return 'archived';
     }
     await db.goals.delete(goalId);
+    await audit.delete('goal', goal);
     return 'deleted';
   });
 }
@@ -740,7 +821,11 @@ export async function deleteDebt(debtId: string): Promise<void> {
   if (count > 0) {
     throw new Error('Dug sa istorijom uplata ne može biti obrisan.');
   }
-  await db.debts.delete(debtId);
+  await auditedFinanceTransaction([db.debts], async (audit) => {
+    const previous = await db.debts.get(debtId);
+    await db.debts.delete(debtId);
+    await audit.delete('debt', previous);
+  });
 }
 
 export async function deletePlannedEvent(eventId: string): Promise<void> {
@@ -748,7 +833,10 @@ export async function deletePlannedEvent(eventId: string): Promise<void> {
   if (event?.paidTransactionId) {
     throw new Error('Prvo obrišite povezanu transakciju.');
   }
-  await db.plannedEvents.delete(eventId);
+  await auditedFinanceTransaction([db.plannedEvents], async (audit) => {
+    await db.plannedEvents.delete(eventId);
+    await audit.delete('planned-event', event);
+  });
 }
 
 export async function deleteCommitment(commitmentId: string): Promise<void> {
@@ -760,38 +848,71 @@ export async function deleteCommitment(commitmentId: string): Promise<void> {
     )
     .count();
   if (hasHistory) {
-    await db.commitments.update(commitmentId, { active: false });
+    await auditedFinanceTransaction([db.commitments], async (audit) => {
+      const previous = await db.commitments.get(commitmentId);
+      if (!previous) return;
+      const updated = { ...previous, active: false };
+      await db.commitments.put(updated);
+      await audit.upsert('commitment', previous, updated);
+    });
     return;
   }
-  await db.commitments.delete(commitmentId);
+  await auditedFinanceTransaction([db.commitments], async (audit) => {
+    const previous = await db.commitments.get(commitmentId);
+    await db.commitments.delete(commitmentId);
+    await audit.delete('commitment', previous);
+  });
 }
 
 export async function deleteVariableBudget(budgetId: string): Promise<void> {
-  await db.variableBudgets.delete(budgetId);
+  await auditedFinanceTransaction([db.variableBudgets], async (audit) => {
+    const previous = await db.variableBudgets.get(budgetId);
+    await db.variableBudgets.delete(budgetId);
+    await audit.delete('variable-budget', previous);
+  });
 }
 
 export async function deletePreset(presetId: string): Promise<void> {
-  await db.presets.delete(presetId);
+  await auditedFinanceTransaction([db.presets], async (audit) => {
+    const previous = await db.presets.get(presetId);
+    await db.presets.delete(presetId);
+    await audit.delete('quick-add-preset', previous);
+  });
 }
 
 export async function deletePlannedIncome(plannedIncomeId: string): Promise<void> {
   const hasHistory = await db.transactions.where('plannedIncomeId').equals(plannedIncomeId).count();
   if (hasHistory) {
-    await db.plannedIncomes.update(plannedIncomeId, { active: false });
+    await auditedFinanceTransaction([db.plannedIncomes], async (audit) => {
+      const previous = await db.plannedIncomes.get(plannedIncomeId);
+      if (!previous) return;
+      const updated = { ...previous, active: false };
+      await db.plannedIncomes.put(updated);
+      await audit.upsert('planned-income', previous, updated);
+    });
     return;
   }
-  await db.plannedIncomes.delete(plannedIncomeId);
+  await auditedFinanceTransaction([db.plannedIncomes], async (audit) => {
+    const previous = await db.plannedIncomes.get(plannedIncomeId);
+    await db.plannedIncomes.delete(plannedIncomeId);
+    await audit.delete('planned-income', previous);
+  });
 }
 
 export async function deleteSalaryScenario(scenarioId: string): Promise<void> {
-  await db.transaction('rw', [db.salaryScenarios, db.settings], async () => {
+  await auditedFinanceTransaction([db.salaryScenarios, db.settings], async (audit) => {
+    const previousScenario = await db.salaryScenarios.get(scenarioId);
     await db.salaryScenarios.delete(scenarioId);
+    await audit.delete('salary-scenario', previousScenario);
     const settings = await db.settings.get('settings');
     if (settings?.activeSalaryScenarioId === scenarioId) {
-      await db.settings.update('settings', {
+      const updatedSettings = {
+        ...settings,
         activeSalaryScenarioId: undefined,
         updatedAt: nowIso(),
-      });
+      };
+      await db.settings.put(updatedSettings);
+      await audit.upsert('settings', settings, updatedSettings);
     }
   });
 }
@@ -806,11 +927,38 @@ export async function updateSettings(
   ) {
     throw new Error('Scenario plate ne postoji.');
   }
-  await db.settings.update('settings', { ...changes, updatedAt: nowIso() });
+  await auditedFinanceTransaction([db.settings], async (audit) => {
+    const previous = await db.settings.get('settings');
+    if (!previous) throw new Error('Podešavanja ne postoje.');
+    const updated = { ...previous, ...changes, updatedAt: nowIso() };
+    await db.settings.put(updated);
+    await audit.upsert('settings', previous, updated);
+  });
 }
 
 export async function resetAllFinanceData(): Promise<void> {
-  await db.transaction('rw', financeTables(), async () => {
+  await auditedFinanceTransaction(financeTables(), async (audit) => {
+    const existing = await Promise.all(financeTables().map((table) => table.toArray()));
     await Promise.all(financeTables().map((table) => table.clear()));
+    const entityTypes = [
+      'transaction',
+      'debt-payment',
+      'account',
+      'category',
+      'planned-income',
+      'commitment',
+      'variable-budget',
+      'goal',
+      'debt',
+      'planned-event',
+      'quick-add-preset',
+      'salary-scenario',
+      'settings',
+    ] as const;
+    for (const [index, values] of existing.entries()) {
+      for (const value of values as { id: string }[]) {
+        await audit.delete(entityTypes[index], value);
+      }
+    }
   });
 }

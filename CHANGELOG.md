@@ -2,6 +2,43 @@
 
 All notable changes to Mirna are documented here.
 
+## [2.4.0-beta.1] - Unreleased
+
+### Added
+
+- Added optional, accountless end-to-end encrypted sync behind an explicit
+  feature flag, with local-first behavior preserved when disabled.
+- Added recovery-code setup, authenticated two-device pairing with SAS,
+  encrypted snapshot bootstrap, continuous encrypted operations and explicit
+  conflict resolution.
+- Added expiring device authorization, signed renewal, recovery-backed device
+  revocation with a fresh vault-key epoch, and resumable encrypted cloud-vault
+  deletion that retains local finance data.
+- Added a Cloudflare Worker with strict protocol-v1 routes, D1 migrations,
+  private R2 snapshot storage, bounded cleanup and local Worker/browser gates.
+- Added D1-backed rolling/daily hard budgets, per-vault quotas, R2 object
+  inventory, source-controlled caps and operator kill switches.
+- Added dedicated beta Turnstile validation for anonymous vault, pairing and
+  recovery initiation plus beta-only marking and crawler exclusion.
+- Added a visible React-owned Managed Turnstile widget, explicit verification
+  states and fresh-token retry.
+- Added beta-only privacy-safe Support ID/Request ID diagnostics with a local
+  200-event IndexedDB ring, strict 14-day D1 retention and bounded operator
+  lookup.
+
+### Security
+
+- Device private keys and local wrapping keys are non-extractable Web Crypto
+  keys; access sessions remain memory-only and D1 stores token hashes.
+- Snapshot and operation ciphertext is signed and bound to strict AAD, manifest
+  and causal chains; unknown fields, versions and crypto suites fail closed.
+- Ordinary JSON backups explicitly exclude sync state and secret material.
+- Fixed staging Siteverify failures caused by an undersized Worker timeout and
+  a strict parser that did not accept Cloudflare's observed bounded `messages`
+  response field.
+- Stable production remains disabled. The dedicated beta target is isolated at
+  `mirna-finansije-beta.vercel.app`; independent security review is pending.
+
 ## [2.3.2] - 2026-07-30
 
 ### Changed

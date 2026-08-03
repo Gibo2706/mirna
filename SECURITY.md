@@ -2,8 +2,10 @@
 
 ## Supported versions
 
-Security fixes target the latest published 2.3.x release. Upgrade older builds
-before reporting a version-specific problem.
+Security fixes target the latest published 2.3.x release and the experimental
+`2.4.0-beta.1` encrypted-sync branch. Upgrade older builds before reporting a
+version-specific problem. The beta is not production-enabled and has not passed
+an independent security audit.
 
 ## Reporting a vulnerability
 
@@ -32,7 +34,15 @@ Do not test data or systems without ownership or explicit permission.
 
 Important areas include local data disclosure, unsafe backup import,
 financial-integrity bypasses, arbitrary script execution, service-worker cache
-poisoning, and credential exposure in repository or CI configuration.
+poisoning, credential exposure in repository or CI configuration, sync
+authorization bypass, cryptographic downgrade or nonce/key reuse, manifest or
+snapshot rollback/forks, device revocation failure, conflict-driven financial
+corruption, plaintext leakage and incomplete cloud deletion.
+
+Encrypted sync must remain disabled in production until its staging gates and
+an independent cryptographic/application review pass. Local and staging testing
+must use synthetic financial records only. Do not probe Cloudflare resources or
+any deployment you do not own or have explicit permission to test.
 
 Production and development dependencies are reviewed separately. Breaking
 automated upgrades are not applied without verifying application behavior.

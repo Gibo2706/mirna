@@ -5,6 +5,7 @@ import { assertFinanceDataIntegrity } from '@/domain/integrity';
 import { financeDataSchema } from '@/domain/schemas';
 import type { FinanceData, FinanceSnapshot } from '@/domain/types';
 import { db } from '@/db/database';
+import { auditFinanceDataChanges, auditedFinanceTransaction } from '@/db/sync/mutation-audit';
 import { createId } from '@/lib/id';
 import { formatDate } from '@/lib/dates';
 import { formatRsd } from '@/lib/format';
@@ -867,8 +868,7 @@ const readInsidePatchTransaction = async (): Promise<FinanceData> => {
 };
 
 export async function applyPlanPatch(prepared: PreparedPlanPatch): Promise<void> {
-  await db.transaction(
-    'rw',
+  await auditedFinanceTransaction(
     [
       db.accounts,
       db.transactions,
@@ -884,7 +884,7 @@ export async function applyPlanPatch(prepared: PreparedPlanPatch): Promise<void>
       db.salaryScenarios,
       db.settings,
     ],
-    async () => {
+    async (audit) => {
       const current = await readInsidePatchTransaction();
       if (planningFingerprint(current) !== prepared.sourceFingerprint) {
         throw new Error('Plan se promenio od pregleda. Ponovo učitajte Predlog izmena.');
@@ -907,6 +907,7 @@ export async function applyPlanPatch(prepared: PreparedPlanPatch): Promise<void>
       await db.plannedEvents.bulkPut(parsed.plannedEvents);
       await db.presets.bulkPut(parsed.presets);
       await db.salaryScenarios.bulkPut(parsed.salaryScenarios);
+      await auditFinanceDataChanges(audit, current, parsed);
     },
   );
 }

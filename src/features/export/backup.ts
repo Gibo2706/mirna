@@ -36,6 +36,11 @@ import { formatDate, formatMonth } from '@/lib/dates';
 import { formatRsd, formatSignedRsd } from '@/lib/format';
 import { APPLICATION_VERSION } from '@/lib/version';
 import { db, financeTables } from '@/db/database';
+import {
+  readRawFinanceDataInTransaction,
+  replaceFinanceDataInTransaction,
+} from '@/db/finance-data';
+import { auditFinanceDataChanges, auditedFinanceTransaction } from '@/db/sync/mutation-audit';
 import { readFinanceData } from '@/db/queries';
 
 export const BACKUP_SCHEMA_VERSION = 3;
@@ -207,21 +212,10 @@ export function parseBackup(raw: string): ImportPreview {
 
 export async function replaceWithBackup(preview: ImportPreview): Promise<void> {
   const { data } = preview.envelope;
-  await db.transaction('rw', financeTables(), async () => {
-    await Promise.all(financeTables().map((table) => table.clear()));
-    await db.accounts.bulkPut(data.accounts);
-    await db.transactions.bulkPut(data.transactions);
-    await db.categories.bulkPut(data.categories);
-    await db.plannedIncomes.bulkPut(data.plannedIncomes);
-    await db.commitments.bulkPut(data.commitments);
-    await db.variableBudgets.bulkPut(data.variableBudgets);
-    await db.goals.bulkPut(data.goals);
-    await db.debts.bulkPut(data.debts);
-    await db.debtPayments.bulkPut(data.debtPayments);
-    await db.plannedEvents.bulkPut(data.plannedEvents);
-    await db.presets.bulkPut(data.presets);
-    await db.salaryScenarios.bulkPut(data.salaryScenarios);
-    await db.settings.bulkPut(data.settings);
+  await auditedFinanceTransaction(financeTables(), async (audit) => {
+    const previous = await readRawFinanceDataInTransaction(db);
+    await replaceFinanceDataInTransaction(db, data);
+    await auditFinanceDataChanges(audit, previous, data);
   });
 }
 

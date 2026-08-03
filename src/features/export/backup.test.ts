@@ -4,6 +4,7 @@ import {
   createChatGptMarkdown,
   createTransactionsCsv,
   describeImportSchemaVersion,
+  exportFullBackup,
   parseBackup,
   replaceWithBackup,
 } from './backup';
@@ -300,6 +301,44 @@ describe('export and import formats', () => {
     expect(await db.accounts.toArray()).toEqual(original.envelope.data.accounts);
     expect(await db.transactions.toArray()).toEqual([]);
     expect(await db.settings.toArray()).toEqual(original.envelope.data.settings);
+  });
+
+  it('keeps every sync store and secret sentinel out of an ordinary JSON backup', async () => {
+    const finance = emptyFinanceData();
+    await replaceWithBackup(parseBackup(JSON.stringify(createBackupEnvelope(finance))));
+    await db.syncMetadata.put({
+      id: 'sync-metadata',
+      vaultId: 'SYNC_VAULT_SENTINEL',
+      localSchemaVersion: 1,
+      bootstrapMode: 'complete',
+      firstUploadConsent: 'accepted',
+      lastServerCursor: 0,
+      lastSnapshotServerCursor: 0,
+      lastSnapshotRevision: 0,
+      lastSnapshotId: null,
+      lastSnapshotHash: null,
+      lastSnapshotContentHash: null,
+      lastManifestHash: 'SYNC_SECRET_SENTINEL',
+      lastLocalDataHash: null,
+      enabledAt: '2026-07-31T10:00:00.000Z',
+    });
+
+    try {
+      const backup = await exportFullBackup();
+      const exported = JSON.parse(backup.content) as Record<string, unknown>;
+
+      expect(Object.keys(exported).sort()).toEqual([
+        'application',
+        'data',
+        'exportedAt',
+        'schemaVersion',
+      ]);
+      expect(backup.content).not.toContain('SYNC_VAULT_SENTINEL');
+      expect(backup.content).not.toContain('SYNC_SECRET_SENTINEL');
+      expect(parseBackup(backup.content).envelope.data).toEqual(finance);
+    } finally {
+      await db.syncMetadata.clear();
+    }
   });
 
   it('escapes CSV values and creates a useful Markdown snapshot', () => {

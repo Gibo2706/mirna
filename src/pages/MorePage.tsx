@@ -3,6 +3,7 @@ import {
   CalendarClock,
   BanknoteArrowDown,
   CircleDollarSign,
+  CloudCog,
   Database,
   Gauge,
   HelpCircle,
@@ -48,7 +49,13 @@ const backupDetail = (lastBackupAt?: string): string => {
   return age <= 7 ? 'Backup je svež' : `Star ${age} dana`;
 };
 
-export const MorePage = ({ snapshot }: { snapshot: FinanceSnapshot }) => (
+export const MorePage = ({
+  snapshot,
+  syncEnabled = false,
+}: {
+  snapshot: FinanceSnapshot;
+  syncEnabled?: boolean;
+}) => (
   <main className="screen">
     <PageHeader
       eyebrow="Kontrola"
@@ -132,6 +139,9 @@ export const MorePage = ({ snapshot }: { snapshot: FinanceSnapshot }) => (
         <section>
           <h2 className="mb-2 px-1 text-sm font-bold text-muted">Podaci i alati</h2>
           <Card className="divide-y p-0">
+            {syncEnabled ? (
+              <Row to="/more/sync" icon={CloudCog} label="Sinhronizacija — Beta" detail="E2EE" />
+            ) : null}
             <Row
               to="/more/data"
               icon={Database}
