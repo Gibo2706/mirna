@@ -354,7 +354,9 @@ if (mode === 'repair' && operation === 'scheduled-cleanup') {
           AND released_r2_class_b = 0`,
     );
     if (changedRows(reservationUpdate) !== 1) {
-      throw new Error('Repair je zaustavljen: scheduled-cleanup reservation CAS nije promenio tačno jedan red.');
+      throw new Error(
+        'Repair je zaustavljen: scheduled-cleanup reservation CAS nije promenio tačno jedan red.',
+      );
     }
   }
 
@@ -375,7 +377,9 @@ if (mode === 'repair' && operation === 'scheduled-cleanup') {
         Number(row.reserved_count ?? 0) !== 0 || Number(row.unreconciled_failure_count ?? 0) !== 0,
     )
   ) {
-    throw new Error('Repair postcheck je otkrio nerešeni accounting incident nakon scheduled-cleanup repair-a.');
+    throw new Error(
+      'Repair postcheck je otkrio nerešeni accounting incident nakon scheduled-cleanup repair-a.',
+    );
   }
   const flagUpdate = wrangler(
     `UPDATE service_flags
@@ -400,11 +404,15 @@ if (mode === 'repair' && operation === 'scheduled-cleanup') {
         )`,
   );
   if (changedRows(flagUpdate) !== 1) {
-    throw new Error('Repair je ostao fail-closed: scheduled-cleanup service flags CAS nije promenio tačno jedan red; bezbedno ponovite isti zahtev.');
+    throw new Error(
+      'Repair je ostao fail-closed: scheduled-cleanup service flags CAS nije promenio tačno jedan red; bezbedno ponovite isti zahtev.',
+    );
   }
   const afterRepair = snapshot();
   const afterRepairFlags = afterRepair.serviceFlags[0];
-  const afterRepairTarget = afterRepair.reservations.find((row) => row.reservation_id === reservationId);
+  const afterRepairTarget = afterRepair.reservations.find(
+    (row) => row.reservation_id === reservationId,
+  );
   const afterRepairUnresolved = query(
     `SELECT COUNT(*) AS count FROM usage_reservations
       WHERE settlement_failure_code IS NOT NULL AND reconciled_at IS NULL`,

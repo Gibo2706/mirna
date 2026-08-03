@@ -135,6 +135,7 @@ const createSetup = async (): Promise<{ setup: LocalSyncSetup; vaultMasterKey: U
         id: SYNC_METADATA_RECORD_ID,
         vaultId,
         localSchemaVersion: 1,
+        bootstrapMode: 'creator-upload',
         firstUploadConsent: 'pending',
         lastServerCursor: 0,
         lastSnapshotServerCursor: 0,
@@ -267,6 +268,7 @@ describe('Phase 2 snapshot sync service', () => {
     expect(consentResult).toEqual({ kind: 'uploaded', revision: 1 });
     const setup = await repository.readSetup();
     expect(setup?.metadata).toMatchObject({
+      bootstrapMode: 'complete',
       firstUploadConsent: 'accepted',
       lastSnapshotRevision: 1,
       lastSnapshotId: api.uploads[0].envelope.snapshotId,

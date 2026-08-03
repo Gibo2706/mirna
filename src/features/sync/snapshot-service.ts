@@ -196,14 +196,8 @@ export class SnapshotSyncService {
       setup.metadata.lastSnapshotHash === null &&
       setup.metadata.lastSnapshotId !== null;
 
-    if (
-      pairedBootstrapPending &&
-      setup.metadata.syncBlockReason === 'local-remote-conflict'
-    ) {
-      setup = await this.#repository.preparePairedDeviceBootstrap(
-        setup,
-        this.#now().toISOString(),
-      );
+    if (pairedBootstrapPending && setup.metadata.syncBlockReason === 'local-remote-conflict') {
+      setup = await this.#repository.preparePairedDeviceBootstrap(setup, this.#now().toISOString());
     }
     if (setup.metadata.syncBlockReason) {
       return {
@@ -513,10 +507,7 @@ export class SnapshotSyncService {
     });
     const acceptedDataHash = await computeSyncFinanceDataHash(ready);
     const syncedAt = this.#now().toISOString();
-    if (
-      bootstrapFromPairingPin &&
-      setup.metadata.bootstrapMode === 'paired-download'
-    ) {
+    if (bootstrapFromPairingPin && setup.metadata.bootstrapMode === 'paired-download') {
       await this.#repository.applyRemoteSnapshot(
         setup,
         ready,
@@ -609,7 +600,7 @@ export class SnapshotSyncService {
     return { kind: 'downloaded', revision: envelope.revision };
   }
 
-async #upload(
+  async #upload(
     setup: LocalSyncSetup,
     vaultMasterKey: Uint8Array,
     options: SnapshotSyncOptions,

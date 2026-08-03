@@ -1529,7 +1529,7 @@ const ActivePanel = ({
           </p>
         ) : null}
         {setup.metadata.bootstrapMode === 'creator-upload' &&
-          setup.metadata.firstUploadConsent === 'pending' ? (
+        setup.metadata.firstUploadConsent === 'pending' ? (
           <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
             <p>
               Prvi upload čeka posebnu saglasnost. Mirna će lokalno napraviti snapshot, kompresovati
@@ -1545,8 +1545,8 @@ const ActivePanel = ({
         setup.metadata.lastSnapshotRevision === 0 ? (
           <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
             <p>
-              Ovaj uređaj je povezan, ali još nije preuzeo početni šifrovani snapshot.
-              Lokalno stanje će prvo biti sačuvano kao safety checkpoint.
+              Ovaj uređaj je povezan, ali još nije preuzeo početni šifrovani snapshot. Lokalno
+              stanje će prvo biti sačuvano kao safety checkpoint.
             </p>
 
             <Button disabled={busy} onClick={() => void synchronize(false)}>

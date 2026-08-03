@@ -54,15 +54,7 @@ interface ReservationRow {
 }
 
 const MAX_SQL_INTEGER = 9_007_199_254_740_991;
-const LEDGER_OVERHEAD: MeteredUsage = Object.freeze({
-  workerRequests: 1,
-  // Covers the fixed reservation/settlement ledger and rare accounting faults.
-  // Routine success diagnostics are intentionally coalesced away.
-  d1RowsRead: 1_024,
-  d1RowsWritten: 128,
-  r2ClassA: 0,
-  r2ClassB: 0,
-});
+
 const usage = (
   d1RowsRead: number,
   d1RowsWritten: number,
@@ -662,22 +654,6 @@ export class UsageBudgetController {
     private readonly routeUsageOverrides: Readonly<Partial<Record<string, MeteredUsage>>> = {},
   ) {}
 
-  async reserveRequest(context: RequestContext): Promise<void> {
-    await reserve(
-      context,
-      {
-        suffix: 'request',
-        scopeType: 'global',
-        scopeId: 'service',
-        routeKey: 'request-ledger-overhead',
-        access: 'read',
-        usage: LEDGER_OVERHEAD,
-      },
-      this.budgets,
-      this.now(),
-    );
-  }
-
   async reserveRoute(context: RequestContext): Promise<void> {
     const route = routeBudget(context.request);
     if (route.usage === ZERO_USAGE) return;
@@ -690,7 +666,10 @@ export class UsageBudgetController {
         scopeId: 'service',
         routeKey: route.key,
         access: route.access,
-        usage: estimatedUsage,
+        usage: {
+          ...estimatedUsage,
+          workerRequests: 1,
+        },
       },
       this.budgets,
       this.now(),
@@ -709,7 +688,10 @@ export class UsageBudgetController {
         scopeId: 'service',
         routeKey: 'scheduled-cleanup',
         access: 'write',
-        usage: estimatedUsage,
+        usage: {
+          ...estimatedUsage,
+          workerRequests: 1,
+        },
       },
       this.budgets,
       this.now(),
@@ -738,7 +720,7 @@ export class UsageBudgetController {
     if (reservationIds.length === 0) return;
     const now = this.now();
     const accountingEnv = context.accountingEnv ?? context.env;
-    let activeRoute = 'request-ledger-overhead';
+    let activeRoute = budgetRouteKey(context.request);
     try {
       const observed = context.usageMeter?.snapshot();
       if (observed && observed.sizeAfter > 0) {
@@ -764,7 +746,6 @@ export class UsageBudgetController {
       for (const row of rows as ReservationRow[]) {
         activeRoute = row.route_key;
         const isRequestOverhead = row.reservation_id.endsWith(':request');
-        const isVault = row.scope_type === 'vault';
         const measurementExact = !isRequestOverhead && observed?.exact === true;
         const actual: MeteredUsage = !measurementExact
           ? {
@@ -776,7 +757,7 @@ export class UsageBudgetController {
             }
           : {
               ...observed.usage,
-              workerRequests: isVault ? 1 : 0,
+              workerRequests: 1,
             };
         const reserved: MeteredUsage = {
           workerRequests: row.reserved_worker_requests,

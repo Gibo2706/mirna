@@ -225,6 +225,7 @@ const createFixture = async (): Promise<SecurityFixture> => {
         id: SYNC_METADATA_RECORD_ID,
         vaultId,
         localSchemaVersion: 1,
+        bootstrapMode: 'complete',
         firstUploadConsent: 'accepted',
         lastServerCursor: 0,
         lastSnapshotServerCursor: 0,

@@ -350,7 +350,13 @@ describe('scheduled-cleanup accounting repair contract', () => {
       validateScheduledCleanupRepair({
         requestId: scheduledCleanupRequestId,
         reservations: [reconciledReservation],
-        serviceFlags: { ...scheduledCleanupServiceFlags, accounting_fault: 0, state_reason: 'NONE', state_request_id: null, accounting_fault_at: null },
+        serviceFlags: {
+          ...scheduledCleanupServiceFlags,
+          accounting_fault: 0,
+          state_reason: 'NONE',
+          state_request_id: null,
+          accounting_fault_at: null,
+        },
         unresolvedIncidentCount: 0,
       }),
     ).toEqual({

@@ -57,7 +57,6 @@ describe('Phase 1 vault initialization', () => {
     const fixture = await createInitialVaultFixture();
     const context = vaultCreateContext(fixture);
     const controller = new UsageBudgetController();
-    await controller.reserveRequest(context);
     await controller.reserveRoute(context);
     const meter = new RouteUsageMeter();
     context.usageMeter = meter;
@@ -174,7 +173,6 @@ describe('Phase 1 vault initialization', () => {
         .bind(crypto.randomUUID(), Date.now())
         .run();
 
-      await firstController.reserveRequest(first);
       await firstController.reserveRoute(first);
       const firstMeter = new RouteUsageMeter();
       first.usageMeter = firstMeter;
@@ -214,7 +212,6 @@ describe('Phase 1 vault initialization', () => {
 
       const retry = vaultCreateContext(fixture);
       const retryController = new UsageBudgetController();
-      await retryController.reserveRequest(retry);
       await retryController.reserveRoute(retry);
       const retryMeter = new RouteUsageMeter();
       retry.usageMeter = retryMeter;

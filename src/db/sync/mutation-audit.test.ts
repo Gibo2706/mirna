@@ -49,6 +49,8 @@ const enableMinimalSyncContext = async (database: FinanceDatabase): Promise<void
   await database.syncMetadata.put({
     id: SYNC_METADATA_RECORD_ID,
     vaultId,
+    bootstrapMode: 'complete',
+    firstUploadConsent: 'accepted',
   } as SyncMetadataRecord);
 };
 

@@ -108,6 +108,7 @@ const syncMetadataRecordSchema = z.strictObject({
   id: z.literal(SYNC_METADATA_RECORD_ID),
   vaultId: opaqueIdSchema,
   localSchemaVersion: z.literal(1),
+  bootstrapMode: z.enum(['creator-upload', 'paired-download', 'complete']),
   firstUploadConsent: z.enum(['pending', 'accepted', 'declined']),
   lastServerCursor: z.number().int().nonnegative(),
   lastSnapshotServerCursor: z.number().int().nonnegative(),

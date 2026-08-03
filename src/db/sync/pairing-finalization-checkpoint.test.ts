@@ -120,6 +120,7 @@ const setupAndRequest = async (): Promise<{
       id: SYNC_METADATA_RECORD_ID,
       vaultId,
       localSchemaVersion: 1,
+      bootstrapMode: 'paired-download',
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
       lastSnapshotServerCursor: 0,

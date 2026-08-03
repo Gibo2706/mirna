@@ -101,6 +101,7 @@ const localSetup = (): LocalSyncSetup => {
       id: 'sync-metadata',
       vaultId: 'VVVVVVVVVVVVVVVVVVVVVV',
       localSchemaVersion: 1,
+      bootstrapMode: 'creator-upload',
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
       lastSnapshotServerCursor: 0,

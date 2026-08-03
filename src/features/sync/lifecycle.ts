@@ -2309,7 +2309,7 @@ export class RecoverDeviceLifecycle {
           vaultMasterKey: newVaultMasterKey,
           enabledAt: occurredAt.toISOString(),
           runtime,
-          bootstrapMode: input.recoveredFinanceData ? 'complete' : 'paired-download',
+          bootstrapMode: input.recoveredFinanceData ? 'complete' : 'creator-upload',
         });
         if (input.recoveredFinanceData) {
           setup = {

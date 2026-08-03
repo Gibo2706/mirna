@@ -2,8 +2,9 @@ import { useEffect } from 'react';
 import { MIRNA_SYNC_LOCAL_MUTATION_EVENT } from '@/db/sync/mutation-audit';
 import { SyncApiError } from './api';
 
-const BASE_INTERVAL_MS = 45_000;
-const VISIBILITY_DEBOUNCE_MS = 750;
+const BASE_INTERVAL_MS = 5 * 60_000;
+const VISIBILITY_DEBOUNCE_MS = 3_000;
+const MIN_AUTO_SYNC_GAP_MS = 30_000;
 const BACKOFF_MS = [5_000, 15_000, 60_000, 5 * 60_000] as const;
 const BUDGET_BACKOFF_MS = 6 * 60 * 60 * 1_000;
 
@@ -25,24 +26,41 @@ export const useSnapshotSyncScheduler = (input: {
     let disposed = false;
     let inFlight = false;
     let failedAttempts = 0;
-    let nextAllowedAt = 0;
+    const budgetPauseKey = `mirna:sync-budget-pause:${vaultId}`;
+    let lastStartedAt = 0;
+
+    const storedPause = Number(window.localStorage.getItem(budgetPauseKey));
+    let nextAllowedAt = Number.isFinite(storedPause) && storedPause > Date.now() ? storedPause : 0;
     let debounceTimer: number | undefined;
 
     const run = async (): Promise<void> => {
+      const now = Date.now();
+
       if (
         disposed ||
         inFlight ||
         document.visibilityState === 'hidden' ||
         navigator.onLine === false ||
-        Date.now() < nextAllowedAt
+        now < nextAllowedAt ||
+        now - lastStartedAt < MIN_AUTO_SYNC_GAP_MS
       ) {
         return;
       }
+
+      lastStartedAt = now;
       inFlight = true;
+
       try {
         await synchronize();
+
         failedAttempts = 0;
         nextAllowedAt = 0;
+
+        try {
+          window.localStorage.removeItem(budgetPauseKey);
+        } catch {
+          // Storage može biti nedostupan; trenutna sesija i dalje nastavlja.
+        }
       } catch (error) {
         const budgetPause =
           error instanceof SyncApiError &&
@@ -56,13 +74,28 @@ export const useSnapshotSyncScheduler = (input: {
             'USAGE_SETTLEMENT_FAILED',
             'D1_STORAGE_LIMIT_REACHED',
           ].includes(error.code);
+
         const index = Math.min(failedAttempts, BACKOFF_MS.length - 1);
-        nextAllowedAt =
+        const pauseUntil =
           Date.now() + withJitter(budgetPause ? BUDGET_BACKOFF_MS : BACKOFF_MS[index]);
+
+        nextAllowedAt = pauseUntil;
+
+        if (budgetPause) {
+          try {
+            window.localStorage.setItem(budgetPauseKey, String(pauseUntil));
+          } catch {
+            // In-memory nextAllowedAt i dalje sprečava ponovno bombardovanje.
+          }
+        }
+
         failedAttempts += 1;
       } finally {
         inFlight = false;
-        if (!disposed) await onSettled().catch(() => undefined);
+
+        if (!disposed) {
+          await onSettled().catch(() => undefined);
+        }
       }
     };
 

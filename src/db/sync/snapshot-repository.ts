@@ -200,30 +200,15 @@ export class SyncSnapshotRepository {
           createdAt,
         });
 
-        await this.database.syncOutbox
-          .where('vaultId')
-          .equals(setup.vault.vaultId)
-          .delete();
+        await this.database.syncOutbox.where('vaultId').equals(setup.vault.vaultId).delete();
 
-        await this.database.syncInbox
-          .where('vaultId')
-          .equals(setup.vault.vaultId)
-          .delete();
+        await this.database.syncInbox.where('vaultId').equals(setup.vault.vaultId).delete();
 
-        await this.database.syncFrontier
-          .where('vaultId')
-          .equals(setup.vault.vaultId)
-          .delete();
+        await this.database.syncFrontier.where('vaultId').equals(setup.vault.vaultId).delete();
 
-        await this.database.syncEntityStates
-          .where('vaultId')
-          .equals(setup.vault.vaultId)
-          .delete();
+        await this.database.syncEntityStates.where('vaultId').equals(setup.vault.vaultId).delete();
 
-        await this.database.syncConflicts
-          .where('vaultId')
-          .equals(setup.vault.vaultId)
-          .delete();
+        await this.database.syncConflicts.where('vaultId').equals(setup.vault.vaultId).delete();
 
         await this.database.syncMetadata.put(nextMetadata);
       },

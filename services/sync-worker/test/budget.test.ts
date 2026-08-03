@@ -72,30 +72,40 @@ describe('staging usage budgets', () => {
     const configured = new UsageBudgetController(tinyBudgets({ globalWorkerRequests: 1 }), () =>
       Date.parse('2026-08-01T10:00:00.000Z'),
     );
-    const first = context();
-    const second = context();
-    const attemptedOverride = env as typeof env & { MIRNA_MAX_WORKER_REQUESTS?: string };
+
+    const first = context('/v1/auth/challenge', 'POST');
+    const second = context('/v1/auth/challenge', 'POST');
+
+    const attemptedOverride = env as typeof env & {
+      MIRNA_MAX_WORKER_REQUESTS?: string;
+    };
+
     attemptedOverride.MIRNA_MAX_WORKER_REQUESTS = '999999999';
 
     const results = await Promise.allSettled([
-      configured.reserveRequest(first),
-      configured.reserveRequest(second),
+      configured.reserveRoute(first),
+      configured.reserveRoute(second),
     ]);
+
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+
     const rejected = results.find((result) => result.status === 'rejected');
+
     expect(rejected?.status === 'rejected' ? code(rejected.reason) : undefined).toBe(
       'SERVICE_QUOTA_EXHAUSTED',
     );
 
     const fulfilledIndex = results.findIndex((result) => result.status === 'fulfilled');
+
     await configured.settle(fulfilledIndex === 0 ? first : second);
   });
 
-  it('releases an unused failed-route reservation while retaining ledger overhead', async () => {
+  it('releases unused route capacity while retaining the request count', async () => {
     const configured = new UsageBudgetController();
     const request = context('/v1/operations', 'POST');
-    await configured.reserveRequest(request);
+
     await configured.reserveRoute(request);
+
     const meter = new RouteUsageMeter();
     request.usageMeter = meter;
     request.env = meter.wrapEnvironment(env);
@@ -103,27 +113,38 @@ describe('staging usage budgets', () => {
     await configured.settle(request);
 
     const route = await env.MIRNA_SYNC_DB.prepare(
-      `SELECT state, committed_d1_rows_read, released_d1_rows_read
-         FROM usage_reservations WHERE reservation_id = ?1`,
+      `SELECT
+        state,
+        committed_worker_requests,
+        committed_d1_rows_read,
+        released_d1_rows_read
+      FROM usage_reservations
+      WHERE reservation_id = ?1`,
     )
       .bind(`${request.requestId}:route`)
       .first<{
         state: string;
+        committed_worker_requests: number;
         committed_d1_rows_read: number;
         released_d1_rows_read: number;
       }>();
-    const overhead = await env.MIRNA_SYNC_DB.prepare(
-      `SELECT state, committed_worker_requests
-         FROM usage_reservations WHERE reservation_id = ?1`,
-    )
-      .bind(`${request.requestId}:request`)
-      .first<{ state: string; committed_worker_requests: number }>();
+
     expect(route).toMatchObject({
-      state: 'released',
+      state: 'committed',
+      committed_worker_requests: 1,
       committed_d1_rows_read: 0,
       released_d1_rows_read: 8_192,
     });
-    expect(overhead).toEqual({ state: 'committed', committed_worker_requests: 1 });
+
+    const requestReservationCount = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT COUNT(*)
+        FROM usage_reservations
+        WHERE reservation_id = ?1`,
+    )
+      .bind(`${request.requestId}:request`)
+      .first<number>('COUNT(*)');
+
+    expect(requestReservationCount).toBe(0);
   });
 
   it('retains the conservative reservation when exact provider metadata is unavailable', async () => {
@@ -366,9 +387,10 @@ describe('staging usage budgets', () => {
           WHERE scope_type = 'global' AND scope_id = 'service'`,
       ),
     ]);
-    const request = context();
+    const request = context('/v1/auth/challenge', 'POST');
     const configured = new UsageBudgetController(STAGING_BUDGETS, () => now);
-    await configured.reserveRequest(request);
+
+    await configured.reserveRoute(request);
     await configured.settle(request);
     expect(
       await env.MIRNA_SYNC_DB.prepare(

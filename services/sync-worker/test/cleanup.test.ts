@@ -14,11 +14,7 @@ import {
   type ScheduledCleanupPlan,
 } from '../src/cleanup';
 import worker from '../src/index';
-import {
-  bytes,
-  opaqueId,
-  rawP256PublicKey,
-} from './fixtures';
+import { bytes, opaqueId, rawP256PublicKey } from './fixtures';
 
 const NOW = 2_000_000;
 let seedOffset = 0;
@@ -322,8 +318,7 @@ describe('scheduled cleanup', () => {
         WHERE route_key = 'scheduled-cleanup'
         ORDER BY created_at DESC
         LIMIT 1`,
-    )
-      .first<Record<string, number | string | null>>();
+    ).first<Record<string, number | string | null>>();
 
     expect(reservation).toMatchObject({ measurement_exact: 1, settlement_failure_code: null });
     expect(Number(reservation?.reserved_d1_rows_read)).toBeGreaterThanOrEqual(
@@ -335,12 +330,12 @@ describe('scheduled cleanup', () => {
     expect(Number(reservation?.reserved_r2_class_a)).toBeGreaterThanOrEqual(
       Number(reservation?.measured_r2_class_a),
     );
-      expect(Number(reservation?.measured_d1_rows_read)).toBeLessThanOrEqual(
-        Number(reservation?.reserved_d1_rows_read),
-      );
-      expect(Number(reservation?.measured_d1_rows_written)).toBeLessThanOrEqual(
-        Number(reservation?.reserved_d1_rows_written),
-      );
+    expect(Number(reservation?.measured_d1_rows_read)).toBeLessThanOrEqual(
+      Number(reservation?.reserved_d1_rows_read),
+    );
+    expect(Number(reservation?.measured_d1_rows_written)).toBeLessThanOrEqual(
+      Number(reservation?.reserved_d1_rows_written),
+    );
     expect(estimated.d1RowsRead).toBeGreaterThanOrEqual(Number(reservation?.measured_d1_rows_read));
   });
 

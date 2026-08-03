@@ -125,6 +125,7 @@ const createSetup = async (vaultId = 'A'.repeat(22)): Promise<LocalSyncSetup> =>
       id: SYNC_METADATA_RECORD_ID,
       vaultId,
       localSchemaVersion: 1,
+      bootstrapMode: 'creator-upload',
       firstUploadConsent: 'pending',
       lastServerCursor: 0,
       lastSnapshotServerCursor: 0,
@@ -294,7 +295,7 @@ describe('local sync repository', () => {
       vault: { ...setup.vault, manifest, updatedAt: occurredAt },
       device: { ...setup.device, authorizationExpiresAt, updatedAt: occurredAt },
       vaultKey: structuredClone(setup.vaultKey),
-      metadata: { ...setup.metadata, lastManifestHash: manifestHash },
+      metadata: { ...setup.metadata, bootstrapMode: 'complete', lastManifestHash: manifestHash },
     };
     await replaceEnvelopePin(next);
 
@@ -315,6 +316,7 @@ describe('local sync repository', () => {
     const snapshotRepository = new SyncSnapshotRepository(database);
     await expect(
       snapshotRepository.updateMetadata(setup.vault.vaultId, 1, setup.metadata.lastManifestHash, {
+        bootstrapMode: 'complete',
         firstUploadConsent: 'accepted',
         lastServerCursor: 0,
         lastSnapshotServerCursor: 0,

@@ -310,6 +310,7 @@ describe('export and import formats', () => {
       id: 'sync-metadata',
       vaultId: 'SYNC_VAULT_SENTINEL',
       localSchemaVersion: 1,
+      bootstrapMode: 'complete',
       firstUploadConsent: 'accepted',
       lastServerCursor: 0,
       lastSnapshotServerCursor: 0,

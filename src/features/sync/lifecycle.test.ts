@@ -549,7 +549,8 @@ describe('Phase 1 sync lifecycle', () => {
 
     expect(setup.vault.manifest.manifestVersion).toBe(2);
     expect(setup.vault.manifest.devices).toHaveLength(2);
-    expect(setup.metadata.firstUploadConsent).toBe('pending');
+    expect(setup.metadata.bootstrapMode).toBe('paired-download');
+    expect(setup.metadata.firstUploadConsent).toBe('declined');
     expect(newRepository.writes).toBe(1);
     expect(newcomer.state).toBe('active');
   });
@@ -713,6 +714,7 @@ describe('Phase 1 sync lifecycle', () => {
       api.vaultRequest?.manifest.recoveryLookupId,
     );
     expect(setup.metadata.firstUploadConsent).toBe('pending');
+    expect(setup.metadata.bootstrapMode).toBe('creator-upload');
     expect(recoveredRepository.writes).toBe(1);
   });
 

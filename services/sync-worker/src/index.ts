@@ -5,12 +5,7 @@ import {
   scheduledCleanupHasWork,
 } from './cleanup';
 import { enforceEdgeRateLimit } from './abuse';
-import {
-  budgetRouteKey,
-  estimateScheduledCleanupUsage,
-  runBudgetWindowMaintenance,
-  usageBudget,
-} from './budget';
+import { estimateScheduledCleanupUsage, runBudgetWindowMaintenance, usageBudget } from './budget';
 import type { RequestContext } from './context';
 import type { Env } from './env';
 import { HttpError } from './errors';
@@ -31,8 +26,6 @@ import { RouteUsageMeter } from './metering';
 import { recordBetaDiagnostic } from './diagnostics';
 
 const HEALTH_PATH = '/v1/health';
-
-const recordAccountingSuccess = (..._args: unknown[]): Promise<void> => Promise.resolve();
 
 const recordAccountingFailure = (
   request: Request,
@@ -165,11 +158,6 @@ const executeRoute = async (context: RequestContext): Promise<Response> => {
   if (pathname === HEALTH_PATH && request.method === 'GET') return routeRequest(context);
   if (!matchedRoute) return routeRequest(context);
   await usageBudget.reserveRoute(context);
-  await recordAccountingSuccess(
-    context,
-    'budget_route_reservation_succeeded',
-    budgetRouteKey(request),
-  );
 
   const usageMeter = new RouteUsageMeter();
   context.usageMeter = usageMeter;
@@ -217,12 +205,7 @@ const fetchHandler = async (
   if (request.method === 'GET' && new URL(request.url).pathname === HEALTH_PATH) {
     return executeRoute(context);
   }
-  await usageBudget.reserveRequest(context);
-  await recordAccountingSuccess(
-    context,
-    'budget_request_reservation_succeeded',
-    'request-ledger-overhead',
-  );
+
   let response: Response | undefined;
   let routeError: unknown;
   try {
@@ -234,11 +217,6 @@ const fetchHandler = async (
   let settlementError: unknown;
   try {
     await usageBudget.settle(context);
-    await recordAccountingSuccess(
-      context,
-      'budget_settlement_succeeded',
-      budgetRouteKey(context.request),
-    );
   } catch (error) {
     settlementError = error;
   }
@@ -295,7 +273,6 @@ const worker: ExportedHandler<Env> = {
           allowedOrigin: null,
           budgetReservationIds: [],
         };
-        await usageBudget.reserveRequest(requestContext);
         try {
           const usageMeter = new RouteUsageMeter(true);
           requestContext.usageMeter = usageMeter;

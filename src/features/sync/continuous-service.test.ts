@@ -14,6 +14,7 @@ const metadata = (overrides: Partial<SyncMetadataRecord> = {}): SyncMetadataReco
   id: 'sync-metadata',
   vaultId,
   localSchemaVersion: 1,
+  bootstrapMode: overrides.bootstrapMode ?? 'complete',
   firstUploadConsent: 'accepted',
   lastServerCursor: 8,
   lastSnapshotServerCursor: 3,
