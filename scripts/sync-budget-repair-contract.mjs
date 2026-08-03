@@ -2,10 +2,18 @@ const PAIRING_REQUEST_ID = /^[A-Za-z0-9_-]{22}$/u;
 const SCHEDULED_CLEANUP_RECONCILIATION_CODE = 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED';
 
 const numeric = (value, description) => {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(`Repair je odbijen: ${description} nije nenegativan ceo broj.`);
+  if (value === null || value === undefined || value === '') {
+    throw new Error(`Repair je odbijen: ${description} nedostaje.`);
   }
+
+  const parsed = Number(value);
+
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `Repair je odbijen: ${description} nije nenegativan ceo broj.`,
+    );
+  }
+
   return parsed;
 };
 
@@ -15,6 +23,77 @@ const exactReservation = (reservations, reservationId) => {
     throw new Error(`Repair je odbijen: očekivana rezervacija ${reservationId} nije jedinstvena.`);
   }
   return matches[0];
+};
+
+const USAGE_SUFFIXES = Object.freeze([
+  'worker_requests',
+  'd1_rows_read',
+  'd1_rows_written',
+  'r2_class_a',
+  'r2_class_b',
+]);
+
+const validateExactUnderestimationAccounting = (reservation) => {
+  const exactFields = {};
+  let hasUnderestimation = false;
+
+  for (const suffix of USAGE_SUFFIXES) {
+    const reservedField = `reserved_${suffix}`;
+    const measuredField = `measured_${suffix}`;
+    const committedField = `committed_${suffix}`;
+    const releasedField = `released_${suffix}`;
+
+    const reserved = numeric(
+      reservation[reservedField],
+      `scheduled-cleanup.${reservedField}`,
+    );
+
+    const measured = numeric(
+      reservation[measuredField],
+      `scheduled-cleanup.${measuredField}`,
+    );
+
+    const committed = numeric(
+      reservation[committedField],
+      `scheduled-cleanup.${committedField}`,
+    );
+
+    const released = numeric(
+      reservation[releasedField],
+      `scheduled-cleanup.${releasedField}`,
+    );
+
+    if (committed !== measured) {
+      throw new Error(
+        `Repair je odbijen: ${committedField} nije jednak exact measured rezultatu.`,
+      );
+    }
+
+    const expectedReleased = Math.max(reserved - measured, 0);
+
+    if (released !== expectedReleased) {
+      throw new Error(
+        `Repair je odbijen: ${releasedField} nije jednak neiskorišćenoj rezervaciji.`,
+      );
+    }
+
+    if (measured > reserved) {
+      hasUnderestimation = true;
+    }
+
+    exactFields[reservedField] = reserved;
+    exactFields[measuredField] = measured;
+    exactFields[committedField] = committed;
+    exactFields[releasedField] = released;
+  }
+
+  if (!hasUnderestimation) {
+    throw new Error(
+      'Repair je odbijen: reservation nema nijednu stvarno potcenjenu metriku.',
+    );
+  }
+
+  return exactFields;
 };
 
 const assertExactFields = (row, expected, description) => {
@@ -207,124 +286,122 @@ export const validateScheduledCleanupRepair = ({
 }) => {
   const reservationId = `${requestId}:scheduled-cleanup`;
   const reservation = exactReservation(reservations, reservationId);
-  const exactIncident =
-    reservation.scope_type === 'global' &&
-    reservation.scope_id === 'service' &&
-    reservation.route_key === 'scheduled-cleanup' &&
-    reservation.state === 'committed' &&
-    reservation.measurement_exact === 1 &&
-    reservation.settlement_failure_code === 'USAGE_RESERVATION_UNDERESTIMATED' &&
-    reservation.business_committed === 0 &&
-    reservation.reserved_worker_requests === 0 &&
-    reservation.reserved_d1_rows_read === 1090 &&
-    reservation.reserved_d1_rows_written === 256 &&
-    reservation.reserved_r2_class_a === 1 &&
-    reservation.reserved_r2_class_b === 0 &&
-    reservation.committed_worker_requests === 0 &&
-    reservation.committed_d1_rows_read === 1388 &&
-    reservation.committed_d1_rows_written === 19 &&
-    reservation.committed_r2_class_a === 1 &&
-    reservation.committed_r2_class_b === 0 &&
-    reservation.released_worker_requests === 0 &&
-    reservation.released_d1_rows_read === 0 &&
-    reservation.released_d1_rows_written === 237 &&
-    reservation.released_r2_class_a === 0 &&
-    reservation.released_r2_class_b === 0 &&
-    reservation.measured_worker_requests === 0 &&
-    reservation.measured_d1_rows_read === 1388 &&
-    reservation.measured_d1_rows_written === 19 &&
-    reservation.measured_r2_class_a === 1 &&
-    reservation.measured_r2_class_b === 0 &&
-    reservation.reconciled_at === null &&
-    reservation.reconciliation_code === null;
-  const reconciledState =
-    reservation.scope_type === 'global' &&
-    reservation.scope_id === 'service' &&
-    reservation.route_key === 'scheduled-cleanup' &&
-    reservation.state === 'committed' &&
-    reservation.measurement_exact === 1 &&
-    reservation.settlement_failure_code === 'USAGE_RESERVATION_UNDERESTIMATED' &&
-    reservation.business_committed === 0 &&
-    reservation.reserved_worker_requests === 0 &&
-    reservation.reserved_d1_rows_read === 1090 &&
-    reservation.reserved_d1_rows_written === 256 &&
-    reservation.reserved_r2_class_a === 1 &&
-    reservation.reserved_r2_class_b === 0 &&
-    reservation.committed_worker_requests === 0 &&
-    reservation.committed_d1_rows_read === 1388 &&
-    reservation.committed_d1_rows_written === 19 &&
-    reservation.committed_r2_class_a === 1 &&
-    reservation.committed_r2_class_b === 0 &&
-    reservation.released_worker_requests === 0 &&
-    reservation.released_d1_rows_read === 0 &&
-    reservation.released_d1_rows_written === 237 &&
-    reservation.released_r2_class_a === 0 &&
-    reservation.released_r2_class_b === 0 &&
-    reservation.measured_worker_requests === 0 &&
-    reservation.measured_d1_rows_read === 1388 &&
-    reservation.measured_d1_rows_written === 19 &&
-    reservation.measured_r2_class_a === 1 &&
-    reservation.measured_r2_class_b === 0 &&
-    reservation.reconciled_at !== null &&
-    reservation.reconciliation_code === SCHEDULED_CLEANUP_RECONCILIATION_CODE;
-  if (!exactIncident && !reconciledState) {
-    throw new Error('Repair je odbijen: scheduled-cleanup incident nije exact dokaz.');
-  }
-  assertExactFields(
-    reservation,
-    {
-      reserved_worker_requests: 0,
-      reserved_d1_rows_read: 1090,
-      reserved_d1_rows_written: 256,
-      reserved_r2_class_a: 1,
-      reserved_r2_class_b: 0,
-      committed_worker_requests: 0,
-      committed_d1_rows_read: 1388,
-      committed_d1_rows_written: 19,
-      committed_r2_class_a: 1,
-      committed_r2_class_b: 0,
-      released_worker_requests: 0,
-      released_d1_rows_read: 0,
-      released_d1_rows_written: 237,
-      released_r2_class_a: 0,
-      released_r2_class_b: 0,
-      measured_worker_requests: 0,
-      measured_d1_rows_read: 1388,
-      measured_d1_rows_written: 19,
-      measured_r2_class_a: 1,
-      measured_r2_class_b: 0,
-    },
-    'scheduled-cleanup reservation',
-  );
+
   if (
-    !serviceFlags ||
-    !(
-      (serviceFlags.accounting_fault === 1 &&
-        serviceFlags.state_reason === 'USAGE_RESERVATION_UNDERESTIMATED' &&
-        serviceFlags.state_request_id === requestId &&
-        serviceFlags.accept_new_vaults === 1 &&
-        serviceFlags.accept_pairings === 1 &&
-        serviceFlags.accept_writes === 1 &&
-        serviceFlags.maintenance_mode === 0) ||
-      (serviceFlags.accounting_fault === 0 &&
-        serviceFlags.state_reason === 'NONE' &&
-        serviceFlags.state_request_id === null &&
-        serviceFlags.accept_new_vaults === 1 &&
-        serviceFlags.accept_pairings === 1 &&
-        serviceFlags.accept_writes === 1 &&
-        serviceFlags.maintenance_mode === 0)
-    )
+    reservation.scope_type !== 'global' ||
+    reservation.scope_id !== 'service' ||
+    reservation.route_key !== 'scheduled-cleanup' ||
+    reservation.state !== 'committed' ||
+    reservation.measurement_exact !== 1 ||
+    reservation.settlement_failure_code !==
+    'USAGE_RESERVATION_UNDERESTIMATED' ||
+    reservation.business_committed !== 0
   ) {
-    throw new Error('Repair je odbijen: scheduled-cleanup service flags ne pripadaju incidentu.');
+    throw new Error(
+      'Repair je odbijen: scheduled-cleanup reservation nema očekivanu strukturu.',
+    );
   }
-  if (numeric(unresolvedIncidentCount, 'unresolved accounting incident count') > 1) {
-    throw new Error('Repair je odbijen: postoji više od jednog nerešenog accounting incidenta.');
+
+  const createdAt = numeric(
+    reservation.created_at,
+    'scheduled-cleanup.created_at',
+  );
+
+  const settledAt = numeric(
+    reservation.settled_at,
+    'scheduled-cleanup.settled_at',
+  );
+
+  if (settledAt < createdAt) {
+    throw new Error(
+      'Repair je odbijen: scheduled-cleanup settled_at prethodi created_at.',
+    );
+  }
+
+  const exactFields =
+    validateExactUnderestimationAccounting(reservation);
+
+  const isReconciled = reservation.reconciled_at !== null;
+
+  if (
+    isReconciled &&
+    reservation.reconciliation_code !==
+    SCHEDULED_CLEANUP_RECONCILIATION_CODE
+  ) {
+    throw new Error(
+      'Repair je odbijen: scheduled-cleanup ima nepoznat reconciliation kod.',
+    );
+  }
+
+  if (
+    !isReconciled &&
+    reservation.reconciliation_code !== null
+  ) {
+    throw new Error(
+      'Repair je odbijen: nereconciliovana rezervacija već ima reconciliation kod.',
+    );
+  }
+
+  if (!serviceFlags) {
+    throw new Error(
+      'Repair je odbijen: scheduled-cleanup service flags nedostaju.',
+    );
+  }
+
+  const admissionFlagsAreUntouched =
+    serviceFlags.accept_new_vaults === 1 &&
+    serviceFlags.accept_pairings === 1 &&
+    serviceFlags.accept_writes === 1 &&
+    serviceFlags.maintenance_mode === 0;
+
+  if (!admissionFlagsAreUntouched) {
+    throw new Error(
+      'Repair je odbijen: operator/admission service flags nisu u očekivanom stanju.',
+    );
+  }
+
+  const activeMatchingFault =
+    serviceFlags.accounting_fault === 1 &&
+    serviceFlags.state_reason ===
+    'USAGE_RESERVATION_UNDERESTIMATED' &&
+    serviceFlags.state_request_id === requestId &&
+    serviceFlags.accounting_fault_at === settledAt;
+
+  const alreadyCleared =
+    serviceFlags.accounting_fault === 0 &&
+    serviceFlags.state_reason === 'NONE' &&
+    serviceFlags.state_request_id === null &&
+    serviceFlags.accounting_fault_at === null;
+
+  if (!activeMatchingFault && !alreadyCleared) {
+    throw new Error(
+      'Repair je odbijen: scheduled-cleanup service flags ne pripadaju incidentu.',
+    );
+  }
+
+  const unresolvedCount = numeric(
+    unresolvedIncidentCount,
+    'unresolved accounting incident count',
+  );
+
+  if (!isReconciled && unresolvedCount !== 1) {
+    throw new Error(
+      'Repair je odbijen: aktivni scheduled-cleanup mora biti jedini nerešeni incident.',
+    );
+  }
+
+  if (isReconciled && unresolvedCount !== 0) {
+    throw new Error(
+      'Repair je odbijen: reconciliovani scheduled-cleanup i dalje ima nerešene incidente.',
+    );
   }
 
   return {
     reservationId,
-    reconciliationCode: SCHEDULED_CLEANUP_RECONCILIATION_CODE,
-    reservationNeedsUpdate: exactIncident,
+    reconciliationCode:
+      SCHEDULED_CLEANUP_RECONCILIATION_CODE,
+    reservationNeedsUpdate: !isReconciled,
+    ...(!isReconciled ? { exactFields } : {}),
   };
 };
 
@@ -373,7 +450,7 @@ export const assertPairingRepairPostconditions = ({
   if (
     JSON.stringify(afterRequest) !== JSON.stringify(beforeRequest) ||
     JSON.stringify(withoutReconciliationFields(afterRoute)) !==
-      JSON.stringify(withoutReconciliationFields(beforeRoute)) ||
+    JSON.stringify(withoutReconciliationFields(beforeRoute)) ||
     JSON.stringify(afterPairingEvidence) !== JSON.stringify(beforePairingEvidence)
   ) {
     throw new Error(

@@ -40,7 +40,11 @@ const switches = new Set();
 for (let index = 0; index < rawArguments.length; index += 1) {
   const key = rawArguments[index];
   if (!key?.startsWith('--')) throw new Error(`Nepoznata opcija: ${key ?? ''}`);
-  if (['--apply', '--business-committed'].includes(key)) {
+  if (
+    ['--apply', '--business-committed', '--current'].includes(
+      key,
+    )
+  ) {
     switches.add(key);
     continue;
   }
@@ -55,12 +59,42 @@ if ((options.get('--env') ?? 'staging') !== 'staging') {
   throw new Error('Ovaj alat odbija sva okruženja osim eksplicitnog staging okruženja.');
 }
 const requestId = options.get('--request');
-if (requestId && !REQUEST_ID.test(requestId)) throw new Error('Request ID nije ispravan.');
-if (mode === 'repair' && !requestId) throw new Error('Repair zahteva tačan --request ID.');
+const operation = options.get('--operation');
+const useCurrentIncident = switches.has('--current');
+
+let requestId = options.get('--request') ?? null;
+
+if (useCurrentIncident && requestId !== null) {
+  throw new Error(
+    'Koristite ili --current ili --request, ne oba.',
+  );
+}
+
+if (
+  useCurrentIncident &&
+  operation !== 'scheduled-cleanup'
+) {
+  throw new Error(
+    '--current je trenutno dozvoljen samo za scheduled-cleanup repair.',
+  );
+}
+
+if (requestId !== null && !REQUEST_ID.test(requestId)) {
+  throw new Error('Request ID nije ispravan.');
+}
+
+if (
+  mode === 'repair' &&
+  requestId === null &&
+  !useCurrentIncident
+) {
+  throw new Error(
+    'Repair zahteva --request ili bezbedni --current režim.',
+  );
+}
 if (mode === 'repair' && !switches.has('--apply')) {
   throw new Error('Repair je odbijen bez eksplicitnog --apply parametra.');
 }
-const operation = options.get('--operation');
 const pairingRequestId = options.get('--pairing-request');
 if (mode === 'repair' && operation === 'pairing-create') {
   assertPairingRequestId(pairingRequestId);
@@ -135,6 +169,64 @@ const changedRows = (payload) => {
 const query = (sql) => resultSets(wrangler(sql))[0] ?? [];
 const sqlText = (value) => `'${value.replaceAll("'", "''")}'`;
 const now = Date.now();
+if (useCurrentIncident) {
+  const flagRows = query(
+    `SELECT
+       accounting_fault,
+       state_reason,
+       state_request_id
+     FROM service_flags
+     WHERE singleton_id = 1`,
+  );
+
+  if (flagRows.length !== 1) {
+    throw new Error(
+      'Repair je odbijen: service_flags singleton nije jedinstven.',
+    );
+  }
+
+  const flags = flagRows[0];
+
+  if (
+    flags.accounting_fault !== 1 ||
+    flags.state_reason !==
+    'USAGE_RESERVATION_UNDERESTIMATED' ||
+    typeof flags.state_request_id !== 'string' ||
+    !REQUEST_ID.test(flags.state_request_id)
+  ) {
+    throw new Error(
+      'Repair je odbijen: nema tačnog aktivnog accounting underestimation incidenta.',
+    );
+  }
+
+  const candidateRequestId = flags.state_request_id;
+
+  const unresolvedRows = query(
+    `SELECT reservation_id, route_key
+       FROM usage_reservations
+      WHERE settlement_failure_code IS NOT NULL
+        AND reconciled_at IS NULL
+      ORDER BY created_at`,
+  );
+
+  if (
+    unresolvedRows.length !== 1 ||
+    unresolvedRows[0].reservation_id !==
+    `${candidateRequestId}:scheduled-cleanup` ||
+    unresolvedRows[0].route_key !== 'scheduled-cleanup'
+  ) {
+    throw new Error(
+      'Repair je odbijen: aktivni service fault nije jedinstveni scheduled-cleanup incident.',
+    );
+  }
+
+  requestId = candidateRequestId;
+}
+if (mode === 'repair' && requestId === null) {
+  throw new Error(
+    'Repair nije uspeo da utvrdi tačan Request ID.',
+  );
+}
 const createdAfter = now - lookbackMs;
 const requestPredicate = requestId
   ? `reservation_id LIKE ${sqlText(`${requestId}:%`)}`
@@ -206,11 +298,11 @@ const snapshot = () => {
     pairingTotals:
       mode === 'repair'
         ? (query(
-            `SELECT total_count,
+          `SELECT total_count,
                     (SELECT COUNT(*) FROM pairing_requests) AS actual_count,
                     updated_at
                FROM pairing_request_totals WHERE singleton_id = 1`,
-          )[0] ?? null)
+        )[0] ?? null)
         : null,
     projectedGlobalRolling: projected.rolling ?? null,
     projectedGlobalDaily: projected.daily ?? null,
@@ -325,34 +417,32 @@ if (mode === 'repair' && operation === 'scheduled-cleanup') {
     throw new Error('Repair je odbijen: postoji drugi nerešen accounting incident.');
   }
   if (scheduled.reservationNeedsUpdate) {
+    const exactAccountingPredicates = Object.entries(
+      scheduled.exactFields,
+    )
+      .map(([field, value]) => `AND ${field} = ${value}`)
+      .join('\n          ');
+
     const reservationUpdate = wrangler(
       `UPDATE usage_reservations
           SET reconciled_at = ${now},
-              reconciliation_code = ${sqlText(scheduled.reconciliationCode)}
+              reconciliation_code = ${sqlText(
+        scheduled.reconciliationCode,
+      )}
         WHERE reservation_id = ${sqlText(reservationId)}
+          AND scope_type = 'global'
+          AND scope_id = 'service'
           AND route_key = 'scheduled-cleanup'
           AND state = 'committed'
           AND measurement_exact = 1
-          AND settlement_failure_code = 'USAGE_RESERVATION_UNDERESTIMATED'
+          AND settlement_failure_code =
+            'USAGE_RESERVATION_UNDERESTIMATED'
           AND business_committed = 0
           AND reconciled_at IS NULL
-          AND reserved_d1_rows_read = 1090
-          AND reserved_d1_rows_written = 256
-          AND reserved_r2_class_a = 1
-          AND reserved_r2_class_b = 0
-          AND measured_d1_rows_read = 1388
-          AND measured_d1_rows_written = 19
-          AND measured_r2_class_a = 1
-          AND measured_r2_class_b = 0
-          AND committed_d1_rows_read = 1388
-          AND committed_d1_rows_written = 19
-          AND committed_r2_class_a = 1
-          AND committed_r2_class_b = 0
-          AND released_d1_rows_read = 0
-          AND released_d1_rows_written = 237
-          AND released_r2_class_a = 0
-          AND released_r2_class_b = 0`,
+          AND reconciliation_code IS NULL
+          ${exactAccountingPredicates}`,
     );
+
     if (changedRows(reservationUpdate) !== 1) {
       throw new Error(
         'Repair je zaustavljen: scheduled-cleanup reservation CAS nije promenio tačno jedan red.',
@@ -489,12 +579,12 @@ if (alreadyReconciled) {
 
 const pairingRepair = isPairingCreateIncident
   ? validatePairingCreateRepair({
-      requestId,
-      pairingRequestId,
-      reservations: before.reservations,
-      serviceFlags: flags,
-      pairingEvidence: before.pairingBusinessEvidence,
-    })
+    requestId,
+    pairingRequestId,
+    reservations: before.reservations,
+    serviceFlags: flags,
+    pairingEvidence: before.pairingBusinessEvidence,
+  })
   : null;
 
 const routeBefore = before.reservations.find(

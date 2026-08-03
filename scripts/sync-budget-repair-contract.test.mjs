@@ -99,40 +99,49 @@ const pairingEvidence = {
   created_at: 1_500,
 };
 
-const scheduledCleanupRequestId = '47d4310a-b7fe-48ff-9ace-f715ad4a396d';
+const scheduledCleanupRequestId =
+  '11111111-1111-4111-8111-111111111111';
 const scheduledCleanupReservation = {
-  reservation_id: `${scheduledCleanupRequestId}:scheduled-cleanup`,
+  reservation_id:
+    `${scheduledCleanupRequestId}:scheduled-cleanup`,
   scope_type: 'global',
   scope_id: 'service',
   route_key: 'scheduled-cleanup',
   state: 'committed',
+
   reserved_worker_requests: 0,
-  reserved_d1_rows_read: 1090,
-  reserved_d1_rows_written: 256,
+  reserved_d1_rows_read: 1_710,
+  reserved_d1_rows_written: 356,
   reserved_r2_class_a: 1,
   reserved_r2_class_b: 0,
+
   committed_worker_requests: 0,
-  committed_d1_rows_read: 1388,
-  committed_d1_rows_written: 19,
+  committed_d1_rows_read: 2_087,
+  committed_d1_rows_written: 20,
   committed_r2_class_a: 1,
   committed_r2_class_b: 0,
+
   released_worker_requests: 0,
   released_d1_rows_read: 0,
-  released_d1_rows_written: 237,
+  released_d1_rows_written: 336,
   released_r2_class_a: 0,
   released_r2_class_b: 0,
+
   measurement_exact: 1,
+
   measured_worker_requests: 0,
-  measured_d1_rows_read: 1388,
-  measured_d1_rows_written: 19,
+  measured_d1_rows_read: 2_087,
+  measured_d1_rows_written: 20,
   measured_r2_class_a: 1,
   measured_r2_class_b: 0,
-  settlement_failure_code: 'USAGE_RESERVATION_UNDERESTIMATED',
+
+  settlement_failure_code:
+    'USAGE_RESERVATION_UNDERESTIMATED',
   business_committed: 0,
   reconciled_at: null,
   reconciliation_code: null,
-  created_at: 1785683268328,
-  settled_at: 1785683270149,
+  created_at: 1_000,
+  settled_at: 2_000,
 };
 
 const scheduledCleanupServiceFlags = {
@@ -143,8 +152,8 @@ const scheduledCleanupServiceFlags = {
   accept_pairings: 1,
   accept_writes: 1,
   maintenance_mode: 0,
-  accounting_fault_at: 1785683270149,
-  updated_at: 1785683270149,
+  accounting_fault_at: 2_000,
+  updated_at: 2_000,
 };
 
 describe('pairing-create accounting repair contract', () => {
@@ -317,20 +326,48 @@ describe('scheduled-cleanup accounting repair contract', () => {
         unresolvedIncidentCount: 1,
       }),
     ).toEqual({
-      reservationId: `${scheduledCleanupRequestId}:scheduled-cleanup`,
-      reconciliationCode: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+      reservationId:
+        `${scheduledCleanupRequestId}:scheduled-cleanup`,
+      reconciliationCode:
+        'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
       reservationNeedsUpdate: true,
+      exactFields: {
+        reserved_worker_requests: 0,
+        measured_worker_requests: 0,
+        committed_worker_requests: 0,
+        released_worker_requests: 0,
+
+        reserved_d1_rows_read: 1_710,
+        measured_d1_rows_read: 2_087,
+        committed_d1_rows_read: 2_087,
+        released_d1_rows_read: 0,
+
+        reserved_d1_rows_written: 356,
+        measured_d1_rows_written: 20,
+        committed_d1_rows_written: 20,
+        released_d1_rows_written: 336,
+
+        reserved_r2_class_a: 1,
+        measured_r2_class_a: 1,
+        committed_r2_class_a: 1,
+        released_r2_class_a: 0,
+
+        reserved_r2_class_b: 0,
+        measured_r2_class_b: 0,
+        committed_r2_class_b: 0,
+        released_r2_class_b: 0,
+      },
     });
   });
 
-  it('rejects any divergence from the exact staged cleanup evidence', () => {
+  it('rejects structural divergence from a scheduled-cleanup incident', () => {
     expect(() =>
       validateScheduledCleanupRepair({
         requestId: scheduledCleanupRequestId,
         reservations: [
           {
             ...scheduledCleanupReservation,
-            reserved_d1_rows_read: 1091,
+            route_key: 'snapshot-current',
           },
         ],
         serviceFlags: scheduledCleanupServiceFlags,
@@ -364,5 +401,52 @@ describe('scheduled-cleanup accounting repair contract', () => {
       reconciliationCode: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
       reservationNeedsUpdate: false,
     });
+  });
+
+  it('rejects inconsistent committed usage', () => {
+    expect(() =>
+      validateScheduledCleanupRepair({
+        requestId: scheduledCleanupRequestId,
+        reservations: [
+          {
+            ...scheduledCleanupReservation,
+            committed_d1_rows_read: 2_086,
+          },
+        ],
+        serviceFlags: scheduledCleanupServiceFlags,
+        unresolvedIncidentCount: 1,
+      }),
+    ).toThrow(/committed_d1_rows_read/u);
+  });
+
+  it('rejects inconsistent released capacity', () => {
+    expect(() =>
+      validateScheduledCleanupRepair({
+        requestId: scheduledCleanupRequestId,
+        reservations: [
+          {
+            ...scheduledCleanupReservation,
+            released_d1_rows_written: 335,
+          },
+        ],
+        serviceFlags: scheduledCleanupServiceFlags,
+        unresolvedIncidentCount: 1,
+      }),
+    ).toThrow(/released_d1_rows_written/u);
+  });
+
+  it('rejects a different active fault origin', () => {
+    expect(() =>
+      validateScheduledCleanupRepair({
+        requestId: scheduledCleanupRequestId,
+        reservations: [scheduledCleanupReservation],
+        serviceFlags: {
+          ...scheduledCleanupServiceFlags,
+          state_request_id:
+            '22222222-2222-4222-8222-222222222222',
+        },
+        unresolvedIncidentCount: 1,
+      }),
+    ).toThrow(/service flags/u);
   });
 });

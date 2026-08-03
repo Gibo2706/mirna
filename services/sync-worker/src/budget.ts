@@ -81,7 +81,7 @@ export interface ScheduledCleanupEstimateInput {
   readonly deletionRows: number;
   readonly reconcileR2: boolean;
 }
-
+const SCHEDULED_CLEANUP_PLANNING_D1_READ_BASE = 4_096;
 /**
  * Reserves from the inspected bounded work set, not from every category's
  * maximum at once. The fixed base covers budget-window maintenance, the large
@@ -107,7 +107,7 @@ export const estimateScheduledCleanupUsage = (
   }
   return Object.freeze(
     usage(
-      1_024 +
+      SCHEDULED_CLEANUP_PLANNING_D1_READ_BASE +
         (input.reconcileR2 ? 2 : 0) +
         input.expiredUsageBuckets * 32 +
         input.inspectedRows * 4 +

@@ -22,7 +22,10 @@ let seedOffset = 0;
 const scalar = async (query: string): Promise<number> =>
   (await env.MIRNA_SYNC_DB.prepare(query).first<number>('count')) ?? -1;
 
-const seedExpiredData = async (): Promise<void> => {
+const seedExpiredData = async (): Promise<{
+  temporarySnapshotKey: string;
+  committedSnapshotKey: string;
+}> => {
   await env.MIRNA_SYNC_DB.batch([
     env.MIRNA_SYNC_DB.prepare('DELETE FROM pairing_envelopes'),
     env.MIRNA_SYNC_DB.prepare('DELETE FROM pairing_requests'),
@@ -262,6 +265,10 @@ const seedExpiredData = async (): Promise<void> => {
       NOW + 1_000,
     ),
   ]);
+  return {
+    temporarySnapshotKey,
+    committedSnapshotKey,
+  };
 };
 
 const runCron = async (scheduledTime = NOW): Promise<void> => {
@@ -377,7 +384,7 @@ describe('scheduled cleanup', () => {
     const oneUsage = estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(oneItem));
     expect(
       estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(reconciliationOnly)),
-    ).toMatchObject({ d1RowsRead: 1_026, d1RowsWritten: 128, r2ClassA: 1 });
+    ).toMatchObject({ d1RowsRead: 4_098, d1RowsWritten: 128, r2ClassA: 1 });
     const maximumUsage = estimateScheduledCleanupUsage(
       scheduledCleanupEstimateInput(maximumConfiguredBatch),
     );
@@ -388,7 +395,10 @@ describe('scheduled cleanup', () => {
   });
 
   it('removes only eligible D1/R2 data in bounded, idempotent batches', async () => {
-    await seedExpiredData();
+    const {
+      temporarySnapshotKey,
+      committedSnapshotKey,
+    } = await seedExpiredData();
 
     await runCron();
     expect(await scalar('SELECT COUNT(*) AS count FROM auth_challenges')).toBe(0);
@@ -396,8 +406,17 @@ describe('scheduled cleanup', () => {
     expect(await scalar('SELECT COUNT(*) AS count FROM access_sessions')).toBe(0);
     expect(await scalar('SELECT COUNT(*) AS count FROM snapshots')).toBe(1);
     expect(await scalar('SELECT COUNT(*) AS count FROM sync_changes')).toBe(0);
-    expect(await env.MIRNA_SYNC_BUCKET.head('opaque/temp/snapshot-01')).toBeNull();
-    expect(await env.MIRNA_SYNC_BUCKET.head('opaque/committed/snapshot-02')).not.toBeNull();
+    expect(
+      await env.MIRNA_SYNC_BUCKET.head(
+        temporarySnapshotKey,
+      ),
+    ).toBeNull();
+
+    expect(
+      await env.MIRNA_SYNC_BUCKET.head(
+        committedSnapshotKey,
+      ),
+    ).not.toBeNull();
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_envelopes')).toBe(1);
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_requests')).toBe(1);
 
