@@ -13,8 +13,13 @@ const highRiskParts = new Set([
   'test-results',
 ]);
 
+const publicConfigTemplate =
+  /(?:^|[/\\])(?:\.env|\.dev\.vars)\.(?:example|sample|template)$/i;
+
+const privateConfigFile =
+  /(?:^|[/\\])(?:\.env(?:\.[^/\\]+)?|\.dev\.vars)$/i;
+
 const highRiskNames = [
-  /^\.env(?:\.|$)/i,
   /\.(?:bak|backup|key|pem|p12|snapshot|tar|tar\.gz|tgz|zip)$/i,
   /(?:^|\/)finance-backup-[^/]+\.json$/i,
   /(?:^|\/)finance-transactions-[^/]+\.csv$/i,
@@ -87,6 +92,14 @@ export function findPathViolation(file) {
   if (parts.some((part) => highRiskParts.has(part))) {
     return 'high-risk path must not be public';
   }
+
+  if (
+    privateConfigFile.test(file) &&
+    !publicConfigTemplate.test(file)
+  ) {
+    return 'private environment or local configuration file must not be public';
+  }
+
   if (highRiskNames.some((pattern) => pattern.test(file))) {
     return 'private export, secret, or archive filename must not be public';
   }
@@ -104,6 +117,8 @@ export function findPathViolation(file) {
 }
 
 export function isTextCandidate(file) {
+  if (publicConfigTemplate.test(file)) return true;
+
   return textExtensions.has(extname(file).toLowerCase());
 }
 
