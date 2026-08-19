@@ -13,11 +13,9 @@ const highRiskParts = new Set([
   'test-results',
 ]);
 
-const publicConfigTemplate =
-  /(?:^|[/\\])(?:\.env|\.dev\.vars)\.(?:example|sample|template)$/i;
+const publicConfigTemplate = /(?:^|[/\\])(?:\.env|\.dev\.vars)\.(?:example|sample|template)$/i;
 
-const privateConfigFile =
-  /(?:^|[/\\])(?:\.env(?:\.[^/\\]+)?|\.dev\.vars)$/i;
+const privateConfigFile = /(?:^|[/\\])(?:\.env(?:\.[^/\\]+)?|\.dev\.vars)$/i;
 
 const highRiskNames = [
   /\.(?:bak|backup|key|pem|p12|snapshot|tar|tar\.gz|tgz|zip)$/i,
@@ -93,10 +91,7 @@ export function findPathViolation(file) {
     return 'high-risk path must not be public';
   }
 
-  if (
-    privateConfigFile.test(file) &&
-    !publicConfigTemplate.test(file)
-  ) {
+  if (privateConfigFile.test(file) && !publicConfigTemplate.test(file)) {
     return 'private environment or local configuration file must not be public';
   }
 
