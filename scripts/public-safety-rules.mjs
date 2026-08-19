@@ -3,6 +3,7 @@ import { extname, normalize, sep } from 'node:path';
 const highRiskParts = new Set([
   '.private',
   '.vercel',
+  '.wrangler',
   'artifacts',
   'blob-report',
   'coverage',
@@ -15,9 +16,10 @@ const highRiskParts = new Set([
 
 const publicConfigTemplate = /(?:^|[/\\])(?:\.env|\.dev\.vars)\.(?:example|sample|template)$/i;
 
-const privateConfigFile = /(?:^|[/\\])(?:\.env(?:\.[^/\\]+)?|\.dev\.vars)$/i;
+const privateConfigFile = /(?:^|[/\\])(?:\.env(?:\.[^/\\]+)?|\.dev\.vars(?:\.[^/\\]+)?)$/i;
 
 const highRiskNames = [
+  /(?:^|\/)SOT\.md$/i,
   /\.(?:bak|backup|key|pem|p12|snapshot|tar|tar\.gz|tgz|zip)$/i,
   /(?:^|\/)finance-backup-[^/]+\.json$/i,
   /(?:^|\/)finance-transactions-[^/]+\.csv$/i,
@@ -35,11 +37,14 @@ const textExtensions = new Set([
   '.html',
   '.js',
   '.json',
+  '.jsonc',
   '.jsx',
   '.md',
   '.mjs',
   '.nvmrc',
+  '.sql',
   '.svg',
+  '.toml',
   '.ts',
   '.tsx',
   '.txt',
@@ -90,12 +95,11 @@ export function findPathViolation(file) {
   if (parts.some((part) => highRiskParts.has(part))) {
     return 'high-risk path must not be public';
   }
-
-  if (privateConfigFile.test(file) && !publicConfigTemplate.test(file)) {
+  if (privateConfigFile.test(normalized) && !publicConfigTemplate.test(normalized)) {
     return 'private environment or local configuration file must not be public';
   }
 
-  if (highRiskNames.some((pattern) => pattern.test(file))) {
+  if (highRiskNames.some((pattern) => pattern.test(normalized))) {
     return 'private export, secret, or archive filename must not be public';
   }
   if (/personalPlanFixture/i.test(file)) {
@@ -112,9 +116,10 @@ export function findPathViolation(file) {
 }
 
 export function isTextCandidate(file) {
-  if (publicConfigTemplate.test(file)) return true;
+  const normalized = normalize(file);
+  if (publicConfigTemplate.test(normalized)) return true;
 
-  return textExtensions.has(extname(file).toLowerCase());
+  return textExtensions.has(extname(normalized).toLowerCase());
 }
 
 export function findContentViolations(file, content) {

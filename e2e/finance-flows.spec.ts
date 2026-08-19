@@ -1,9 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import {
   createSyntheticFinanceFixtureData,
   defaultSyntheticFinanceFixtureInput,
 } from '../src/tests/fixtures/syntheticFinanceFixture';
+
+const APPLICATION_VERSION = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    version: string;
+  }
+).version;
 
 test.beforeEach(async ({ page }, testInfo) => {
   const initialTime = testInfo.title.includes('midnight rollover')
@@ -1048,7 +1055,7 @@ test('forecast scenario is isolated and JSON/Markdown export can restore data', 
   const backupPath = await backupDownload.path();
   if (!backupPath) throw new Error('JSON backup nije sačuvan na disk.');
   const backupText = await readFile(backupPath, 'utf8');
-  expect(backupText).toContain('"version": "2.3.2"');
+  expect(backupText).toContain(`"version": "${APPLICATION_VERSION}"`);
   await expect(page.getByText('Backup je svež — napravljen danas.')).toBeVisible();
 
   const markdownDownloadPromise = page.waitForEvent('download');
@@ -1058,7 +1065,7 @@ test('forecast scenario is isolated and JSON/Markdown export can restore data', 
   if (!markdownPath) throw new Error('Markdown export nije sačuvan na disk.');
   const markdown = await readFile(markdownPath, 'utf8');
   expect(markdown).toContain('# Mirna Financial Snapshot');
-  expect(markdown).toContain('- appVersion: 2.3.2');
+  expect(markdown).toContain(`- appVersion: ${APPLICATION_VERSION}`);
   expect(markdown).toContain('## Current actual balances');
   expect(markdown).toContain('## Balance adjustments');
   expect(markdown).toContain('## Cash ledger reconciliation');
@@ -1266,7 +1273,7 @@ test('direct routes reload and supported viewports have no horizontal page overf
     await page.goto(route);
     await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible();
   }
-  await expect(page.getByText('Mirna 2.3.2', { exact: true })).toBeVisible();
+  await expect(page.getByText(`Mirna ${APPLICATION_VERSION}`, { exact: true })).toBeVisible();
   await expect(page.getByText(/AGPL-3.0-only/)).toBeVisible();
   const sourceLink = page.getByRole('link', { name: /GitHub/ });
   await expect(sourceLink).toHaveAttribute('href', 'https://github.com/Gibo2706/mirna');

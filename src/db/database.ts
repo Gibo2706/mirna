@@ -15,6 +15,25 @@ import type {
   VariableBudget,
 } from '@/domain/types';
 import { inferLegacyGoalType, isGoalCompletionEvent } from '@/domain/goals';
+import { manifestBodyHash } from '@/domain/sync/manifest';
+import type {
+  SyncConflictRecord,
+  SyncCheckpointRecord,
+  SyncDeviceRecord,
+  SyncDeviceAliasRecord,
+  SyncEntityStateRecord,
+  SyncFrontierRecord,
+  SyncInboxRecord,
+  SyncKeyRecord,
+  SyncMetadataRecord,
+  SyncOutboxRecord,
+  SyncPairingFinalizationRecord,
+  SyncVaultRecord,
+} from './sync/records';
+import type {
+  SyncBetaDiagnosticEventRecord,
+  SyncBetaSupportRecord,
+} from './sync/diagnostic-records';
 
 export class FinanceDatabase extends Dexie {
   accounts!: EntityTable<Account, 'id'>;
@@ -30,6 +49,20 @@ export class FinanceDatabase extends Dexie {
   presets!: EntityTable<QuickAddPreset, 'id'>;
   salaryScenarios!: EntityTable<SalaryScenario, 'id'>;
   settings!: EntityTable<AppSettings, 'id'>;
+  syncVault!: EntityTable<SyncVaultRecord, 'id'>;
+  syncDevice!: EntityTable<SyncDeviceRecord, 'id'>;
+  syncKeys!: EntityTable<SyncKeyRecord, 'id'>;
+  syncOutbox!: EntityTable<SyncOutboxRecord, 'id'>;
+  syncInbox!: EntityTable<SyncInboxRecord, 'id'>;
+  syncConflicts!: EntityTable<SyncConflictRecord, 'id'>;
+  syncFrontier!: EntityTable<SyncFrontierRecord, 'id'>;
+  syncMetadata!: EntityTable<SyncMetadataRecord, 'id'>;
+  syncCheckpoints!: EntityTable<SyncCheckpointRecord, 'id'>;
+  syncEntityStates!: EntityTable<SyncEntityStateRecord, 'id'>;
+  syncBetaSupport!: EntityTable<SyncBetaSupportRecord, 'id'>;
+  syncBetaDiagnosticEvents!: EntityTable<SyncBetaDiagnosticEventRecord, 'id'>;
+  syncPairingFinalizations!: EntityTable<SyncPairingFinalizationRecord, 'id'>;
+  syncDeviceAliases!: EntityTable<SyncDeviceAliasRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -237,23 +270,128 @@ export class FinanceDatabase extends Dexie {
           }
         }
       });
+
+    this.version(6).stores({
+      syncVault: 'id, &vaultId, status, keyEpoch',
+      syncDevice: 'id, vaultId, &deviceId, authorizationExpiresAt',
+      syncKeys: 'id, &[vaultId+keyEpoch], purpose, retiredAt',
+      syncOutbox: 'id, vaultId, &operationId, [vaultId+state], [vaultId+deviceSequence], createdAt',
+      syncInbox: 'id, vaultId, &operationId, [vaultId+state], [vaultId+serverCursor], receivedAt',
+      syncConflicts:
+        'id, vaultId, entityId, resolutionState, [vaultId+resolutionState], detectedAt',
+      syncFrontier: 'id, vaultId, &deviceId, [vaultId+deviceId], acknowledgedServerCursor',
+      syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
+    });
+
+    this.version(7)
+      .stores({
+        syncCheckpoints: 'id, &vaultId, createdAt',
+      })
+      .upgrade(async (transaction) => {
+        const manifestHashes = new Map(
+          await Promise.all(
+            (await transaction.table<SyncVaultRecord>('syncVault').toArray()).map(
+              async (vault) => [vault.vaultId, await manifestBodyHash(vault.manifest)] as const,
+            ),
+          ),
+        );
+        await transaction
+          .table<SyncMetadataRecord>('syncMetadata')
+          .toCollection()
+          .modify((metadata) => {
+            metadata.lastSnapshotRevision ??= 0;
+            metadata.lastSnapshotId ??= null;
+            metadata.lastSnapshotHash ??= null;
+            metadata.lastSnapshotContentHash ??= null;
+            metadata.lastManifestHash ??= manifestHashes.get(metadata.vaultId) ?? '';
+            metadata.lastLocalDataHash ??= null;
+          });
+      });
+
+    this.version(8).stores({
+      syncOutbox:
+        'id, vaultId, &operationId, [vaultId+state], [vaultId+deviceSequence], [vaultId+mutationGroupId+mutationGroupIndex], createdAt',
+      syncInbox:
+        'id, vaultId, &operationId, [vaultId+state], [vaultId+serverCursor], [vaultId+deviceId+deviceSequence], [vaultId+mutationGroupId+mutationGroupIndex], receivedAt',
+      syncEntityStates:
+        'id, vaultId, [vaultId+entityType+entityId], [vaultId+tombstone], updatedAt',
+    });
+
+    this.version(9)
+      .stores({
+        syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
+      })
+      .upgrade(async (transaction) => {
+        await transaction
+          .table<SyncMetadataRecord>('syncMetadata')
+          .toCollection()
+          .modify((metadata) => {
+            metadata.lastSnapshotServerCursor ??= metadata.lastServerCursor ?? 0;
+          });
+      });
+
+    this.version(10).stores({
+      syncConflicts:
+        'id, vaultId, entityId, mutationGroupId, resolutionState, [vaultId+resolutionState], [vaultId+mutationGroupId], detectedAt',
+    });
+
+    // Beta support metadata is deliberately isolated from financeTables, sync
+    // snapshots and backup/export payloads. It never contains financial data.
+    this.version(11).stores({
+      syncBetaSupport: 'id, &supportId, createdAt',
+      syncBetaDiagnosticEvents: 'id, createdAt, eventType, requestId',
+    });
+
+    this.version(12).stores({
+      syncPairingFinalizations: 'id, &requestId, createdAt',
+    });
+
+    this.version(13)
+      .stores({
+        syncMetadata: 'id, &vaultId, lastSuccessfulSyncAt',
+      })
+      .upgrade(async (transaction) => {
+        await transaction
+          .table<SyncMetadataRecord>('syncMetadata')
+          .toCollection()
+          .modify((metadata) => {
+            metadata.bootstrapMode ??=
+              metadata.lastSnapshotRevision > 0
+                ? 'complete'
+                : metadata.lastSnapshotId !== null
+                  ? 'paired-download'
+                  : 'creator-upload';
+
+            if (metadata.bootstrapMode === 'paired-download') {
+              // Novi uređaj nikada ne sme da uploaduje svoju praznu/default bazu
+              // kao prvi snapshot postojećeg trezora.
+              metadata.firstUploadConsent = 'declined';
+            }
+          });
+      });
+
+    // Friendly device labels are local-only UI metadata. They are deliberately
+    // absent from financeTables, encrypted snapshots and protocol payloads.
+    this.version(14).stores({
+      syncDeviceAliases: 'id, vaultId, deviceId, &[vaultId+deviceId], updatedAt',
+    });
   }
 }
 
 export const db = new FinanceDatabase();
 
-export const financeTables = () => [
-  db.transactions,
-  db.debtPayments,
-  db.accounts,
-  db.categories,
-  db.plannedIncomes,
-  db.commitments,
-  db.variableBudgets,
-  db.goals,
-  db.debts,
-  db.plannedEvents,
-  db.presets,
-  db.salaryScenarios,
-  db.settings,
+export const financeTables = (database: FinanceDatabase = db) => [
+  database.transactions,
+  database.debtPayments,
+  database.accounts,
+  database.categories,
+  database.plannedIncomes,
+  database.commitments,
+  database.variableBudgets,
+  database.goals,
+  database.debts,
+  database.plannedEvents,
+  database.presets,
+  database.salaryScenarios,
+  database.settings,
 ];

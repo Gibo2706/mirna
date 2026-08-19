@@ -7,12 +7,13 @@ purposes.
 
 ## Direct dependencies
 
-- **Apache-2.0:** `class-variance-authority`, `dexie` and `dexie-react-hooks`
+- **Apache-2.0:** `canonicalize`, `class-variance-authority`, `dexie` and
+  `dexie-react-hooks`
 - **ISC:** `lucide-react`
 - **MIT:** `@radix-ui/react-alert-dialog`, `@radix-ui/react-dialog`,
   `@radix-ui/react-select`, `@tailwindcss/vite`, `clsx`, `date-fns`, `react`,
-  `react-dom`, `react-router`, `recharts`, `tailwind-merge`, `tw-animate-css`,
-  `vaul` and `zod`
+  `qrcode`, `react-dom`, `react-router`, `recharts`, `tailwind-merge`,
+  `tw-animate-css`, `vaul` and `zod`
 
 These declarations cover browser code, styles, or production-build support.
 The resolved non-development dependency tree also includes 0BSD,

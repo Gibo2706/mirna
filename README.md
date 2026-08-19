@@ -64,9 +64,22 @@ provider or allow imported planning data to create ledger history.
 
 ## Local-first by design
 
-Mirna stores financial data in IndexedDB for the current browser origin. It has no application
-account, cloud synchronization, analytics, bank integration, or server-side copy of the
+Mirna stores financial data in IndexedDB for the current browser origin. The published stable
+application has no application account, analytics, bank integration, or server-side copy of the
 financial database. Exports happen only when requested.
+
+The `2.4.0-beta.1` beta source contains an optional, accountless, end-to-end encrypted sync
+implementation. It is disabled unless an operator supplies an explicit feature flag and API URL,
+is isolated from the stable production application, and has not completed an independent security
+review. The dedicated experimental target is
+[Mirna Sync — Beta](https://mirna-finansije-beta.vercel.app); use only synthetic test data and keep
+a local JSON backup. Android PWA and desktop pairing/bootstrap/sync have completed a real staging
+exercise, but this is not a production or independent-audit claim. While the enabled app is open,
+one global runtime synchronizes on cold start, local changes, reconnect and stale foreground
+resume; it does not claim periodic execution after the OS kills the PWA process. The sync
+service receives ciphertext and operational metadata, not content-decryption keys. See the
+[sync architecture](docs/SYNC-ARCHITECTURE.md), [protocol](docs/SYNC-PROTOCOL.md),
+[recovery guide](docs/SYNC-RECOVERY.md), and [security model](docs/SYNC-SECURITY-MODEL.md).
 
 > **Keep a separate backup.** Browser data can be cleared by profile changes, storage cleanup,
 > operating-system actions, or PWA removal. JSON, CSV, and Markdown exports are plaintext and
@@ -126,6 +139,7 @@ npm run public:history
 npm run check
 npm run test:coverage
 npm run test:e2e
+npm run sync:test:e2e
 npm audit --omit=dev
 ```
 
@@ -141,6 +155,9 @@ npm run docs:assets
 - [Financial invariants](docs/FINANCIAL-INVARIANTS.md)
 - [Security model](docs/SECURITY-MODEL.md)
 - [AI Plan Bridge](docs/AI-PLAN-BRIDGE.md)
+- [Encrypted sync architecture](docs/SYNC-ARCHITECTURE.md)
+- [Encrypted sync protocol](docs/SYNC-PROTOCOL.md)
+- [Encrypted sync performance](docs/SYNC-PERFORMANCE.md)
 - [Privacy](PRIVACY.md)
 - [Contributing](CONTRIBUTING.md)
 

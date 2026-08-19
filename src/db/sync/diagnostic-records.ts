@@ -1,0 +1,31 @@
+export interface SyncBetaSupportRecord {
+  readonly id: 'sync-beta-support';
+  readonly supportId: string;
+  readonly createdAt: string;
+}
+
+export interface SyncBetaDiagnosticEventRecord {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly eventType: string;
+  readonly severity: 'info' | 'error';
+  readonly action?: string;
+  readonly requestId?: string;
+  readonly safeCode?: string;
+  readonly verificationReason?: string;
+  readonly verificationAttemptId?: string;
+  readonly accountingCategory?: string;
+  readonly accountingReason?: string;
+  readonly reservationPhase?: string;
+  readonly route?: string;
+  readonly faultRole?: string;
+  readonly originRequestId?: string;
+  readonly originRoute?: string;
+  readonly lifecycleOperation?: string;
+  readonly businessWorkStarted?: boolean;
+  readonly businessCommitted?: boolean;
+  readonly serviceFlagsChanged?: boolean;
+  readonly workerBuild?: string;
+  readonly build?: string;
+  readonly online?: boolean;
+}

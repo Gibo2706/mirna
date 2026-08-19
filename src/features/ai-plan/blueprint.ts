@@ -4,6 +4,8 @@ import { assertFinanceDataIntegrity } from '@/domain/integrity';
 import { financeDataSchema } from '@/domain/schemas';
 import type { FinanceData } from '@/domain/types';
 import { db, financeTables } from '@/db/database';
+import { readRawFinanceDataInTransaction } from '@/db/finance-data';
+import { auditFinanceDataChanges, auditedFinanceTransaction } from '@/db/sync/mutation-audit';
 import { readFinanceData } from '@/db/queries';
 import { createId } from '@/lib/id';
 
@@ -661,7 +663,13 @@ export async function importPlanBlueprint(
     );
   }
   const data = normalizePlanBlueprint(preview.blueprint, onboardingCompleted);
-  await db.transaction('rw', financeTables(), async () => {
+  await auditedFinanceTransaction(financeTables(), async (audit) => {
+    const previous = await readRawFinanceDataInTransaction(db);
+    if (hasFinancialData(previous)) {
+      throw new Error(
+        'Blueprint je namenjen praznoj Mirni. Za postojeći plan koristite Predlog izmena.',
+      );
+    }
     await Promise.all(financeTables().map((table) => table.clear()));
     await db.accounts.bulkAdd(data.accounts);
     await db.categories.bulkAdd(data.categories);
@@ -674,6 +682,7 @@ export async function importPlanBlueprint(
     await db.presets.bulkAdd(data.presets);
     await db.salaryScenarios.bulkAdd(data.salaryScenarios);
     await db.settings.bulkAdd(data.settings);
+    await auditFinanceDataChanges(audit, previous, data);
   });
 }
 
