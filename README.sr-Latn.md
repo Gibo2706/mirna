@@ -71,7 +71,11 @@ finansijske baze. Izvoz nastaje samo kada ga korisnik zatraži.
 Beta izvor `2.4.0-beta.1` sadrži opcionu, accountless, end-to-end šifrovanu sinhronizaciju.
 Ona je isključena bez eksplicitnog feature flag-a i API URL-a, nije postavljena u produkciju i
 nije prošla nezavisan bezbednosni pregled. Sync servis dobija šifrat i operativne metapodatke,
-ali ne i ključeve za dešifrovanje sadržaja. Pogledajte [sync arhitekturu](docs/SYNC-ARCHITECTURE.md),
+ali ne i ključeve za dešifrovanje sadržaja. Realan beta staging je prošao Android PWA/desktop
+povezivanje, početno preuzimanje i sinhronizaciju; to nije produkcioni niti nezavisni bezbednosni
+sertifikat. Dok je uključena aplikacija aktivna, jedan globalni runtime sinhronizuje pri pokretanju,
+lokalnoj promeni, povratku mreže i dovoljno dugom povratku u prvi plan. Mirna ne tvrdi da periodično
+sinhronizuje nakon što operativni sistem ugasi PWA proces. Pogledajte [sync arhitekturu](docs/SYNC-ARCHITECTURE.md),
 [protokol](docs/SYNC-PROTOCOL.md), [oporavak](docs/SYNC-RECOVERY.md) i
 [bezbednosni model](docs/SYNC-SECURITY-MODEL.md).
 

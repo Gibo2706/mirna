@@ -8,6 +8,17 @@ export const SYNC_METADATA_RECORD_ID = 'sync-metadata' as const;
 export const SYNC_CHECKPOINT_RECORD_ID = 'sync-safety-checkpoint' as const;
 export const SYNC_PAIRING_FINALIZATION_RECORD_ID = 'sync-pairing-finalization' as const;
 
+export type SyncDeviceKind = 'phone' | 'computer' | 'tablet' | 'other';
+
+export interface SyncDeviceAliasRecord {
+  id: string;
+  vaultId: string;
+  deviceId: string;
+  label: string;
+  kind?: SyncDeviceKind;
+  updatedAt: string;
+}
+
 export const localVaultKeyRecordId = (vaultId: string, keyEpoch: number): string =>
   `${vaultId}:epoch:${keyEpoch}:vault-master-key`;
 

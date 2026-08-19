@@ -395,10 +395,7 @@ describe('scheduled cleanup', () => {
   });
 
   it('removes only eligible D1/R2 data in bounded, idempotent batches', async () => {
-    const {
-      temporarySnapshotKey,
-      committedSnapshotKey,
-    } = await seedExpiredData();
+    const { temporarySnapshotKey, committedSnapshotKey } = await seedExpiredData();
 
     await runCron();
     expect(await scalar('SELECT COUNT(*) AS count FROM auth_challenges')).toBe(0);
@@ -406,17 +403,9 @@ describe('scheduled cleanup', () => {
     expect(await scalar('SELECT COUNT(*) AS count FROM access_sessions')).toBe(0);
     expect(await scalar('SELECT COUNT(*) AS count FROM snapshots')).toBe(1);
     expect(await scalar('SELECT COUNT(*) AS count FROM sync_changes')).toBe(0);
-    expect(
-      await env.MIRNA_SYNC_BUCKET.head(
-        temporarySnapshotKey,
-      ),
-    ).toBeNull();
+    expect(await env.MIRNA_SYNC_BUCKET.head(temporarySnapshotKey)).toBeNull();
 
-    expect(
-      await env.MIRNA_SYNC_BUCKET.head(
-        committedSnapshotKey,
-      ),
-    ).not.toBeNull();
+    expect(await env.MIRNA_SYNC_BUCKET.head(committedSnapshotKey)).not.toBeNull();
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_envelopes')).toBe(1);
     expect(await scalar('SELECT COUNT(*) AS count FROM pairing_requests')).toBe(1);
 

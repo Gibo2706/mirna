@@ -2,7 +2,13 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { AppShell } from '@/components/AppShell';
 import { useFinanceSnapshot } from '@/db/queries';
-import { isBetaApplication, readSyncClientConfig } from '@/features/sync/config';
+import {
+  isBetaApplication,
+  readSyncClientConfig,
+  type SyncClientConfig,
+} from '@/features/sync/config';
+import { SyncRuntimeProvider } from '@/features/sync/runtime/SyncRuntimeProvider';
+import type { SyncUiServices } from '@/features/sync/ui-services';
 import { ThemeSync } from './ThemeSync';
 
 // Start fetching the first route while IndexedDB opens to avoid a network/DB waterfall on cold start.
@@ -76,11 +82,15 @@ const BetaBanner = () => (
   </aside>
 );
 
-export const App = () => {
+const AppContent = ({
+  syncConfig,
+  betaApplication,
+}: {
+  readonly syncConfig: SyncClientConfig;
+  readonly betaApplication: boolean;
+}) => {
   const snapshot = useFinanceSnapshot();
   const location = useLocation();
-  const syncConfig = readSyncClientConfig();
-  const betaApplication = isBetaApplication();
   const withEnvironmentMarker = (content: React.ReactNode) => (
     <>
       {betaApplication ? <BetaBanner /> : null}
@@ -131,5 +141,15 @@ export const App = () => {
         </Routes>
       </Suspense>
     </>,
+  );
+};
+
+export const App = ({ syncServices }: { readonly syncServices?: SyncUiServices } = {}) => {
+  const syncConfig = readSyncClientConfig();
+  const content = <AppContent syncConfig={syncConfig} betaApplication={isBetaApplication()} />;
+  return syncConfig.enabled ? (
+    <SyncRuntimeProvider services={syncServices}>{content}</SyncRuntimeProvider>
+  ) : (
+    content
   );
 };

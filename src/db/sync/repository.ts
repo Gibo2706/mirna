@@ -386,6 +386,7 @@ const syncTables = (database: FinanceDatabase) => [
   database.syncCheckpoints,
   database.syncEntityStates,
   database.syncPairingFinalizations,
+  database.syncDeviceAliases,
 ];
 
 const assertCompatibleExistingVault = async (

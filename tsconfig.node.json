@@ -19,6 +19,8 @@
   },
   "include": [
     "vite.config.ts",
+    "vercel.ts",
+    "vercel.test.ts",
     "playwright.config.ts",
     "playwright.sync.config.ts",
     "eslint.config.js",

@@ -179,13 +179,22 @@ const validateExactCleanupAccounting = (reservation) => {
     const committedField = `committed_${suffix}`;
     const releasedField = `released_${suffix}`;
 
-    const reserved = numeric(reservation[reservedField], `${reservation.reservation_id}.${reservedField}`);
-    const measured = numeric(reservation[measuredField], `${reservation.reservation_id}.${measuredField}`);
+    const reserved = numeric(
+      reservation[reservedField],
+      `${reservation.reservation_id}.${reservedField}`,
+    );
+    const measured = numeric(
+      reservation[measuredField],
+      `${reservation.reservation_id}.${measuredField}`,
+    );
     const committed = numeric(
       reservation[committedField],
       `${reservation.reservation_id}.${committedField}`,
     );
-    const released = numeric(reservation[releasedField], `${reservation.reservation_id}.${releasedField}`);
+    const released = numeric(
+      reservation[releasedField],
+      `${reservation.reservation_id}.${releasedField}`,
+    );
 
     if (committed !== measured) {
       throw new Error(
@@ -220,7 +229,9 @@ const validateExactCleanupAccounting = (reservation) => {
 const validateScheduledCleanupReservation = (reservation) => {
   const reservationId = String(reservation?.reservation_id ?? '');
   if (!reservationId.endsWith(SCHEDULED_CLEANUP_SUFFIX)) {
-    throw new Error(`Repair je odbijen: ${reservationId || 'nepoznata rezervacija'} nema cleanup sufiks.`);
+    throw new Error(
+      `Repair je odbijen: ${reservationId || 'nepoznata rezervacija'} nema cleanup sufiks.`,
+    );
   }
 
   const incidentRequestId = reservationId.slice(0, -SCHEDULED_CLEANUP_SUFFIX.length);
@@ -280,7 +291,9 @@ if (useCurrentIncident) {
   );
 
   if (flagRows.length !== 1) {
-    throw new Error(`Repair je odbijen: service_flags singleton nije jedinstven. rows=${flagRows.length}`);
+    throw new Error(
+      `Repair je odbijen: service_flags singleton nije jedinstven. rows=${flagRows.length}`,
+    );
   }
 
   const unresolvedRows = query(
@@ -529,7 +542,9 @@ if (mode === 'repair' && operation === 'scheduled-cleanup') {
 
   if (currentCleanupReservationIds.length > 0) {
     const foundIds = new Set(targetRows.map((row) => row.reservation_id));
-    const missingIds = currentCleanupReservationIds.filter((reservationId) => !foundIds.has(reservationId));
+    const missingIds = currentCleanupReservationIds.filter(
+      (reservationId) => !foundIds.has(reservationId),
+    );
     if (missingIds.length > 0 || targetRows.length !== currentCleanupReservationIds.length) {
       throw new Error(
         `Repair je odbijen: snapshot nerešenih cleanup incidenata se promenio. missing=${JSON.stringify(

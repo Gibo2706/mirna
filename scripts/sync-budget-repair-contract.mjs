@@ -9,9 +9,7 @@ const numeric = (value, description) => {
   const parsed = Number(value);
 
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(
-      `Repair je odbijen: ${description} nije nenegativan ceo broj.`,
-    );
+    throw new Error(`Repair je odbijen: ${description} nije nenegativan ceo broj.`);
   }
 
   return parsed;
@@ -43,30 +41,16 @@ const validateExactUnderestimationAccounting = (reservation) => {
     const committedField = `committed_${suffix}`;
     const releasedField = `released_${suffix}`;
 
-    const reserved = numeric(
-      reservation[reservedField],
-      `scheduled-cleanup.${reservedField}`,
-    );
+    const reserved = numeric(reservation[reservedField], `scheduled-cleanup.${reservedField}`);
 
-    const measured = numeric(
-      reservation[measuredField],
-      `scheduled-cleanup.${measuredField}`,
-    );
+    const measured = numeric(reservation[measuredField], `scheduled-cleanup.${measuredField}`);
 
-    const committed = numeric(
-      reservation[committedField],
-      `scheduled-cleanup.${committedField}`,
-    );
+    const committed = numeric(reservation[committedField], `scheduled-cleanup.${committedField}`);
 
-    const released = numeric(
-      reservation[releasedField],
-      `scheduled-cleanup.${releasedField}`,
-    );
+    const released = numeric(reservation[releasedField], `scheduled-cleanup.${releasedField}`);
 
     if (committed !== measured) {
-      throw new Error(
-        `Repair je odbijen: ${committedField} nije jednak exact measured rezultatu.`,
-      );
+      throw new Error(`Repair je odbijen: ${committedField} nije jednak exact measured rezultatu.`);
     }
 
     const expectedReleased = Math.max(reserved - measured, 0);
@@ -88,9 +72,7 @@ const validateExactUnderestimationAccounting = (reservation) => {
   }
 
   if (!hasUnderestimation) {
-    throw new Error(
-      'Repair je odbijen: reservation nema nijednu stvarno potcenjenu metriku.',
-    );
+    throw new Error('Repair je odbijen: reservation nema nijednu stvarno potcenjenu metriku.');
   }
 
   return exactFields;
@@ -293,59 +275,34 @@ export const validateScheduledCleanupRepair = ({
     reservation.route_key !== 'scheduled-cleanup' ||
     reservation.state !== 'committed' ||
     reservation.measurement_exact !== 1 ||
-    reservation.settlement_failure_code !==
-    'USAGE_RESERVATION_UNDERESTIMATED' ||
+    reservation.settlement_failure_code !== 'USAGE_RESERVATION_UNDERESTIMATED' ||
     reservation.business_committed !== 0
   ) {
-    throw new Error(
-      'Repair je odbijen: scheduled-cleanup reservation nema očekivanu strukturu.',
-    );
+    throw new Error('Repair je odbijen: scheduled-cleanup reservation nema očekivanu strukturu.');
   }
 
-  const createdAt = numeric(
-    reservation.created_at,
-    'scheduled-cleanup.created_at',
-  );
+  const createdAt = numeric(reservation.created_at, 'scheduled-cleanup.created_at');
 
-  const settledAt = numeric(
-    reservation.settled_at,
-    'scheduled-cleanup.settled_at',
-  );
+  const settledAt = numeric(reservation.settled_at, 'scheduled-cleanup.settled_at');
 
   if (settledAt < createdAt) {
-    throw new Error(
-      'Repair je odbijen: scheduled-cleanup settled_at prethodi created_at.',
-    );
+    throw new Error('Repair je odbijen: scheduled-cleanup settled_at prethodi created_at.');
   }
 
-  const exactFields =
-    validateExactUnderestimationAccounting(reservation);
+  const exactFields = validateExactUnderestimationAccounting(reservation);
 
   const isReconciled = reservation.reconciled_at !== null;
 
-  if (
-    isReconciled &&
-    reservation.reconciliation_code !==
-    SCHEDULED_CLEANUP_RECONCILIATION_CODE
-  ) {
-    throw new Error(
-      'Repair je odbijen: scheduled-cleanup ima nepoznat reconciliation kod.',
-    );
+  if (isReconciled && reservation.reconciliation_code !== SCHEDULED_CLEANUP_RECONCILIATION_CODE) {
+    throw new Error('Repair je odbijen: scheduled-cleanup ima nepoznat reconciliation kod.');
   }
 
-  if (
-    !isReconciled &&
-    reservation.reconciliation_code !== null
-  ) {
-    throw new Error(
-      'Repair je odbijen: nereconciliovana rezervacija već ima reconciliation kod.',
-    );
+  if (!isReconciled && reservation.reconciliation_code !== null) {
+    throw new Error('Repair je odbijen: nereconciliovana rezervacija već ima reconciliation kod.');
   }
 
   if (!serviceFlags) {
-    throw new Error(
-      'Repair je odbijen: scheduled-cleanup service flags nedostaju.',
-    );
+    throw new Error('Repair je odbijen: scheduled-cleanup service flags nedostaju.');
   }
 
   const admissionFlagsAreUntouched =
@@ -362,8 +319,7 @@ export const validateScheduledCleanupRepair = ({
 
   const activeMatchingFault =
     serviceFlags.accounting_fault === 1 &&
-    serviceFlags.state_reason ===
-    'USAGE_RESERVATION_UNDERESTIMATED' &&
+    serviceFlags.state_reason === 'USAGE_RESERVATION_UNDERESTIMATED' &&
     serviceFlags.state_request_id === requestId &&
     serviceFlags.accounting_fault_at === settledAt;
 
@@ -374,15 +330,10 @@ export const validateScheduledCleanupRepair = ({
     serviceFlags.accounting_fault_at === null;
 
   if (!activeMatchingFault && !alreadyCleared) {
-    throw new Error(
-      'Repair je odbijen: scheduled-cleanup service flags ne pripadaju incidentu.',
-    );
+    throw new Error('Repair je odbijen: scheduled-cleanup service flags ne pripadaju incidentu.');
   }
 
-  const unresolvedCount = numeric(
-    unresolvedIncidentCount,
-    'unresolved accounting incident count',
-  );
+  const unresolvedCount = numeric(unresolvedIncidentCount, 'unresolved accounting incident count');
 
   if (!isReconciled && unresolvedCount !== 1) {
     throw new Error(
@@ -398,8 +349,7 @@ export const validateScheduledCleanupRepair = ({
 
   return {
     reservationId,
-    reconciliationCode:
-      SCHEDULED_CLEANUP_RECONCILIATION_CODE,
+    reconciliationCode: SCHEDULED_CLEANUP_RECONCILIATION_CODE,
     reservationNeedsUpdate: !isReconciled,
     ...(!isReconciled ? { exactFields } : {}),
   };
@@ -450,7 +400,7 @@ export const assertPairingRepairPostconditions = ({
   if (
     JSON.stringify(afterRequest) !== JSON.stringify(beforeRequest) ||
     JSON.stringify(withoutReconciliationFields(afterRoute)) !==
-    JSON.stringify(withoutReconciliationFields(beforeRoute)) ||
+      JSON.stringify(withoutReconciliationFields(beforeRoute)) ||
     JSON.stringify(afterPairingEvidence) !== JSON.stringify(beforePairingEvidence)
   ) {
     throw new Error(

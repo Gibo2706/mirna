@@ -23,6 +23,7 @@ const PLAINTEXT_SENTINEL = 'MIRNA_E2E_PLAINTEXT_SENTINEL_7F4B6A';
 const PHONE_DEVICE_NAME = 'Sintetički telefon';
 const DESKTOP_DEVICE_NAME = 'Sintetički računar';
 const RECOVERED_DEVICE_NAME = 'Sintetički oporavljeni uređaj';
+const LOCAL_DEVICE_ALIAS_SENTINEL = 'LOKALNI-ALIAS-NE-SALJI';
 
 const repositoryRoot = resolve(import.meta.dirname, '..');
 const workerState = resolve(repositoryRoot, '.wrangler/sync-e2e-state');
@@ -98,6 +99,22 @@ const captureSyncRequestBodies = (context: BrowserContext): void => {
 const dismissOfflineReady = async (page: Page): Promise<void> => {
   const button = page.getByRole('button', { name: 'U redu' });
   if (await button.isVisible().catch(() => false)) await button.click();
+};
+
+const expectSyncActive = async (page: Page): Promise<void> => {
+  await expect(
+    page.getByRole('heading', {
+      name: /^(?:Sinhronizacija je uključena|Sve je sinhronizovano)$/u,
+    }),
+  ).toBeVisible();
+};
+
+const expectPairedBootstrap = async (page: Page): Promise<void> => {
+  await expect(
+    page.getByRole('heading', {
+      name: /^(?:Povezano — preuzimanje počinje automatski|Preuzimam vaše podatke…|Sve je sinhronizovano)$/u,
+    }),
+  ).toBeVisible();
 };
 
 const seedSyntheticPlan = async (page: Page): Promise<void> => {
@@ -370,6 +387,25 @@ const addPresetExpense = async (
   await expect(page.getByText('Transakcija je sačuvana.')).toBeVisible();
 };
 
+const addCustomExpense = async (page: Page, description: string, amount: number): Promise<void> => {
+  if (new URL(page.url()).pathname !== '/') await page.goto(`${ENABLED_APP_ORIGIN}/`);
+  await dismissOfflineReady(page);
+  await page.getByRole('button', { name: 'Dodaj transakciju' }).click();
+  await page.getByRole('button', { name: /Drugo.*Unesite iznos/i }).click();
+  await page.getByLabel('Iznos (ceo broj RSD)').fill(String(amount));
+  await page.getByLabel('Kategorija').selectOption({ index: 1 });
+  await page.getByLabel('Opis').fill(description);
+  await page.getByRole('button', { name: `Sačuvaj ${amount} RSD` }).click();
+  await page.getByRole('button', { name: 'Potvrdi i sačuvaj' }).click();
+  await expect(page.getByText('Transakcija je sačuvana.')).toBeVisible();
+};
+
+const transactionCount = async (page: Page, description: string): Promise<number> => {
+  const finance = await readLocalFinanceMergeView(page);
+  return finance.transactions.filter((transaction) => transaction.description === description)
+    .length;
+};
+
 const editTransactionNote = async (
   page: Page,
   description: string,
@@ -473,7 +509,7 @@ const alterChecksum = (code: string): string =>
 
 const startPairingRequest = async (page: Page, deviceName: string): Promise<string> => {
   await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
-  await expect(page.getByRole('heading', { name: 'Šifrovana sinhronizacija' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Sinhronizacija' })).toBeVisible();
   await page.getByRole('button', { name: 'Poveži ovaj uređaj' }).click();
   await page.getByLabel('Naziv ovog uređaja').fill(deviceName);
   await page.getByRole('button', { name: 'Napravi zahtev za povezivanje' }).click();
@@ -489,10 +525,19 @@ const startPairingRequest = async (page: Page, deviceName: string): Promise<stri
   return pairingCode;
 };
 
+const fillPairingCode = async (page: Page, pairingCode: string): Promise<void> => {
+  const codeInput = page.getByLabel('QR sadržaj ili ručni kod');
+  if (!(await codeInput.isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: 'Dodaj uređaj' }).click();
+  }
+  await codeInput.fill(pairingCode);
+};
+
 const inspectPairingOnExistingDevice = async (page: Page, pairingCode: string): Promise<string> => {
-  await page.getByLabel('QR sadržaj ili ručni kod').fill(pairingCode);
+  await fillPairingCode(page, pairingCode);
   await page.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
   await expect(page.getByTestId('sync-existing-device-sas')).toBeVisible();
+  await page.getByLabel('Naziv na ovom uređaju').fill(LOCAL_DEVICE_ALIAS_SENTINEL);
   return (await page.getByTestId('sync-existing-device-sas').textContent())?.trim() ?? '';
 };
 
@@ -516,7 +561,6 @@ const enableAndPairTwoDevices = async (
   await seedSyntheticPlan(phone);
   await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
   await phone.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
-  await phone.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
   await expect(phone.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
   await phone.getByLabel('Naziv ovog uređaja').fill(PHONE_DEVICE_NAME);
   await phone.getByRole('button', { name: 'Napravi recovery kod' }).click();
@@ -525,20 +569,22 @@ const enableAndPairTwoDevices = async (
   await expect(phone.getByRole('button', { name: 'Kopiraj recovery kod' })).toBeVisible();
   await confirmRecoveryGroups(phone, recoveryCode);
   await phone.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
-  await phone.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+  await phone.getByRole('button', { name: 'Pripremi sinhronizaciju' }).click();
   await phone
-    .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
+    .getByRole('button', { name: /Saglasan sam — pošalji prve šifrovane podatke/i })
     .click();
   await expect
     .poll(async () => (await readLocalSyncSecurityView(phone)).lastSnapshotRevision)
     .toBe(1);
 
   const existingSas = await inspectPairingOnExistingDevice(phone, pairingCode);
-  await phone.getByRole('button', { name: 'Poklapa se — odobri' }).click();
+  await phone.getByRole('button', { name: 'Nastavi povezivanje' }).click();
   expect(await waitForNewDeviceSas(desktop)).toBe(existingSas);
   await desktop.getByRole('button', { name: 'Poklapaju se — poveži' }).click();
-  await expect(desktop.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
-  await synchronizeSuccessfully(desktop);
+  await expectPairedBootstrap(desktop);
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(desktop)).lastSnapshotRevision)
+    .toBe(1);
   await expect.poll(() => hasAccountName(desktop, PLAINTEXT_SENTINEL)).toBe(true);
 
   return {
@@ -606,13 +652,12 @@ test('Turnstile activation UI fits 320-430 px and rerenders at the supported bre
   await seedSyntheticPlan(page);
   await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
   await page.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
-  await page.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
   await expect(page.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
   await page.getByRole('button', { name: 'Napravi recovery kod' }).click();
   const recoveryCode = await readRecoveryCode(page);
   await confirmRecoveryGroups(page, recoveryCode);
   await page.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
-  await page.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+  await page.getByRole('button', { name: 'Pripremi sinhronizaciju' }).click();
   const mount = page.getByTestId('sync-turnstile-widget');
   await expect(mount.locator('[data-fake-turnstile]')).toBeVisible();
 
@@ -693,14 +738,13 @@ test('activation preserves the prepared setup and creates one vault after an acc
   await seedSyntheticPlan(page);
   await page.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
   await page.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
-  await page.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
   await expect(page.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
   await page.getByLabel('Naziv ovog uređaja').fill('Accounting retry telefon');
   await page.getByRole('button', { name: 'Napravi recovery kod' }).click();
   const recoveryCode = await readRecoveryCode(page);
   await confirmRecoveryGroups(page, recoveryCode);
   await page.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
-  await page.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+  await page.getByRole('button', { name: 'Pripremi sinhronizaciju' }).click();
 
   const accountingError = page.getByTestId('sync-activation-accounting-error');
   await expect(accountingError).toContainText('USAGE_RESERVATION_UNDERESTIMATED');
@@ -710,8 +754,8 @@ test('activation preserves the prepared setup and creates one vault after an acc
   await expect(page.getByTestId('sync-recovery-code')).toHaveText(recoveryCode);
   expect(Number(localD1('SELECT COUNT(*) AS count FROM vaults')[0]?.count)).toBe(0);
 
-  await page.getByRole('button', { name: 'Pokušaj aktivaciju ponovo' }).click();
-  await expect(page.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  await page.getByRole('button', { name: 'Pokušaj ponovo' }).click();
+  await expectSyncActive(page);
   expect(vaultCreateAttempts).toBe(2);
   expect(Number(localD1('SELECT COUNT(*) AS count FROM vaults')[0]?.count)).toBe(1);
   expect((await readLocalSyncSecurityView(page)).displayName).toBe('Accounting retry telefon');
@@ -745,16 +789,15 @@ test('pairing finalization survives response loss and reload without duplicate a
     await seedSyntheticPlan(phone);
     await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
     await phone.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
-    await phone.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
     await expect(phone.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
     await phone.getByLabel('Naziv ovog uređaja').fill('Telefon za izgubljeni odgovor');
     await phone.getByRole('button', { name: 'Napravi recovery kod' }).click();
     const recoveryCode = await readRecoveryCode(phone);
     await confirmRecoveryGroups(phone, recoveryCode);
     await phone.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
-    await phone.getByRole('button', { name: 'Aktiviraj šifrovanu sinhronizaciju' }).click();
+    await phone.getByRole('button', { name: 'Pripremi sinhronizaciju' }).click();
     await phone
-      .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
+      .getByRole('button', { name: /Saglasan sam — pošalji prve šifrovane podatke/i })
       .click();
     await expect
       .poll(async () => (await readLocalSyncSecurityView(phone)).lastSnapshotRevision)
@@ -762,7 +805,7 @@ test('pairing finalization survives response loss and reload without duplicate a
     const phoneLocal = await readLocalSyncSecurityView(phone);
 
     const existingSas = await inspectPairingOnExistingDevice(phone, pairingCode);
-    await phone.getByRole('button', { name: 'Poklapa se — odobri' }).click();
+    await phone.getByRole('button', { name: 'Nastavi povezivanje' }).click();
     expect(await waitForNewDeviceSas(desktop)).toBe(existingSas);
 
     let finalizeAttempts = 0;
@@ -811,7 +854,7 @@ test('pairing finalization survives response loss and reload without duplicate a
     const resume = desktop.getByRole('button', { name: 'Dovrši započeto povezivanje' });
     await expect(resume).toBeVisible();
     await resume.click();
-    await expect(desktop.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+    await expectSyncActive(desktop);
     expect(finalizeAttempts).toBe(2);
     expect(await readLocalPairingFinalizationView(desktop)).toMatchObject({
       pendingCount: 0,
@@ -871,7 +914,6 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   await seedSyntheticPlan(phone);
   await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
   await phone.getByRole('button', { name: 'Uključi na prvom uređaju' }).click();
-  await phone.getByRole('button', { name: 'Proveri ovaj uređaj' }).click();
   await expect(phone.getByText('Pregledač je prošao lokalnu proveru.')).toBeVisible();
   await phone.getByLabel('Naziv ovog uređaja').fill(PHONE_DEVICE_NAME);
   await phone.getByRole('button', { name: 'Napravi recovery kod' }).click();
@@ -880,13 +922,13 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   await confirmRecoveryGroups(phone, firstRecoveryCode);
   await phone.getByRole('button', { name: 'Potvrdi sačuvani kod' }).click();
   const activateSync = phone.getByRole('button', {
-    name: 'Aktiviraj šifrovanu sinhronizaciju',
+    name: 'Pripremi sinhronizaciju',
   });
   await expect(activateSync).toBeVisible();
   await activateSync.click();
-  await expect(phone.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  await expectSyncActive(phone);
   await phone
-    .getByRole('button', { name: /Saglasan sam — pošalji prvi šifrovani snapshot/i })
+    .getByRole('button', { name: /Saglasan sam — pošalji prve šifrovane podatke/i })
     .click();
   await expect
     .poll(async () => (await readLocalSyncSecurityView(phone)).lastSnapshotRevision)
@@ -905,18 +947,17 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   expect(phoneLocal.lastSnapshotId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
   expect(phoneLocal.firstUploadConsent).toBe('accepted');
 
-  await phone.getByLabel('QR sadržaj ili ručni kod').fill(alterChecksum(pairingCode));
+  await fillPairingCode(phone, alterChecksum(pairingCode));
   await phone.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
   await expect(phone.getByRole('alert').last()).toBeVisible();
 
   const existingSas = await inspectPairingOnExistingDevice(phone, pairingCode);
   expect(existingSas).toMatch(/^[0-9A-F]{4}(?:-[0-9A-F]{4}){3}$/u);
-  await phone.getByRole('button', { name: 'Poklapa se — odobri' }).click();
+  await phone.getByRole('button', { name: 'Nastavi povezivanje' }).click();
   const newDeviceSas = await waitForNewDeviceSas(desktop);
   expect(newDeviceSas).toBe(existingSas);
   await desktop.getByRole('button', { name: 'Poklapaju se — poveži' }).click();
-  await expect(desktop.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
-  await desktop.getByRole('button', { name: 'Sinhronizuj sada' }).click();
+  await expectPairedBootstrap(desktop);
   await expect
     .poll(async () => (await readLocalSyncSecurityView(desktop)).lastSnapshotRevision)
     .toBe(1);
@@ -934,7 +975,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   expect(desktopAfterDownload.lastSnapshotRevision).toBe(1);
   expect(desktopAfterDownload.lastSnapshotId).toBe(phoneLocal.lastSnapshotId);
 
-  await phone.getByLabel('QR sadržaj ili ručni kod').fill(pairingCode);
+  await fillPairingCode(phone, pairingCode);
   await phone.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
   await expect(phone.getByRole('alert').last()).toBeVisible();
 
@@ -949,7 +990,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   const mismatchCode = await startPairingRequest(mismatchDevice, 'Sintetički SAS mismatch');
   await assertNoPageOverflow(mismatchDevice, 'Prikaz pairing koda');
   const mismatchExistingSas = await inspectPairingOnExistingDevice(desktop, mismatchCode);
-  await desktop.getByRole('button', { name: 'Poklapa se — odobri' }).click();
+  await desktop.getByRole('button', { name: 'Nastavi povezivanje' }).click();
   const mismatchNewSas = await waitForNewDeviceSas(mismatchDevice);
   expect(mismatchNewSas).toBe(mismatchExistingSas);
   await mismatchDevice.getByRole('button', { name: 'Ne poklapaju se — otkaži' }).click();
@@ -982,7 +1023,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
     `UPDATE pairing_requests SET expires_at = created_at + 1 WHERE pairing_request_id = ${sqlLiteral(expiringRequestId)} AND status = 'pending'`,
   );
   await expiringDevice.waitForTimeout(1_100);
-  await desktop.getByLabel('QR sadržaj ili ručni kod').fill(expiringCode);
+  await fillPairingCode(desktop, expiringCode);
   await desktop.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
   await expect(desktop.getByRole('alert').last()).toBeVisible();
 
@@ -1017,13 +1058,28 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   await recoveryPage.getByRole('button', { name: 'Izgubljeni su svi uređaji' }).click();
   await recoveryPage.getByLabel('Naziv ovog uređaja').fill(RECOVERED_DEVICE_NAME);
   await recoveryPage.getByLabel('Postojeći recovery kod').fill(firstRecoveryCode);
-  await recoveryPage.getByRole('button', { name: 'Proveri kod i pripremi oporavak' }).click();
+  const prepareRecovery = recoveryPage.getByRole('button', {
+    name: 'Proveri kod i pripremi oporavak',
+  });
+  await prepareRecovery.click();
+  if (
+    !(await recoveryPage
+      .getByTestId('sync-recovery-code')
+      .waitFor({ state: 'visible', timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false))
+  ) {
+    await expect(recoveryPage.getByRole('alert').last()).toContainText(
+      /servis trenutno ne može pouzdano da izmeri potrošnju/u,
+    );
+    await prepareRecovery.click();
+  }
   const rotatedRecoveryCode = await readRecoveryCode(recoveryPage);
   expect(rotatedRecoveryCode).not.toBe(firstRecoveryCode);
   await assertNoPageOverflow(recoveryPage, 'Prikaz rotiranog recovery koda');
   await confirmRecoveryGroups(recoveryPage, rotatedRecoveryCode);
   await recoveryPage.getByRole('button', { name: 'Potvrdi novi kod i završi oporavak' }).click();
-  await expect(recoveryPage.getByRole('heading', { name: 'Ovaj uređaj je povezan' })).toBeVisible();
+  await expectSyncActive(recoveryPage);
 
   const recoveredLocal = await readLocalSyncSecurityView(recoveryPage);
   expect(recoveredLocal.vaultId).toBe(phoneLocal.vaultId);
@@ -1062,6 +1118,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
     PHONE_DEVICE_NAME,
     DESKTOP_DEVICE_NAME,
     RECOVERED_DEVICE_NAME,
+    LOCAL_DEVICE_ALIAS_SENTINEL,
     firstRecoveryCode,
     firstRecoveryCode.replaceAll('-', ''),
     rotatedRecoveryCode,
@@ -1093,7 +1150,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
 test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, revoke and delete cloud state', async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(300_000);
+  test.setTimeout(420_000);
   const performanceTimingsMs: Record<string, number> = {};
   const phoneContext = await browser.newContext({
     ...devices['Pixel 7'],
@@ -1118,6 +1175,29 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   expect(initial.phone.keyEpoch).toBe(1);
   expect(initial.desktop.keyEpoch).toBe(1);
 
+  // The runtime must move ordinary finance mutations in both directions without opening
+  // sync settings or using its manual action. A reload represents an installed PWA cold start.
+  await Promise.all([phone.goto(`${ENABLED_APP_ORIGIN}/`), desktop.goto(`${ENABLED_APP_ORIGIN}/`)]);
+  await addCustomExpense(phone, 'AUTO-SYNC-FROM-A', 111);
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount, {
+      timeout: 45_000,
+    })
+    .toBe(0);
+  await desktop.reload();
+  await expect.poll(() => transactionCount(desktop, 'AUTO-SYNC-FROM-A')).toBe(1);
+
+  await addCustomExpense(desktop, 'AUTO-SYNC-FROM-B', 222);
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(desktop)).pendingLocalOperationCount, {
+      timeout: 45_000,
+    })
+    .toBe(0);
+  await phone.reload();
+  await expect.poll(() => transactionCount(phone, 'AUTO-SYNC-FROM-B')).toBe(1);
+  expect(await transactionCount(phone, 'AUTO-SYNC-FROM-A')).toBe(1);
+  expect(await transactionCount(desktop, 'AUTO-SYNC-FROM-B')).toBe(1);
+
   await phone.goto(`${ENABLED_APP_ORIGIN}/`);
   await phoneContext.setOffline(true);
   await addPresetExpense(phone, 'Kafa', '360 RSD');
@@ -1126,11 +1206,15 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
     .toBe(1);
   await phoneContext.setOffline(false);
   performanceStartedAt = performance.now();
-  await synchronizeSuccessfully(phone);
+  await expect
+    .poll(async () => (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount, {
+      timeout: 45_000,
+    })
+    .toBe(0);
   performanceTimingsMs.incrementalOperationUpload = Math.round(
     performance.now() - performanceStartedAt,
   );
-  await synchronizeSuccessfully(desktop);
+  await desktop.reload();
   await expect
     .poll(async () =>
       (await readLocalFinanceMergeView(desktop)).transactions.some(
@@ -1189,7 +1273,7 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
     unexpectedSyncResponses.filter(
       (entry) => entry.startsWith('PUT /v1/snapshots/') && entry.endsWith(' 409'),
     ),
-  ).toHaveLength(deferredCompactions + 1);
+  ).toHaveLength(deferredCompactions);
   await desktopContext.setOffline(false);
   await synchronizeUntilConflict(desktop);
   await assertSyncWidths(desktop, 'Ekran za eksplicitnu rezoluciju konflikta');
@@ -1219,8 +1303,7 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   await expectSyncRejected(desktop);
 
   await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
-  const desktopLabel = `${initial.desktop.deviceId.slice(0, 8)}…${initial.desktop.deviceId.slice(-4)}`;
-  const desktopDeviceRow = phone.locator('li').filter({ hasText: desktopLabel });
+  const desktopDeviceRow = phone.locator('li').filter({ hasText: LOCAL_DEVICE_ALIAS_SENTINEL });
   await desktopDeviceRow.getByRole('button', { name: 'Obnovi 30 dana' }).click();
   const renewed = phone.waitForResponse(
     (response) =>
@@ -1237,7 +1320,7 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   performanceStartedAt = performance.now();
   await phone
     .locator('li')
-    .filter({ hasText: desktopLabel })
+    .filter({ hasText: LOCAL_DEVICE_ALIAS_SENTINEL })
     .getByRole('button', { name: 'Bezbedno opozovi' })
     .click();
   await assertSyncWidths(phone, 'Potvrda bezbednog opoziva uređaja');
@@ -1283,7 +1366,7 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
       new URL(response.url()).pathname === '/v1/vault' && response.request().method() === 'DELETE',
   );
   await phone.getByRole('button', { name: 'Trajno obriši cloud trezor' }).click();
-  expect((await deleted).status()).toBe(200);
+  expect((await deleted).status()).toBe(202);
   await expect(phone.getByRole('button', { name: 'Uključi na prvom uređaju' })).toBeVisible();
   expect(await hasAccountName(phone, PLAINTEXT_SENTINEL)).toBe(true);
   expect(
@@ -1291,6 +1374,24 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
       (transaction) => transaction.description === 'Kafa',
     ),
   ).toBe(true);
+  expect(
+    localD1(`SELECT status FROM vaults WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`),
+  ).toEqual([{ status: 'deleting' }]);
+  expect(
+    localD1(
+      `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
+    ),
+  ).toEqual([{ state: 'pending' }]);
+
+  const scheduled = await phone.request.get(`${SYNC_API_ORIGIN}/__scheduled?cron=7+*+*+*+*`);
+  expect(scheduled.ok()).toBe(true);
+  await expect
+    .poll(() =>
+      localD1(
+        `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
+      ),
+    )
+    .toEqual([{ state: 'completed' }]);
   expect(
     localD1(
       `SELECT COUNT(*) AS count FROM vaults WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,

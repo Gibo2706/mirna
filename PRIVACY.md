@@ -30,6 +30,12 @@ authorization and request timing, approximate sizes, IP/network information,
 key epochs and server cursors. It does not receive the vault master key,
 recovery root, device private keys or plaintext finance content.
 
+Friendly device names and coarse device types are stored only in a dedicated
+local IndexedDB directory. They are excluded from ordinary finance backup,
+encrypted sync snapshots and protocol requests. Automatic synchronization runs
+inside the foreground application; the service worker does not receive finance
+plaintext or keys and does not perform killed-process encrypted sync.
+
 End-to-end encryption does not protect an unlocked or compromised device and
 does not hide traffic timing or sizes. Local finance tables remain readable to
 the browser profile; sync does not add application-level encryption at rest to

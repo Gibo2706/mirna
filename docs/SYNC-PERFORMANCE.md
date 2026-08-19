@@ -12,6 +12,14 @@ device, network or Cloudflare location. Cryptographic micro-measurements run on
 Node 22 Web Crypto; the multi-device timings run in Playwright Chromium against
 local Vite and Miniflare processes.
 
+The current client uses one app-level foreground runtime. It performs a cold
+start attempt, debounces local mutations for three seconds, enforces a
+30-second minimum automatic gap without dropping intervening triggers, pauses
+periodic work while hidden and uses a five-minute visible refresh. These are
+load bounds and UX behavior, not service-level guarantees. No measurement or
+claim in this document represents execution while a killed PWA process is
+inactive.
+
 ## Snapshot and key measurements
 
 The deterministic Vitest characterization generates two P-256 device key sets,

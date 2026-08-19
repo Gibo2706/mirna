@@ -280,6 +280,7 @@ class FakeDeviceSecurityApi implements DeviceSecurityApiPort {
   committedRequest?: SecureDeviceRevocationRequestV1;
   deletionRequest?: Parameters<DeviceSecurityApiPort['deleteVault']>[0];
   throwAfterRevocationCommit = false;
+  deletionState: 'pending' | 'completed' = 'completed';
 
   constructor(private readonly fixture: SecurityFixture) {
     this.currentManifest = fixture.setup.vault.manifest;
@@ -417,9 +418,9 @@ class FakeDeviceSecurityApi implements DeviceSecurityApiPort {
       protocolVersion: SYNC_PROTOCOL_VERSION,
       vaultId: input.transcript.vaultId,
       deletionRequestId: input.transcript.idempotencyKey,
-      state: 'completed',
-      deleted: true,
-      completedAt: NOW.toISOString(),
+      state: this.deletionState,
+      deleted: this.deletionState === 'completed',
+      completedAt: this.deletionState === 'completed' ? NOW.toISOString() : null,
     });
   }
 }
@@ -516,6 +517,21 @@ describe('device security service', () => {
     expect(api.deletionRequest?.gateKey).toHaveLength(43);
     expect(api.deletionRequest?.deviceSignature).toHaveLength(86);
     expect(api.deletionRequest?.recoverySignature).toHaveLength(86);
+    clearBytes(fixture.recoveryRoot);
+  });
+
+  it('accepts a persisted deletion tombstone while bounded cleanup is still pending', async () => {
+    const fixture = await createFixture();
+    const repository = new MemorySecurityRepository(fixture.setup);
+    const api = new FakeDeviceSecurityApi(fixture);
+    api.deletionState = 'pending';
+    const service = new DeviceSecurityService({ api, repository, origin: ORIGIN, now: () => NOW });
+
+    await expect(
+      service.deleteCloudVault(fixture.recoveryCode, CLOUD_VAULT_DELETE_CONFIRMATION),
+    ).resolves.toBeUndefined();
+
+    expect(api.deletionRequest?.transcript.vaultId).toBe(fixture.setup.vault.vaultId);
     clearBytes(fixture.recoveryRoot);
   });
 });

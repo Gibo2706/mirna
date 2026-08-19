@@ -14,23 +14,24 @@ primary system: disabling sync must preserve normal offline behavior and must
 produce no sync requests.
 
 This document describes both the intended three-phase architecture and the
-implementation state on 2026-07-31. These are not equivalent:
+implementation state on 2026-08-19. These are not equivalent:
 
 | Area                                                 | Current state                                                                                                                                               |
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Shared protocol primitives                           | RFC 8785 canonicalization, strict encodings, Web Crypto helpers, recovery-code primitives and signed manifest validation are implemented in the beta source |
 | Worker foundation                                    | Local D1/R2 bindings, four versioned migrations, strict HTTP/origin/body handling, health, bounded cleanup and staging rate-limit bindings are implemented  |
-| Pairing, recovery and device-auth routes             | Implemented locally with D1-backed state, exact retry/race controls and adversarial Worker coverage; remote staging remains unverified                      |
+| Pairing, recovery and device-auth routes             | Implemented with D1-backed state, exact retry/race controls and adversarial Worker coverage; real Android PWA/desktop staging pairing and sync completed    |
 | Client sync storage and Phase 1 lifecycle            | Dexie key capability/storage, Serbian enable/pair/recovery UI and the enable, pairing, SAS and recovery state machines pass the Phase 1 browser gate        |
 | Encrypted snapshots                                  | Implemented locally with authenticated compression, private R2 proxying, D1 revision CAS, rollback/fork pins and retry-safe cleanup                         |
 | Encrypted operation sync, conflicts and key rotation | Implemented locally with transactional outbox intent, signed ciphertext operations, explicit conflict resolution, ACK compaction and rotate-on-revoke       |
 | Cloud-vault deletion                                 | Implemented locally as recovery-authorized, resumable R2-first deletion that retains local finance data                                                     |
-| Remote staging resources                             | Blocked before provisioning because R2 activation requires a billing step; no remote deployment is asserted                                                 |
+| Remote staging resources                             | Dedicated beta Vercel target and staging Worker/D1/private R2 target are provisioned and have completed a real two-device staging exercise                  |
 | Production enablement                                | Not authorized; no production Worker environment is defined                                                                                                 |
 
-All three implementation phases passed focused unit, Worker and isolated
-multi-context browser gates locally on 2026-07-31. This is engineering test
-evidence, not an independent security audit or remote-staging claim.
+All three implementation phases have focused unit, Worker and isolated
+multi-context browser coverage. A real beta staging exercise also completed
+pairing, bootstrap and synchronization. This remains engineering/tester
+evidence, not an independent security audit or a production-readiness claim.
 
 ## System boundary
 
@@ -142,7 +143,7 @@ erasure.
 
 ### Sync-specific stores
 
-Dexie schema versions 6 through 10 add `syncVault`, `syncDevice`, `syncKeys`,
+Dexie schema versions 6 through 14 add `syncVault`, `syncDevice`, `syncKeys`,
 `syncOutbox`, `syncInbox`, `syncConflicts`, `syncFrontier`, `syncMetadata`,
 `syncCheckpoints` and `syncEntityStates`. These stores are isolated from
 ordinary finance backups. Their roles are:
@@ -154,7 +155,10 @@ ordinary finance backups. Their roles are:
 - local conflict records;
 - snapshot/frontier pins and scheduler state;
 - beta-only Support ID and an allowlisted 200-event diagnostic ring in separate
-  IndexedDB tables excluded from finance backup/export and sync snapshots.
+  IndexedDB tables excluded from finance backup/export and sync snapshots;
+- a local-only `syncDeviceAliases` directory for friendly device labels and
+  coarse device kinds. Aliases are not part of protocol v1 and never enter
+  finance backup, sync snapshots or Worker requests.
 
 For operation sync, a successful finance mutation and its deterministic outbox intent
 must be written in one Dexie transaction. Web Crypto work must happen outside
@@ -168,6 +172,31 @@ The PWA service worker must not receive vault keys or decrypted finance data and
 must not cache sync API responses. Sync uses explicit network-only requests and
 `Cache-Control: no-store`; the service worker continues to cache only the
 application shell and offline assets.
+
+### Foreground runtime and lifecycle
+
+One app-level `SyncRuntimeProvider` owns the sync service graph, serialized
+manual/automatic synchronization, local status and scheduler for the lifetime
+of an enabled application. It is mounted independently of the current route;
+the settings screen is only a consumer. A cold application start performs one
+safe attempt when setup exists and the browser is online. Local mutations are
+debounced for three seconds, duplicate triggers coalesce, and a trigger inside
+the 30-second minimum gap is deferred rather than discarded. Returning online
+also wakes the runtime.
+
+Visible sessions refresh at a bounded five-minute interval. A foreground
+resume runs when the page was hidden for at least two minutes, pending work
+exists, no successful sync exists, the last success is stale, or the network
+returned while hidden. A brief app switch does not request remote work when
+state is current. Hidden pages do not continuously poll. Service-limit failures
+preserve a jittered six-hour pause in local storage; a later success clears it.
+
+This is foreground/cold-start synchronization, not killed-process background
+E2EE. The service worker intentionally has neither vault keys nor plaintext, so
+Background Sync and Periodic Background Sync are not registered in this PR.
+When Android terminates the PWA process, Mirna resumes synchronization at the
+next application start; it does not claim periodic sync while the process is
+dead.
 
 ## Cryptographic membership authority
 

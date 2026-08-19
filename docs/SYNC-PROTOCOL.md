@@ -3,8 +3,9 @@
 Status: frozen core cryptographic profile for experimental `2.4.0-beta.1`
 Protocol version: `1`
 Deployment boundary: staging only
-Interoperability status: complete local protocol-v1 implementation; remote
-staging and independent security review remain pending
+Interoperability status: complete protocol-v1 implementation with a successful
+real beta staging pairing/bootstrap/sync exercise; independent security review
+remains pending
 
 ## Normative scope
 
@@ -590,8 +591,8 @@ rotate recovery or keys, or delete a vault. Those operations require a fresh
 audience-bound signature.
 
 The Worker challenge/session routes and memory-only browser transport are
-implemented locally. Remote staging behavior is not verified until the staging
-gate passes.
+implemented and exercised against the dedicated beta staging target. This is
+not an independent protocol/security audit.
 
 ## Snapshot protocol
 

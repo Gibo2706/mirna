@@ -3,7 +3,13 @@ import { db } from '@/db/database';
 import { probeIndexedDbCryptoKeyPersistence } from '@/db/sync/capability';
 import { disableSyncOnThisDevice, readLocalSyncSetup } from '@/db/sync/repository';
 import { hasPendingPairingFinalization } from '@/db/sync/pairing-finalization-checkpoint';
-import type { LocalSyncSetup, SyncConflictRecord } from '@/db/sync/records';
+import type {
+  LocalSyncSetup,
+  SyncConflictRecord,
+  SyncDeviceAliasRecord,
+  SyncDeviceKind,
+} from '@/db/sync/records';
+import { SyncDeviceAliasRepository } from '@/db/sync/device-alias-repository';
 import {
   SyncConflictRepository,
   type ConflictResolutionSelection,
@@ -67,6 +73,7 @@ export interface SyncUiLocalStatus {
   readonly pendingLocalOperationCount: number;
   readonly pendingConflicts: readonly SyncConflictRecord[];
   readonly pendingPairingFinalization: boolean;
+  readonly deviceAliases: readonly SyncDeviceAliasRecord[];
 }
 
 export interface SyncUiServices {
@@ -85,6 +92,12 @@ export interface SyncUiServices {
     forceCompaction?: boolean,
   ) => Promise<ContinuousSyncResult>;
   readonly renewDevice: (deviceId: string) => Promise<void>;
+  readonly saveDeviceAlias: (
+    vaultId: string,
+    deviceId: string,
+    label: string,
+    kind?: SyncDeviceKind,
+  ) => Promise<void>;
   readonly secureRevokeDevice: (deviceId: string, recoveryCode: string) => Promise<void>;
   readonly deleteCloudVault: (recoveryCode: string, typedConfirmation: string) => Promise<void>;
   readonly createEnableLifecycle: () => EnableLifecyclePort;
@@ -172,6 +185,7 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
   const dependencies = { api, origin: window.location.origin } as const;
   const operationRepository = new SyncOperationRepository();
   const conflictRepository = new SyncConflictRepository();
+  const deviceAliasRepository = new SyncDeviceAliasRepository();
   const snapshotService = new SnapshotSyncService({
     api,
     origin: window.location.origin,
@@ -210,12 +224,14 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
       const pendingLocalOperationCount = setup
         ? await db.syncOutbox.where('vaultId').equals(setup.vault.vaultId).count()
         : 0;
+      const deviceAliases = setup ? await deviceAliasRepository.list(setup.vault.vaultId) : [];
       return {
         setup,
         pendingConflictCount: pendingConflicts.length,
         pendingLocalOperationCount,
         pendingConflicts,
         pendingPairingFinalization,
+        deviceAliases,
       };
     },
     disableLocalDevice: disableSyncOnThisDevice,
@@ -226,6 +242,9 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
       continuousService.synchronize({ allowInitialUpload, forceCompaction }),
     renewDevice: async (deviceId) => {
       await securityService.renewDevice(deviceId);
+    },
+    saveDeviceAlias: async (vaultId, deviceId, label, kind) => {
+      await deviceAliasRepository.save({ vaultId, deviceId, label, kind });
     },
     secureRevokeDevice: async (deviceId, recoveryCode) => {
       await securityService.secureRevokeDevice(deviceId, recoveryCode);

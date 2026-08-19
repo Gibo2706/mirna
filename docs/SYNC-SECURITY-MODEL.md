@@ -192,6 +192,12 @@ envelope from the gate key.
   traces.
 - No sync API response enters the PWA cache; no vault key/decrypted data enters
   the service worker.
+- Automatic sync runs in the foreground app runtime on cold start, local
+  mutation, reconnect, stale resume and a bounded visible interval. It does not
+  claim periodic E2EE work after Android has terminated the PWA process.
+- Friendly device aliases live only in a dedicated local IndexedDB store. They
+  are excluded from finance backup, encrypted sync state and protocol request
+  bodies.
 - Logs exclude authorization, tokens, pairing/recovery material, raw bodies,
   ciphertext, full vault IDs and financial content.
 - Source-controlled global/per-vault hard budgets reserve work atomically and
@@ -200,8 +206,8 @@ envelope from the gate key.
 - Turnstile protects only anonymous vault/pairing/recovery initiation and checks
   Siteverify success, exact hostname and action. It supplements rather than
   replaces D1 attempt counters, rate limits and cryptographic authorization.
-- No production resource or paid Cloudflare capability is provisioned by this
-  beta work.
+- No production Worker/D1/R2/Turnstile resource is defined by this beta work;
+  the existing dedicated staging resources are not a production environment.
 
 ## Review and production gate
 

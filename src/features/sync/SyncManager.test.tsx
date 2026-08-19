@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/components/ToastProvider';
-import type { LocalSyncSetup } from '@/db/sync/records';
+import type { LocalSyncSetup, SyncDeviceKind } from '@/db/sync/records';
 import { MorePage } from '@/pages/MorePage';
 import { emptyFinanceData, settings } from '@/tests/factories';
 import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
@@ -127,6 +127,7 @@ const baseServices = (
     pendingLocalOperationCount: 0,
     pendingConflicts: [],
     pendingPairingFinalization: false,
+    deviceAliases: [],
   },
 ): SyncUiServices => ({
   probeCapability: vi.fn(() => Promise.resolve(supportedCapability)),
@@ -135,6 +136,7 @@ const baseServices = (
   clearSession: vi.fn(),
   synchronize: vi.fn(() => Promise.resolve({ kind: 'up-to-date' as const, revision: 1 })),
   renewDevice: vi.fn(() => Promise.resolve()),
+  saveDeviceAlias: vi.fn(() => Promise.resolve()),
   secureRevokeDevice: vi.fn(() => Promise.resolve()),
   deleteCloudVault: vi.fn(() => Promise.resolve()),
   resolveConflictGroup: vi.fn(() => Promise.resolve()),
@@ -163,7 +165,7 @@ afterEach(() => {
 });
 
 describe('Phase 1 sync UI', () => {
-  it('renders a React-owned visible Managed Turnstile card with privacy copy', async () => {
+  it('shows Turnstile only inside a protected setup action', async () => {
     const listeners = new Set<(state: { phase: 'idle' }) => void>();
     const attach = vi.fn();
     const services = baseServices({
@@ -179,10 +181,10 @@ describe('Phase 1 sync UI', () => {
     });
 
     renderManager(services);
-    expect(await screen.findByText('Bezbednosna provera')).toBeVisible();
-    expect(
-      screen.getByText(/Cloudflare proverava da zahtev ne šalje automatizovani program/u),
-    ).toBeVisible();
+    expect(screen.queryByText('Kratka bezbednosna provera')).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /Poveži ovaj uređaj/i }));
+    expect(await screen.findByText('Kratka bezbednosna provera')).toBeVisible();
+    expect(screen.getByText(/štiti anonimne radnje od zloupotrebe/u)).toBeVisible();
     expect(screen.getByTestId('sync-turnstile-widget')).toBeVisible();
     expect(attach).toHaveBeenCalledWith(expect.any(HTMLDivElement));
   });
@@ -205,10 +207,21 @@ describe('Phase 1 sync UI', () => {
         build: '2.4.0-beta.1',
       },
     ];
+    const snapshotDiagnostics = vi.fn(() => Promise.resolve({ supportId, events }));
+    const healthDiagnostics = vi.fn(() =>
+      Promise.resolve({
+        protocolVersion: 1 as const,
+        status: 'ok' as const,
+        environment: 'staging' as const,
+        buildCommit: workerBuild,
+        writesEnabled: true,
+        services: { d1: 'ok' as const, r2: 'ok' as const },
+      }),
+    );
     const services = baseServices({
       diagnostics: {
         supportId: vi.fn(() => Promise.resolve(supportId)),
-        snapshot: vi.fn(() => Promise.resolve({ supportId, events })),
+        snapshot: snapshotDiagnostics,
         subscribe: (listener) => {
           notify = listener;
           return () => {
@@ -216,20 +229,14 @@ describe('Phase 1 sync UI', () => {
           };
         },
         clear: vi.fn(() => Promise.resolve()),
-        health: vi.fn(() =>
-          Promise.resolve({
-            protocolVersion: 1 as const,
-            status: 'ok' as const,
-            environment: 'staging' as const,
-            buildCommit: workerBuild,
-            writesEnabled: true,
-            services: { d1: 'ok' as const, r2: 'ok' as const },
-          }),
-        ),
+        health: healthDiagnostics,
       },
     });
 
     renderManager(services);
+    expect(snapshotDiagnostics).not.toHaveBeenCalled();
+    expect(healthDiagnostics).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByText('Pomoć i dijagnostika'));
     const card = await screen.findByTestId('sync-beta-diagnostics');
     expect(card).toHaveClass('min-w-0', 'overflow-hidden');
     expect(await screen.findByText('MIRNA-EM…675-9R')).toBeVisible();
@@ -261,6 +268,7 @@ describe('Phase 1 sync UI', () => {
       pendingLocalOperationCount: 0,
       pendingConflicts: [],
       pendingPairingFinalization: false,
+      deviceAliases: [],
     };
     const confirmRecoveryCode = vi.fn(() => Promise.resolve());
     const activate = vi.fn(() => {
@@ -271,6 +279,7 @@ describe('Phase 1 sync UI', () => {
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
         pendingPairingFinalization: false,
+        deviceAliases: [],
       };
       return Promise.resolve(setup);
     });
@@ -290,7 +299,6 @@ describe('Phase 1 sync UI', () => {
 
     renderManager(services);
     await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
-    await user.click(screen.getByRole('button', { name: /Proveri ovaj uređaj/i }));
     await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
     await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
 
@@ -308,11 +316,9 @@ describe('Phase 1 sync UI', () => {
     ]);
     expect(activate).not.toHaveBeenCalled();
 
-    await user.click(
-      await screen.findByRole('button', { name: /Aktiviraj šifrovanu sinhronizaciju/i }),
-    );
+    await user.click(await screen.findByRole('button', { name: /Pripremi sinhronizaciju/i }));
     await waitFor(() => expect(activate).toHaveBeenCalledOnce());
-    expect(await screen.findByText('Ovaj uređaj je povezan')).toBeVisible();
+    expect(await screen.findByText('Sinhronizacija je uključena')).toBeVisible();
     expect(screen.queryByTestId('sync-recovery-code')).not.toBeInTheDocument();
   });
 
@@ -341,7 +347,6 @@ describe('Phase 1 sync UI', () => {
 
     renderManager(services);
     await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
-    await user.click(screen.getByRole('button', { name: /Proveri ovaj uređaj/i }));
     await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
     await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
     await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'BBBB');
@@ -349,7 +354,7 @@ describe('Phase 1 sync UI', () => {
     await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
 
     const activateButton = await screen.findByRole('button', {
-      name: /Aktiviraj šifrovanu sinhronizaciju/i,
+      name: /Pripremi sinhronizaciju/i,
     });
     await user.dblClick(activateButton);
     expect(activate).toHaveBeenCalledOnce();
@@ -365,10 +370,10 @@ describe('Phase 1 sync UI', () => {
       );
       await firstAttempt.catch(() => undefined);
     });
-    expect(await screen.findByText(/Cloudflare je odbio rezultat provere/u)).toBeVisible();
+    expect(await screen.findByText(/Provera nije prihvaćena/u)).toBeVisible();
     expect(screen.getByTestId('sync-recovery-code')).toHaveTextContent('MR1-AAAA-BBBB-CCCC-DDDD');
 
-    await user.click(screen.getByRole('button', { name: 'Pokušaj aktivaciju ponovo' }));
+    await user.click(screen.getByRole('button', { name: 'Pokušaj ponovo' }));
     await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
   });
 
@@ -404,15 +409,12 @@ describe('Phase 1 sync UI', () => {
 
     renderManager(services);
     await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
-    await user.click(screen.getByRole('button', { name: /Proveri ovaj uređaj/i }));
     await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
     await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
     await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'BBBB');
     await user.type(screen.getByTestId('sync-recovery-confirmation-4'), 'DDDD');
     await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
-    await user.click(
-      await screen.findByRole('button', { name: /Aktiviraj šifrovanu sinhronizaciju/i }),
-    );
+    await user.click(await screen.findByRole('button', { name: /Pripremi sinhronizaciju/i }));
 
     const details = await screen.findByTestId('sync-activation-accounting-error');
     expect(details).toHaveTextContent('Accounting razlog: USAGE_RESERVATION_UNDERESTIMATED');
@@ -421,7 +423,7 @@ describe('Phase 1 sync UI', () => {
     expect(details).toHaveTextContent(`Request ID: ${requestId}`);
     expect(screen.getByTestId('sync-recovery-code')).toHaveTextContent('MR1-AAAA-BBBB-CCCC-DDDD');
 
-    await user.click(screen.getByRole('button', { name: 'Pokušaj aktivaciju ponovo' }));
+    await user.click(screen.getByRole('button', { name: 'Pokušaj ponovo' }));
     await waitFor(() => expect(activate).toHaveBeenCalledTimes(2));
   });
 
@@ -494,12 +496,14 @@ describe('Phase 1 sync UI', () => {
                 pendingLocalOperationCount: 0,
                 pendingConflicts: [],
                 pendingPairingFinalization: false,
+                deviceAliases: [],
               }
             : {
                 pendingConflictCount: 0,
                 pendingLocalOperationCount: 0,
                 pendingConflicts: [],
                 pendingPairingFinalization: true,
+                deviceAliases: [],
               },
         ),
       ),
@@ -509,11 +513,11 @@ describe('Phase 1 sync UI', () => {
     renderManager(services);
     await user.click(await screen.findByRole('button', { name: /Dovrši započeto povezivanje/i }));
     await waitFor(() => expect(resumeFinalization).toHaveBeenCalledOnce());
-    expect(await screen.findByText(/Ovaj uređaj je povezan/i)).toBeVisible();
+    expect(await screen.findByText(/Sinhronizacija je uključena/i)).toBeVisible();
     expect(cancel).not.toHaveBeenCalled();
   });
 
-  it('requires an explicit action before the first encrypted snapshot upload', async () => {
+  it('requires an explicit action before the first encrypted upload', async () => {
     const user = userEvent.setup();
     const setup = localSetup();
     const synchronize = vi.fn((allowInitialUpload?: boolean) =>
@@ -531,18 +535,118 @@ describe('Phase 1 sync UI', () => {
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
         pendingPairingFinalization: false,
+        deviceAliases: [],
       },
     );
 
     renderManager(services);
     const consentButton = await screen.findByRole('button', {
-      name: /Saglasan sam — pošalji prvi šifrovani snapshot/i,
+      name: /Saglasan sam — pošalji prve šifrovane podatke/i,
     });
     expect(consentButton.closest('div')).toHaveTextContent(
-      /server ne dobija čitljive finansijske podatke/i,
+      /servis ne dobija čitljive finansijske podatke/i,
     );
     await user.click(consentButton);
     await waitFor(() => expect(synchronize).toHaveBeenCalledWith(true, false));
+  });
+
+  it('uses ordinary synchronization for the primary manual button', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    setup.metadata.bootstrapMode = 'complete';
+    setup.metadata.firstUploadConsent = 'accepted';
+    setup.metadata.lastSnapshotRevision = 1;
+    setup.metadata.lastSuccessfulSyncAt = '2026-08-19T10:00:00.000Z';
+    const synchronize = vi.fn(() =>
+      Promise.resolve({
+        kind: 'synchronized' as const,
+        revision: 1,
+        uploadedOperations: 0,
+        downloadedOperations: 0,
+        appliedGroups: 0,
+        conflictedGroups: 0,
+        pendingLocalOperations: 0,
+        acknowledgedServerCursor: 0,
+        compacted: false,
+      }),
+    );
+    const services = baseServices(
+      { synchronize },
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+        pendingPairingFinalization: false,
+        deviceAliases: [],
+      },
+    );
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: 'Sinhronizuj sada' }));
+
+    await waitFor(() => expect(synchronize).toHaveBeenCalledWith(false, false));
+    expect(synchronize).not.toHaveBeenCalledWith(false, true);
+  });
+
+  it('shows a human fallback and persists a local alias for a remote device', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    const remoteDeviceId = 'DDDDDDDDDDDDDDDDDDDDDD';
+    setup.vault.manifest.devices.push({
+      ...setup.vault.manifest.devices[0],
+      deviceId: remoteDeviceId,
+    });
+    setup.metadata.bootstrapMode = 'complete';
+    setup.metadata.firstUploadConsent = 'accepted';
+    setup.metadata.lastSnapshotRevision = 1;
+    let deviceAliases: SyncUiLocalStatus['deviceAliases'] = [];
+    const saveDeviceAlias = vi.fn(
+      (vaultId: string, deviceId: string, label: string, kind?: SyncDeviceKind) => {
+        deviceAliases = [
+          {
+            id: `${vaultId}:${deviceId}`,
+            vaultId,
+            deviceId,
+            label,
+            kind,
+            updatedAt: new Date().toISOString(),
+          },
+        ];
+        return Promise.resolve();
+      },
+    );
+    const services = baseServices({
+      loadLocalStatus: vi.fn(() =>
+        Promise.resolve({
+          setup,
+          pendingConflictCount: 0,
+          pendingLocalOperationCount: 0,
+          pendingConflicts: [],
+          pendingPairingFinalization: false,
+          deviceAliases,
+        }),
+      ),
+      saveDeviceAlias,
+    });
+
+    renderManager(services);
+    expect(await screen.findByText('Drugi uređaj')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Promeni naziv' }));
+    await user.clear(screen.getByLabelText('Naziv uređaja'));
+    await user.type(screen.getByLabelText('Naziv uređaja'), 'Laptop');
+    await user.selectOptions(screen.getByLabelText('Vrsta uređaja'), 'computer');
+    await user.click(screen.getByRole('button', { name: 'Sačuvaj naziv' }));
+
+    await waitFor(() =>
+      expect(saveDeviceAlias).toHaveBeenCalledWith(
+        setup.vault.vaultId,
+        remoteDeviceId,
+        'Laptop',
+        'computer',
+      ),
+    );
+    expect(await screen.findByText('Laptop')).toBeVisible();
   });
 
   it('requires recovery and typed confirmation before secure remote-device revocation', async () => {
@@ -563,6 +667,7 @@ describe('Phase 1 sync UI', () => {
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
         pendingPairingFinalization: false,
+        deviceAliases: [],
       },
     );
 
@@ -598,6 +703,7 @@ describe('Phase 1 sync UI', () => {
         pendingLocalOperationCount: 0,
         pendingConflicts: [],
         pendingPairingFinalization: false,
+        deviceAliases: [],
       },
     );
 

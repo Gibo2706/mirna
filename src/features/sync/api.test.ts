@@ -333,7 +333,7 @@ describe('Mirna sync API transport', () => {
       verificationReason: 'INVALID_INPUT_RESPONSE',
     });
     expect(caught).toBeInstanceOf(SyncApiError);
-    expect((caught as SyncApiError).message).toMatch(/Cloudflare je odbio rezultat provere/u);
+    expect((caught as SyncApiError).message).toMatch(/Provera nije prihvaćena/u);
   });
 
   it('preserves a safe accounting reason and records diagnostics without delaying rejection', async () => {

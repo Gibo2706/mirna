@@ -44,5 +44,9 @@ an independent cryptographic/application review pass. Local and staging testing
 must use synthetic financial records only. Do not probe Cloudflare resources or
 any deployment you do not own or have explicit permission to test.
 
+The beta staging exercise is implementation evidence only. It does not turn the
+staging Worker/D1/R2/Turnstile resources into a production environment or
+remove the independent review gate.
+
 Production and development dependencies are reviewed separately. Breaking
 automated upgrades are not applied without verifying application behavior.

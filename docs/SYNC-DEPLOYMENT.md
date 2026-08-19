@@ -117,10 +117,12 @@ localhost
 127.0.0.1
 ```
 
-The SPA loads the exact `challenges.cloudflare.com` script only when an
-anonymous create flow requests a token. React owns a visible card titled
-`Bezbednosna provera`; the explicit Managed widget uses `appearance: always`
-and is never placed in an imperative fixed overlay. Expiry, timeout or rejection
+The SPA loads the exact `challenges.cloudflare.com` script only inside an
+anonymous vault-create, pairing-create or recovery-initiation flow. The normal
+connected-device screen neither mounts the widget nor exposes its provider as
+a product concept. React owns the flow-scoped challenge; the explicit Managed
+widget uses `appearance: always` and is never placed in an imperative fixed
+overlay. Expiry, timeout or rejection
 resets the widget, and the next protected attempt must obtain a fresh
 single-use token. Protected routes/actions are:
 
@@ -283,10 +285,14 @@ VITE_MIRNA_BETA_ONLY=true
 ```
 
 Every env change requires a new beta deployment. The build must contain the
-visible `Mirna Sync — Beta` marker, `noindex, nofollow`, a `robots.txt` that
-disallows all crawlers and a CSP that permits only the exact Turnstile origin
-for script/frame/connect plus the exact staging Worker origin for connect. The
-stable project receives none of these variables.
+visible beta marker, `noindex, nofollow`, a `robots.txt` that disallows all
+crawlers and a CSP that permits only the exact challenge origin for
+script/frame/connect plus the exact staging Worker origin for connect.
+`vercel.ts` derives this CSP from the same explicit beta-only environment gate.
+The stable project receives none of these variables and its generated CSP keeps
+`connect-src`/`script-src` at `'self'` and `frame-src` at `'none'`, so the shared
+repository configuration does not authorize staging connectivity in a stable
+feature-off deployment.
 
 ## Remote smoke and plaintext sentinel gate
 

@@ -25,6 +25,12 @@ All notable changes to Mirna are documented here.
 - Added beta-only privacy-safe Support ID/Request ID diagnostics with a local
   200-event IndexedDB ring, strict 14-day D1 retention and bounded operator
   lookup.
+- Added one app-level sync runtime so cold start, ordinary finance mutations,
+  reconnect and stale foreground resume synchronize without visiting settings.
+- Added coalesced/deferred scheduler wake-ups, hidden-page polling suspension,
+  persistent service-limit pause handling and automatic paired-device download.
+- Added local-only friendly device aliases and a consumer-oriented sync screen;
+  protocol IDs and support diagnostics now stay behind technical details.
 
 ### Security
 
@@ -33,6 +39,8 @@ All notable changes to Mirna are documented here.
 - Snapshot and operation ciphertext is signed and bound to strict AAD, manifest
   and causal chains; unknown fields, versions and crypto suites fail closed.
 - Ordinary JSON backups explicitly exclude sync state and secret material.
+- Stable feature-off Vercel CSP no longer authorizes the staging Worker or
+  challenge origin; beta retains an exact environment-gated allowlist.
 - Fixed staging Siteverify failures caused by an undersized Worker timeout and
   a strict parser that did not accept Cloudflare's observed bounded `messages`
   response field.

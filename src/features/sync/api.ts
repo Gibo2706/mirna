@@ -314,7 +314,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   HUMAN_VERIFICATION_CONFIGURATION:
     'Bezbednosna provera na beta serveru nije pravilno podešena. Kopirajte dijagnostiku za podršku.',
   HUMAN_VERIFICATION_EXPIRED: 'Bezbednosna provera je istekla ili je već iskorišćena.',
-  HUMAN_VERIFICATION_REJECTED: 'Cloudflare nije prihvatio bezbednosnu proveru.',
+  HUMAN_VERIFICATION_REJECTED: 'Provera nije prihvaćena. Pripremite novu i pokušajte ponovo.',
   HUMAN_VERIFICATION_UNAVAILABLE:
     'Cloudflare bezbednosna provera trenutno nije dostupna. Pokušajte ponovo.',
   TURNSTILE_REQUIRED: 'Provera protiv zloupotrebe trenutno nije dostupna.',
@@ -324,8 +324,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
     'Bezbednosna provera nije pravilno podešena. Kopirajte dijagnostiku za podršku.',
   TURNSTILE_EXPIRED: 'Bezbednosna provera je istekla. Pokušajte ponovo.',
   TURNSTILE_TIMEOUT: 'Bezbednosna provera je predugo čekala. Pokušajte ponovo.',
-  TURNSTILE_REJECTED:
-    'Cloudflare nije prihvatio proveru. Pokušajte ponovo ili kopirajte dijagnostiku.',
+  TURNSTILE_REJECTED: 'Provera nije prihvaćena. Pokušajte ponovo ili kopirajte dijagnostiku.',
   SERVICE_BUDGET_EXHAUSTED:
     'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.',
   SERVICE_QUOTA_EXHAUSTED:
@@ -345,14 +344,13 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
 };
 
 const VERIFICATION_REASON_MESSAGES: Readonly<Record<VerificationReason, string>> = {
-  INVALID_INPUT_RESPONSE:
-    'Cloudflare je odbio rezultat provere. Napravite novu proveru i pokušajte ponovo.',
+  INVALID_INPUT_RESPONSE: 'Provera nije prihvaćena. Napravite novu proveru i pokušajte ponovo.',
   TIMEOUT_OR_DUPLICATE:
     'Provera je istekla ili je isti rezultat već iskorišćen. Potrebna je potpuno nova provera.',
   HOSTNAME_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
   ACTION_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
   SITEVERIFY_UNAVAILABLE:
-    'Cloudflare provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
+    'Bezbednosna provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
   CONFIGURATION_ERROR:
     'Beta bezbednosna provera nije pravilno podešena. Kopirajte Request ID i Support ID.',
 };

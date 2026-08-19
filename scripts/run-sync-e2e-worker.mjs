@@ -63,6 +63,7 @@ const worker = spawn(
     stateDirectory,
     '--config',
     workerConfig,
+    '--test-scheduled',
     '--log-level',
     'warn',
   ],

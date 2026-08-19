@@ -3,8 +3,9 @@
 Status: experimental protocol v1 design for `2.4.0-beta.1`
 Deployment boundary: staging only
 Implementation status: client/Worker recovery, current-snapshot recovery and
-atomic sole-device key/recovery rotation are implemented and tested locally;
-remote staging and independent security review remain pending
+atomic sole-device key/recovery rotation are implemented; pairing/bootstrap/
+sync have completed a real beta staging exercise, while independent security
+review and a dedicated production environment remain pending
 
 ## What recovery can and cannot do
 

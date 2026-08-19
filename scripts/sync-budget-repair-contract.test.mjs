@@ -99,11 +99,9 @@ const pairingEvidence = {
   created_at: 1_500,
 };
 
-const scheduledCleanupRequestId =
-  '11111111-1111-4111-8111-111111111111';
+const scheduledCleanupRequestId = '11111111-1111-4111-8111-111111111111';
 const scheduledCleanupReservation = {
-  reservation_id:
-    `${scheduledCleanupRequestId}:scheduled-cleanup`,
+  reservation_id: `${scheduledCleanupRequestId}:scheduled-cleanup`,
   scope_type: 'global',
   scope_id: 'service',
   route_key: 'scheduled-cleanup',
@@ -135,8 +133,7 @@ const scheduledCleanupReservation = {
   measured_r2_class_a: 1,
   measured_r2_class_b: 0,
 
-  settlement_failure_code:
-    'USAGE_RESERVATION_UNDERESTIMATED',
+  settlement_failure_code: 'USAGE_RESERVATION_UNDERESTIMATED',
   business_committed: 0,
   reconciled_at: null,
   reconciliation_code: null,
@@ -326,10 +323,8 @@ describe('scheduled-cleanup accounting repair contract', () => {
         unresolvedIncidentCount: 1,
       }),
     ).toEqual({
-      reservationId:
-        `${scheduledCleanupRequestId}:scheduled-cleanup`,
-      reconciliationCode:
-        'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+      reservationId: `${scheduledCleanupRequestId}:scheduled-cleanup`,
+      reconciliationCode: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
       reservationNeedsUpdate: true,
       exactFields: {
         reserved_worker_requests: 0,
@@ -442,8 +437,7 @@ describe('scheduled-cleanup accounting repair contract', () => {
         reservations: [scheduledCleanupReservation],
         serviceFlags: {
           ...scheduledCleanupServiceFlags,
-          state_request_id:
-            '22222222-2222-4222-8222-222222222222',
+          state_request_id: '22222222-2222-4222-8222-222222222222',
         },
         unresolvedIncidentCount: 1,
       }),

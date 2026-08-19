@@ -24,6 +24,20 @@ export const formatDateTime = (value?: string): string => {
   }).format(timestamp);
 };
 
+export const formatRelativeSyncTime = (value?: string, now = Date.now()): string => {
+  if (!value) return 'još nije završena';
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return 'vreme nije dostupno';
+  const elapsed = Math.max(0, now - timestamp);
+  if (elapsed < 60_000) return 'upravo';
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `pre ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `pre ${hours} h`;
+  if (hours < 48) return 'juče';
+  return new Intl.DateTimeFormat('sr-Latn-RS', { dateStyle: 'medium' }).format(timestamp);
+};
+
 export const truncateOpaqueId = (value: string): string =>
   value.length <= 14 ? value : `${value.slice(0, 8)}…${value.slice(-4)}`;
 

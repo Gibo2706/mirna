@@ -20,6 +20,7 @@ import type {
   SyncConflictRecord,
   SyncCheckpointRecord,
   SyncDeviceRecord,
+  SyncDeviceAliasRecord,
   SyncEntityStateRecord,
   SyncFrontierRecord,
   SyncInboxRecord,
@@ -61,6 +62,7 @@ export class FinanceDatabase extends Dexie {
   syncBetaSupport!: EntityTable<SyncBetaSupportRecord, 'id'>;
   syncBetaDiagnosticEvents!: EntityTable<SyncBetaDiagnosticEventRecord, 'id'>;
   syncPairingFinalizations!: EntityTable<SyncPairingFinalizationRecord, 'id'>;
+  syncDeviceAliases!: EntityTable<SyncDeviceAliasRecord, 'id'>;
 
   constructor(name = 'mirna-finance') {
     super(name);
@@ -367,6 +369,12 @@ export class FinanceDatabase extends Dexie {
             }
           });
       });
+
+    // Friendly device labels are local-only UI metadata. They are deliberately
+    // absent from financeTables, encrypted snapshots and protocol payloads.
+    this.version(14).stores({
+      syncDeviceAliases: 'id, vaultId, deviceId, &[vaultId+deviceId], updatedAt',
+    });
   }
 }
 

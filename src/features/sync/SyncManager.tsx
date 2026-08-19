@@ -3,20 +3,21 @@ import {
   ArrowLeft,
   CheckCircle2,
   CloudUpload,
-  Copy,
-  Download,
   KeyRound,
+  Laptop,
+  Pencil,
   QrCode,
   RefreshCw,
   ShieldCheck,
   ShieldX,
   Smartphone,
+  Tablet,
   TriangleAlert,
-  Trash2,
   Unplug,
+  WifiOff,
 } from 'lucide-react';
 import { Link } from 'react-router';
-import type { LocalSyncSetup } from '@/db/sync/records';
+import type { LocalSyncSetup, SyncDeviceKind } from '@/db/sync/records';
 import { SettingsLayout } from '@/components/SettingsLayout';
 import { useToast } from '@/components/ToastProvider';
 import { Button } from '@/components/ui/Button';
@@ -30,7 +31,6 @@ import type {
   RecoveryStartResult,
 } from './lifecycle';
 import {
-  createDefaultSyncUiServices,
   type EnableLifecyclePort,
   type ExistingDevicePairingLifecyclePort,
   type NewDevicePairingLifecyclePort,
@@ -38,442 +38,30 @@ import {
   type SyncUiLocalStatus,
   type SyncUiServices,
 } from './ui-services';
-import { formatDateTime, safeErrorMessage, truncateOpaqueId, useLocalQr } from './ui/helpers';
+import {
+  formatDateTime,
+  formatRelativeSyncTime,
+  safeErrorMessage,
+  truncateOpaqueId,
+  useLocalQr,
+} from './ui/helpers';
 import { BackToChoices, BusyIcon, InlineError, RecoveryCodeStep, SectionTitle } from './ui/shared';
-import { useSnapshotSyncScheduler } from './scheduler';
+import {
+  SyncRuntimeProvider,
+  useOptionalSyncRuntime,
+  useSyncRuntime,
+  type SyncActivity,
+  type SyncRuntimeValue,
+} from './runtime/SyncRuntimeProvider';
 import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
-import type { TurnstilePhase, TurnstileViewState } from './turnstile-client';
-import type { BetaDiagnosticsSnapshot } from './diagnostics';
-import { APPLICATION_VERSION } from '@/lib/version';
-import { SyncApiError, type VerificationReason } from './api';
+import { SyncApiError } from './api';
+import { TurnstileCard } from './ui/TurnstileCard';
+import { LazyDiagnostics } from './ui/SyncDiagnostics';
 
 type EmptyMode = 'choose' | 'enable' | 'pair-new' | 'recover';
 
-const TURNSTILE_STATUS: Readonly<Record<TurnstilePhase, string>> = {
-  idle: 'Provera će se pokrenuti kada zatražite aktivaciju, uparivanje ili oporavak.',
-  'script-loading': 'Učitavam Cloudflare bezbednosnu proveru…',
-  'widget-ready': 'Bezbednosna provera je spremna.',
-  waiting: 'Dovršite proveru prikazanu ispod.',
-  'token-received': 'Cloudflare rezultat je primljen. Server ga sada proverava…',
-  'server-verifying': 'Cloudflare rezultat je primljen. Server ga sada proverava…',
-  success: 'Bezbednosna provera je prihvaćena.',
-  expired: 'Provera je istekla. Pripremite novu proveru i ponovite poslednju radnju.',
-  rejected: 'Provera nije prihvaćena. Pripremite novu proveru i ponovite poslednju radnju.',
-  'network-error': 'Mreža je prekinula proveru. Pripremite novu proveru kada veza proradi.',
-  'configuration-error':
-    'Provera nije pravilno učitana ili podešena. Kopirajte dijagnostiku za podršku.',
-};
-
-const RETRYABLE_TURNSTILE_PHASES = new Set<TurnstilePhase>([
-  'expired',
-  'rejected',
-  'network-error',
-  'configuration-error',
-]);
-
-const VERIFICATION_REASON_STATUS: Readonly<Record<VerificationReason, string>> = {
-  INVALID_INPUT_RESPONSE:
-    'Cloudflare je odbio rezultat provere. Napravite novu proveru i pokušajte ponovo.',
-  TIMEOUT_OR_DUPLICATE:
-    'Provera je istekla ili je isti rezultat već iskorišćen. Potrebna je potpuno nova provera.',
-  HOSTNAME_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
-  ACTION_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
-  SITEVERIFY_UNAVAILABLE:
-    'Cloudflare provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
-  CONFIGURATION_ERROR:
-    'Beta bezbednosna provera nije pravilno podešena. Kopirajte Request ID i Support ID.',
-};
-
-const TurnstileCard = ({ services }: { services: SyncUiServices }) => {
-  const turnstile = services.turnstile;
-  const [state, setState] = useState<TurnstileViewState>(
-    () => turnstile?.state ?? { phase: 'idle' },
-  );
-  const attach = useCallback(
-    (node: HTMLDivElement | null) => {
-      turnstile?.attach(node);
-    },
-    [turnstile],
-  );
-
-  useEffect(() => {
-    if (!turnstile) return;
-    return turnstile.subscribe(setState);
-  }, [turnstile]);
-
-  if (!turnstile) return null;
-  const isError = RETRYABLE_TURNSTILE_PHASES.has(state.phase);
-
-  return (
-    <Card className="grid gap-3 border-accent/25" data-testid="sync-turnstile-card">
-      <div>
-        <SectionTitle>Bezbednosna provera</SectionTitle>
-        <p className="mt-2 text-sm leading-6 text-muted">
-          Cloudflare proverava da zahtev ne šalje automatizovani program. Provera ne dobija vaše
-          finansijske podatke.
-        </p>
-      </div>
-      <p
-        role={isError ? 'alert' : 'status'}
-        className={
-          isError
-            ? 'rounded-xl bg-danger-soft p-3 text-sm text-danger'
-            : 'rounded-xl bg-surface-2 p-3 text-sm text-muted'
-        }
-      >
-        {state.verificationReason
-          ? VERIFICATION_REASON_STATUS[state.verificationReason]
-          : TURNSTILE_STATUS[state.phase]}
-        {state.requestId ? (
-          <span className="mt-1 block font-mono text-xs">Request ID: {state.requestId}</span>
-        ) : null}
-      </p>
-      <div
-        ref={attach}
-        data-testid="sync-turnstile-widget"
-        aria-label="Cloudflare bezbednosna provera"
-        className="min-h-[70px] min-w-0 max-w-full overflow-hidden rounded-xl bg-white p-1"
-      />
-    </Card>
-  );
-};
-
-type DiagnosticHealth = Awaited<ReturnType<NonNullable<SyncUiServices['diagnostics']>['health']>>;
-
-const copyPlainText = async (value: string): Promise<void> => {
-  if (!navigator.clipboard?.writeText) throw new Error('Clipboard is unavailable.');
-  await navigator.clipboard.writeText(value);
-};
-
-const downloadJson = (filename: string, value: unknown): void => {
-  const url = URL.createObjectURL(
-    new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: 'application/json;charset=utf-8' }),
-  );
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.rel = 'noopener';
-  anchor.click();
-  URL.revokeObjectURL(url);
-};
-
-const compactOpaqueValue = (value: string): string =>
-  value.length <= 18 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
-
-const ExpandableOpaqueValue = ({ value, label }: { value: string; label: string }) => {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <button
-      type="button"
-      className="block min-w-0 max-w-full text-left font-mono font-bold"
-      aria-label={`${label}: ${value}. ${expanded ? 'Sakrij' : 'Prikaži'} celu vrednost.`}
-      aria-expanded={expanded}
-      title={value}
-      onClick={() => setExpanded((current) => !current)}
-    >
-      <span className={expanded ? 'block select-text [overflow-wrap:anywhere]' : 'block truncate'}>
-        {expanded ? value : compactOpaqueValue(value)}
-      </span>
-    </button>
-  );
-};
-
-const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
-  const diagnostics = services.diagnostics;
-  const [snapshot, setSnapshot] = useState<BetaDiagnosticsSnapshot>();
-  const [health, setHealth] = useState<DiagnosticHealth>();
-  const [message, setMessage] = useState('');
-
-  const refreshSnapshot = useCallback(async () => {
-    if (!diagnostics) return;
-    const nextSnapshot = await diagnostics.snapshot();
-    setSnapshot(nextSnapshot);
-  }, [diagnostics]);
-
-  const refreshHealth = useCallback(async () => {
-    if (!diagnostics) return;
-    const nextHealth = await diagnostics.health();
-    setHealth(nextHealth);
-  }, [diagnostics]);
-
-  const refresh = useCallback(async () => {
-    await Promise.allSettled([refreshSnapshot(), refreshHealth()]);
-  }, [refreshHealth, refreshSnapshot]);
-
-  useEffect(() => {
-    void refresh();
-    if (!diagnostics) return;
-    const unsubscribe = diagnostics.subscribe(() => {
-      void refreshSnapshot().catch(() => undefined);
-    });
-    const timer = window.setInterval(() => void refreshHealth().catch(() => undefined), 60_000);
-    return () => {
-      unsubscribe();
-      window.clearInterval(timer);
-    };
-  }, [diagnostics, refresh, refreshHealth, refreshSnapshot]);
-
-  if (!diagnostics) return null;
-  const latestRequestId = snapshot?.events.find((event) => event.requestId)?.requestId;
-  const latestError = snapshot?.events.find((event) => event.severity === 'error');
-  const latestTurnstile = snapshot?.events.find((event) =>
-    event.eventType.startsWith('turnstile_'),
-  );
-  const latestSuccess = snapshot?.events.find(
-    (event) => event.eventType === 'turnstile_success' || event.eventType === 'health_result',
-  );
-  const exportValue = snapshot
-    ? {
-        schema: 'mirna-beta-diagnostics-v1',
-        generatedAt: new Date().toISOString(),
-        supportId: snapshot.supportId,
-        applicationVersion: APPLICATION_VERSION,
-        worker: health
-          ? {
-              buildCommit: health.buildCommit,
-              status: health.status,
-              environment: health.environment,
-              services: health.services,
-              readiness: health.readiness,
-            }
-          : null,
-        events: snapshot.events,
-      }
-    : null;
-
-  const copy = async (value: string, successMessage: string) => {
-    setMessage('');
-    try {
-      await copyPlainText(value);
-      setMessage(successMessage);
-    } catch {
-      setMessage('Kopiranje nije dostupno u ovom pregledaču.');
-    }
-  };
-
-  return (
-    <Card className="grid min-w-0 gap-4 overflow-hidden" data-testid="sync-beta-diagnostics">
-      <div>
-        <SectionTitle>Beta dijagnostika</SectionTitle>
-        <p className="mt-2 text-sm leading-6 text-muted">
-          Čuva samo tehničke događaje, bez iznosa, opisa, recovery koda, ključeva, tokena ili IP
-          adrese. Lokalna istorija je ograničena na 200 događaja.
-        </p>
-      </div>
-      <dl className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
-        <div className="min-w-0 rounded-xl bg-surface-2 p-3">
-          <dt className="text-xs font-semibold text-muted">Support ID</dt>
-          <dd className="mt-1 min-w-0">
-            {snapshot?.supportId ? (
-              <ExpandableOpaqueValue value={snapshot.supportId} label="Support ID" />
-            ) : (
-              'Učitavam…'
-            )}
-          </dd>
-        </div>
-        <div className="min-w-0 rounded-xl bg-surface-2 p-3">
-          <dt className="text-xs font-semibold text-muted">Poslednji Request ID</dt>
-          <dd className="mt-1 min-w-0">
-            {latestRequestId ? (
-              <ExpandableOpaqueValue value={latestRequestId} label="Request ID" />
-            ) : (
-              'Nije zabeležen'
-            )}
-          </dd>
-        </div>
-        <div className="min-w-0 rounded-xl bg-surface-2 p-3">
-          <dt className="text-xs font-semibold text-muted">Build</dt>
-          <dd className="mt-1 min-w-0 font-bold">
-            <span className="block">aplikacija {APPLICATION_VERSION}</span>
-            {health?.buildCommit ? (
-              <span className="mt-1 block min-w-0">
-                Worker <ExpandableOpaqueValue value={health.buildCommit} label="Worker build" />
-              </span>
-            ) : (
-              <span className="block">Worker nije dostupan</span>
-            )}
-          </dd>
-        </div>
-        <div className="rounded-xl bg-surface-2 p-3">
-          <dt className="text-xs font-semibold text-muted">Health</dt>
-          <dd className="mt-1 font-bold">
-            {health
-              ? `${health.status}; D1 ${health.services.d1}; R2 ${health.services.r2}; schema ${health.readiness?.accountingSchema ?? 'nije dostupna'}; accounting ${health.readiness?.accountingState ?? 'nije dostupan'}; route budgets ${health.readiness?.routeBudgetConformance ?? 'nije dostupno'}; writes ${health.readiness?.writes ?? (health.writesEnabled ? 'enabled' : 'disabled')}`
-              : 'Nije dostupan'}
-          </dd>
-        </div>
-      </dl>
-      <div className="grid gap-1 text-xs leading-5 text-muted">
-        <p>
-          Poslednja greška: {latestError?.safeCode ?? latestError?.eventType ?? 'nema'}
-          {latestError?.verificationReason ? ` — ${latestError.verificationReason}` : ''}
-        </p>
-        {latestError?.accountingCategory ? (
-          <p>
-            Accounting: {latestError.accountingCategory}; razlog{' '}
-            {latestError.accountingReason ?? 'nije zabeležen'}; faza{' '}
-            {latestError.reservationPhase ?? 'nije zabeležena'}; ruta{' '}
-            {latestError.route ?? 'nije zabeležena'}
-          </p>
-        ) : null}
-        {latestError?.accountingCategory ? (
-          <p>
-            Poslovni upis: {latestError.businessCommitted ? 'commitovan' : 'nije commitovan'};
-            business rad:{' '}
-            {latestError.businessWorkStarted === false ? 'nije započet' : 'započet ili nepoznat'};
-            fault uloga: {latestError.faultRole ?? 'nije zabeležena'}; service flags:{' '}
-            {latestError.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
-          </p>
-        ) : null}
-        {latestError?.originRequestId ? (
-          <p className="min-w-0">
-            Origin fault:{' '}
-            <ExpandableOpaqueValue
-              value={latestError.originRequestId}
-              label="Origin fault Request ID"
-            />{' '}
-            ({latestError.originRoute ?? 'ruta nije zabeležena'})
-          </p>
-        ) : null}
-        <p>Klijentska faza: {latestTurnstile?.eventType ?? 'nije zabeležena'}</p>
-        <p>Vreme: {formatDateTime(latestTurnstile?.createdAt)}</p>
-        <p>Klijentski build: {latestTurnstile?.build ?? APPLICATION_VERSION}</p>
-        <p>
-          Poslednji uspeh:{' '}
-          {latestSuccess ? `${latestSuccess.eventType} — ${latestSuccess.createdAt}` : 'nema'}
-        </p>
-      </div>
-      <details className="min-w-0 rounded-xl border bg-surface-2 p-3">
-        <summary className="cursor-pointer font-bold">Poslednji tehnički događaji</summary>
-        <div className="mt-3 grid min-w-0 gap-2">
-          {(snapshot?.events ?? []).slice(0, 10).map((event) => (
-            <details key={event.id} className="min-w-0 rounded-lg bg-surface p-3 text-xs">
-              <summary className="cursor-pointer">
-                <span className={event.severity === 'error' ? 'text-danger' : 'text-accent'}>
-                  {event.severity === 'error' ? 'Greška' : 'Uspeh'}
-                </span>{' '}
-                · {event.eventType} · {formatDateTime(event.createdAt)}
-              </summary>
-              <dl className="mt-2 grid min-w-0 gap-1 text-muted">
-                {event.safeCode ? <div>Kod: {event.safeCode}</div> : null}
-                {event.verificationReason ? <div>Razlog: {event.verificationReason}</div> : null}
-                {event.accountingCategory ? (
-                  <div>Accounting kategorija: {event.accountingCategory}</div>
-                ) : null}
-                {event.accountingReason ? (
-                  <div>Accounting razlog: {event.accountingReason}</div>
-                ) : null}
-                {event.reservationPhase ? <div>Faza: {event.reservationPhase}</div> : null}
-                {event.route ? <div>Ruta: {event.route}</div> : null}
-                {event.lifecycleOperation ? (
-                  <div>Lifecycle operacija: {event.lifecycleOperation}</div>
-                ) : null}
-                {event.faultRole ? <div>Fault uloga: {event.faultRole}</div> : null}
-                {event.originRequestId ? (
-                  <div className="min-w-0">
-                    Origin Request ID:{' '}
-                    <ExpandableOpaqueValue
-                      value={event.originRequestId}
-                      label="Origin fault Request ID događaja"
-                    />
-                    {event.originRoute ? ` (${event.originRoute})` : ''}
-                  </div>
-                ) : null}
-                {event.accountingCategory ? (
-                  <div>
-                    Poslovni upis: {event.businessCommitted ? 'commitovan' : 'nije commitovan'};
-                    business rad:{' '}
-                    {event.businessWorkStarted === false ? 'nije započet' : 'započet ili nepoznat'};
-                    flagovi: {event.serviceFlagsChanged ? 'promenjeni' : 'nisu promenjeni'}
-                  </div>
-                ) : null}
-                {event.workerBuild ? <div>Worker build: {event.workerBuild}</div> : null}
-                {event.requestId ? (
-                  <div className="min-w-0">
-                    Request ID:{' '}
-                    <ExpandableOpaqueValue value={event.requestId} label="Request ID događaja" />
-                  </div>
-                ) : null}
-                {event.verificationAttemptId ? (
-                  <div className="min-w-0">
-                    Attempt ID:{' '}
-                    <ExpandableOpaqueValue
-                      value={event.verificationAttemptId}
-                      label="Verification Attempt ID"
-                    />
-                  </div>
-                ) : null}
-              </dl>
-            </details>
-          ))}
-          {snapshot?.events.length === 0 ? <p>Nema zabeleženih događaja.</p> : null}
-        </div>
-      </details>
-      <div className="grid min-w-0 gap-2 sm:grid-cols-2">
-        <Button className="w-full" variant="secondary" onClick={() => void refresh()}>
-          <RefreshCw size={17} aria-hidden="true" /> Osveži dijagnostiku
-        </Button>
-        <Button
-          className="w-full"
-          variant="secondary"
-          disabled={!snapshot}
-          onClick={() => snapshot && void copy(snapshot.supportId, 'Support ID je kopiran.')}
-        >
-          <Copy size={17} aria-hidden="true" /> Kopiraj Support ID
-        </Button>
-        <Button
-          className="w-full"
-          variant="secondary"
-          disabled={!latestRequestId}
-          onClick={() => latestRequestId && void copy(latestRequestId, 'Request ID je kopiran.')}
-        >
-          <Copy size={17} aria-hidden="true" /> Kopiraj Request ID
-        </Button>
-        <Button
-          className="w-full"
-          variant="secondary"
-          disabled={!exportValue}
-          onClick={() =>
-            exportValue &&
-            void copy(JSON.stringify(exportValue, null, 2), 'Dijagnostika je kopirana.')
-          }
-        >
-          <Copy size={17} aria-hidden="true" /> Kopiraj dijagnostiku
-        </Button>
-        <Button
-          className="w-full"
-          variant="secondary"
-          disabled={!exportValue}
-          onClick={() => exportValue && downloadJson('mirna-beta-dijagnostika.json', exportValue)}
-        >
-          <Download size={17} aria-hidden="true" /> Preuzmi dijagnostiku
-        </Button>
-        <Button
-          className="w-full"
-          variant="ghost"
-          disabled={!snapshot || snapshot.events.length === 0}
-          onClick={() => {
-            void diagnostics.clear().then(async () => {
-              setMessage('Lokalna istorija dijagnostike je obrisana; Support ID je sačuvan.');
-              await refresh();
-            });
-          }}
-        >
-          <Trash2 size={17} aria-hidden="true" /> Obriši istoriju
-        </Button>
-      </div>
-      <p className="rounded-xl bg-warning-soft p-3 text-xs leading-5 text-warning">
-        Pre slanja podršci pregledajte fajl. Mirna dijagnostika nikada ne treba da sadrži
-        finansijske podatke ili tajne.
-      </p>
-      {message ? (
-        <p role="status" className="text-sm text-muted">
-          {message}
-        </p>
-      ) : null}
-    </Card>
-  );
-};
+const suggestedDeviceName = (): string =>
+  /Android|iPhone|Mobile/u.test(navigator.userAgent) ? 'Moj telefon' : 'Moj računar';
 
 const EmptyModeChooser = ({
   preOnboarding,
@@ -494,7 +82,8 @@ const EmptyModeChooser = ({
           uređaju
         </span>
         <span className="mt-1 block text-sm leading-6 text-muted">
-          Napravite novi šifrovani trezor i recovery kod. Prvi prenos zahteva posebnu saglasnost.
+          Uključite sinhronizaciju i sačuvajte kod za oporavak. Prvi prenos zahteva posebnu
+          saglasnost.
         </span>
       </button>
     ) : null}
@@ -524,7 +113,7 @@ const EmptyModeChooser = ({
     </button>
     {preOnboarding ? (
       <p className="rounded-xl bg-warning-soft p-3 text-xs leading-5 text-warning">
-        Posle uparivanja Mirna preuzima samo E2EE snapshot i proverava ga pre lokalne primene.
+        Posle povezivanja Mirna bezbedno preuzima i proverava podatke pre nego što ih prikaže.
       </p>
     ) : null}
   </div>
@@ -541,7 +130,7 @@ const EnablePanel = ({
 }) => {
   const { success } = useToast();
   const lifecycle = useRef<EnableLifecyclePort | null>(null);
-  const [deviceName, setDeviceName] = useState('Moj uređaj');
+  const [deviceName, setDeviceName] = useState(suggestedDeviceName);
   const [capability, setCapability] = useState<'idle' | 'checking' | 'supported' | 'unsupported'>(
     'idle',
   );
@@ -554,7 +143,7 @@ const EnablePanel = ({
   const [activationRetryAvailable, setActivationRetryAvailable] = useState(false);
   const activationInFlight = useRef(false);
 
-  const checkCapability = async () => {
+  const checkCapability = useCallback(async () => {
     setCapability('checking');
     setError('');
     try {
@@ -563,7 +152,11 @@ const EnablePanel = ({
     } catch {
       setCapability('unsupported');
     }
-  };
+  }, [services]);
+
+  useEffect(() => {
+    void checkCapability();
+  }, [checkCapability]);
 
   const begin = async () => {
     if (capability !== 'supported' || busy) return;
@@ -620,7 +213,7 @@ const EnablePanel = ({
       setActivationError(undefined);
       setPresentation(undefined);
       setConfirmationValues({});
-      success('Šifrovana sinhronizacija je aktivirana na ovom uređaju.');
+      success('Sinhronizacija je spremna na ovom uređaju.');
       await onActivated();
     } catch (caught) {
       setActivationError(caught instanceof SyncApiError ? caught : undefined);
@@ -649,9 +242,8 @@ const EnablePanel = ({
         <div>
           <SectionTitle>Uključivanje na prvom uređaju</SectionTitle>
           <p className="mt-2 text-sm leading-6 text-muted">
-            Mirna pravi ključeve lokalno. Server dobija samo šifrovane pakete i javne podatke
-            potrebne za proveru uređaja. U ovoj fazi aktivirate bezbedni trezor; prvi prenos
-            finansijskih podataka zahtevaće posebnu saglasnost u narednoj beta fazi.
+            Mirna šifruje podatke na ovom uređaju pre slanja. Prvi prenos finansijskih podataka
+            zahtevaće vašu posebnu saglasnost.
           </p>
         </div>
         <div className="rounded-xl bg-surface-2 p-3 text-sm">
@@ -679,18 +271,9 @@ const EnablePanel = ({
             </p>
           ) : null}
         </div>
-        {capability !== 'supported' ? (
-          <Button
-            variant="secondary"
-            onClick={() => void checkCapability()}
-            disabled={capability === 'checking'}
-          >
-            {capability === 'checking' ? (
-              <BusyIcon />
-            ) : (
-              <ShieldCheck size={17} aria-hidden="true" />
-            )}
-            Proveri ovaj uređaj
+        {capability === 'unsupported' ? (
+          <Button variant="secondary" onClick={() => void checkCapability()}>
+            <ShieldCheck size={17} aria-hidden="true" /> Pokušaj proveru ponovo
           </Button>
         ) : null}
         {capability === 'supported' && !presentation ? (
@@ -733,25 +316,26 @@ const EnablePanel = ({
         </Button>
       ) : null}
       {presentation && confirmed ? (
-        <Card className="grid gap-3 border-accent/30 bg-accent-soft/30">
-          <p className="text-sm leading-6">
-            Kod je potvrđen. Aktivacija sada registruje javni manifest i šifrovani recovery paket;
-            finansijski podaci se ne šalju.
-          </p>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Button onClick={() => void activate()} disabled={busy}>
-              {busy ? <BusyIcon /> : <ShieldCheck size={17} aria-hidden="true" />}
-              {activationRetryAvailable
-                ? 'Pokušaj aktivaciju ponovo'
-                : 'Aktiviraj šifrovanu sinhronizaciju'}
-            </Button>
-            {activationRetryAvailable ? (
-              <Button variant="ghost" disabled={busy} onClick={onBack}>
-                Odustani
+        <>
+          <TurnstileCard services={services} />
+          <Card className="grid gap-3 border-accent/30 bg-accent-soft/30">
+            <p className="text-sm leading-6">
+              Kod je potvrđen. Mirna sada može da pripremi bezbednu sinhronizaciju; finansijski
+              podaci se još ne šalju.
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Button onClick={() => void activate()} disabled={busy}>
+                {busy ? <BusyIcon /> : <ShieldCheck size={17} aria-hidden="true" />}
+                {activationRetryAvailable ? 'Pokušaj ponovo' : 'Pripremi sinhronizaciju'}
               </Button>
-            ) : null}
-          </div>
-        </Card>
+              {activationRetryAvailable ? (
+                <Button variant="ghost" disabled={busy} onClick={onBack}>
+                  Odustani
+                </Button>
+              ) : null}
+            </div>
+          </Card>
+        </>
       ) : null}
       <InlineError message={error} />
       {activationError?.accounting ? (
@@ -786,7 +370,7 @@ const NewDevicePairingPanel = ({
   const { success } = useToast();
   const lifecycle = useRef<NewDevicePairingLifecyclePort | null>(null);
   const pollInFlight = useRef(false);
-  const [deviceName, setDeviceName] = useState('Novi uređaj');
+  const [deviceName, setDeviceName] = useState(suggestedDeviceName);
   const [presentation, setPresentation] = useState<PairingCodePresentation>();
   const [stage, setStage] = useState<NewPairingStage>(resumeAvailable ? 'resume' : 'idle');
   const [sas, setSas] = useState('');
@@ -891,7 +475,9 @@ const NewDevicePairingPanel = ({
     setError('');
     try {
       await lifecycle.current.cancel();
-      success(mismatch ? 'Zahtev je otkazan jer se SAS ne poklapa.' : 'Zahtev je otkazan.');
+      success(
+        mismatch ? 'Zahtev je otkazan jer se bezbednosni kod ne poklapa.' : 'Zahtev je otkazan.',
+      );
     } catch {
       setError('Lokalni podaci zahteva su odbačeni. Server možda čeka da zahtev istekne.');
     } finally {
@@ -959,6 +545,7 @@ const NewDevicePairingPanel = ({
                 autoComplete="off"
               />
             </Field>
+            <TurnstileCard services={services} />
             <Button onClick={() => void start()} disabled={busy || deviceName.trim().length === 0}>
               {busy ? <BusyIcon /> : <QrCode size={17} aria-hidden="true" />}
               Napravi zahtev za povezivanje
@@ -1014,9 +601,10 @@ const NewDevicePairingPanel = ({
       {stage === 'sas' && sas ? (
         <Card className="grid gap-4 border-warning/40">
           <div>
-            <SectionTitle>Uporedite SAS na oba uređaja</SectionTitle>
+            <SectionTitle>Uporedite bezbednosni kod</SectionTitle>
             <p className="mt-2 text-sm leading-6 text-muted">
-              Potvrdite samo ako su sve grupe potpuno iste. Ne čitajte vrednost trećoj osobi.
+              Potvrdite samo ako su sve grupe potpuno iste na oba uređaja. Ne čitajte kod trećoj
+              osobi.
             </p>
           </div>
           <p
@@ -1137,6 +725,7 @@ const RecoveryPanel = ({
               </Button>
             </div>
           </Field>
+          <TurnstileCard services={services} />
           <Button
             onClick={() => void begin()}
             disabled={busy || !oldRecoveryCode || deviceName.trim().length === 0}
@@ -1177,11 +766,27 @@ interface PreparedExistingPairing {
   readonly sas: string;
 }
 
-const ExistingDeviceApproval = ({ services }: { services: SyncUiServices }) => {
+const DeviceIcon = ({ kind }: { kind?: SyncDeviceKind }) => {
+  if (kind === 'computer') return <Laptop size={20} aria-hidden="true" />;
+  if (kind === 'tablet') return <Tablet size={20} aria-hidden="true" />;
+  return <Smartphone size={20} aria-hidden="true" />;
+};
+
+const ExistingDeviceApproval = ({
+  services,
+  vaultId,
+  onChanged,
+}: {
+  services: SyncUiServices;
+  vaultId: string;
+  onChanged: () => Promise<void>;
+}) => {
   const { success } = useToast();
   const lifecycle = useRef<ExistingDevicePairingLifecyclePort | null>(null);
   const [code, setCode] = useState('');
   const [prepared, setPrepared] = useState<PreparedExistingPairing>();
+  const [alias, setAlias] = useState('Drugi uređaj');
+  const [kind, setKind] = useState<SyncDeviceKind>('other');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -1213,9 +818,15 @@ const ExistingDeviceApproval = ({ services }: { services: SyncUiServices }) => {
     setError('');
     try {
       await lifecycle.current.approve(prepared.sas);
+      try {
+        await services.saveDeviceAlias(vaultId, prepared.deviceId, alias, kind);
+      } catch {
+        setError('Uređaj je povezan, ali lokalni naziv nije sačuvan. Možete ga dodati kasnije.');
+      }
       setPrepared(undefined);
       lifecycle.current = null;
-      success('Zahtev je odobren. Potvrdite isti SAS i na novom uređaju.');
+      success('Zahtev je odobren. Isti bezbednosni kod sada će se pojaviti na novom uređaju.');
+      await onChanged();
     } catch (caught) {
       setError(safeErrorMessage(caught));
     } finally {
@@ -1265,7 +876,7 @@ const ExistingDeviceApproval = ({ services }: { services: SyncUiServices }) => {
             <p className="text-muted">Zahtev važi do {formatDateTime(prepared.expiresAt)}.</p>
           </div>
           <div>
-            <p className="text-sm font-bold">SAS za poređenje</p>
+            <p className="text-sm font-bold">Bezbednosni kod</p>
             <p
               data-testid="sync-existing-device-sas"
               className="mt-2 rounded-xl bg-warning-soft p-4 text-center font-mono text-xl font-black tracking-wider text-warning break-words"
@@ -1273,13 +884,36 @@ const ExistingDeviceApproval = ({ services }: { services: SyncUiServices }) => {
               {prepared.sas}
             </p>
             <p className="mt-2 text-xs leading-5 text-muted">
-              Odobrite samo ako su sve grupe potpuno iste na novom uređaju.
+              U sledećem koraku isti kod će se pojaviti i na novom uređaju. Tada ih uporedite pre
+              konačne potvrde na tom uređaju.
             </p>
           </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Naziv na ovom uređaju">
+              <Input
+                value={alias}
+                onChange={(event) => setAlias(event.target.value)}
+                maxLength={80}
+                autoComplete="off"
+              />
+            </Field>
+            <Field label="Vrsta uređaja">
+              <select
+                className="min-h-11 w-full rounded-xl border bg-surface px-3 text-sm"
+                value={kind}
+                onChange={(event) => setKind(event.target.value as SyncDeviceKind)}
+              >
+                <option value="phone">Telefon</option>
+                <option value="computer">Računar</option>
+                <option value="tablet">Tablet</option>
+                <option value="other">Drugi uređaj</option>
+              </select>
+            </Field>
+          </div>
           <div className="grid gap-2 sm:grid-cols-2">
-            <Button onClick={() => void approve()} disabled={busy}>
+            <Button onClick={() => void approve()} disabled={busy || alias.trim().length === 0}>
               {busy ? <BusyIcon /> : <CheckCircle2 size={17} aria-hidden="true" />}
-              Poklapa se — odobri
+              Nastavi povezivanje
             </Button>
             <Button variant="danger" onClick={reject} disabled={busy}>
               <ShieldX size={17} aria-hidden="true" /> Ne poklapa se — odbij
@@ -1295,12 +929,16 @@ const ExistingDeviceApproval = ({ services }: { services: SyncUiServices }) => {
 const ActivePanel = ({
   status,
   services,
+  activity,
+  synchronizeRuntime,
   preOnboarding,
   onDisabled,
   onChanged,
 }: {
   status: SyncUiLocalStatus & { readonly setup: LocalSyncSetup };
   services: SyncUiServices;
+  activity: SyncActivity;
+  synchronizeRuntime: SyncRuntimeValue['synchronize'];
   preOnboarding: boolean;
   onDisabled: () => Promise<void>;
   onChanged: () => Promise<void>;
@@ -1319,19 +957,121 @@ const ActivePanel = ({
   const [recoveryCode, setRecoveryCode] = useState('');
   const [revokeConfirmation, setRevokeConfirmation] = useState('');
   const [showCloudDelete, setShowCloudDelete] = useState(false);
+  const [showAddDevice, setShowAddDevice] = useState(false);
+  const [renameDeviceId, setRenameDeviceId] = useState<string>();
+  const [aliasLabel, setAliasLabel] = useState('');
+  const [aliasKind, setAliasKind] = useState<SyncDeviceKind>('other');
   const [cloudRecoveryCode, setCloudRecoveryCode] = useState('');
   const [cloudDeleteConfirmation, setCloudDeleteConfirmation] = useState('');
   const { setup } = status;
-  const authorizationExpired = Date.parse(setup.device.authorizationExpiresAt) <= Date.now();
   const disablePhrase = 'ISKLJUČI OVAJ UREĐAJ';
   const revokePhrase = 'OPOZOVI UREĐAJ';
+  const pairedBootstrapPending =
+    setup.metadata.bootstrapMode === 'paired-download' && setup.metadata.lastSnapshotRevision === 0;
+  const aliasesByDeviceId = useMemo(
+    () => new Map(status.deviceAliases.map((alias) => [alias.deviceId, alias])),
+    [status.deviceAliases],
+  );
 
-  const synchronize = async (allowInitialUpload = false, forceCompaction = false) => {
+  const beginRename = (deviceId: string) => {
+    const current = aliasesByDeviceId.get(deviceId);
+    setRenameDeviceId(deviceId);
+    setAliasLabel(current?.label ?? 'Drugi uređaj');
+    setAliasKind(current?.kind ?? 'other');
+  };
+
+  const saveAlias = async () => {
+    if (!renameDeviceId || aliasLabel.trim().length === 0 || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await services.saveDeviceAlias(setup.vault.vaultId, renameDeviceId, aliasLabel, aliasKind);
+      setRenameDeviceId(undefined);
+      success('Naziv uređaja je sačuvan samo na ovom uređaju.');
+      await onChanged();
+    } catch (caught) {
+      setError(safeErrorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const overview = (() => {
+    if (navigator.onLine === false) {
+      return {
+        title: 'Nema interneta',
+        description: 'Promene ostaju bezbedno na ovom uređaju i poslaće se kada se veza vrati.',
+        tone: 'warning' as const,
+        icon: <WifiOff size={22} aria-hidden="true" />,
+      };
+    }
+    if (activity.kind === 'syncing') {
+      return {
+        title: pairedBootstrapPending ? 'Preuzimam vaše podatke…' : 'Sinhronizujem…',
+        description: 'Mirna bezbedno obrađuje promene u pozadini.',
+        tone: 'neutral' as const,
+        icon: <BusyIcon />,
+      };
+    }
+    if (activity.kind === 'paused') {
+      return {
+        title: 'Sinhronizacija je privremeno pauzirana',
+        description: 'Testni servis je dostigao ograničenje. Lokalne promene ostaju sačuvane.',
+        tone: 'warning' as const,
+        icon: <TriangleAlert size={22} aria-hidden="true" />,
+      };
+    }
+    if (activity.kind === 'attention' || setup.metadata.syncBlockReason) {
+      return {
+        title: pairedBootstrapPending ? 'Preuzimanje čeka' : 'Potrebna je pažnja',
+        description: pairedBootstrapPending
+          ? 'Povezivanje je završeno, ali početni podaci još nisu preuzeti.'
+          : 'Lokalni podaci nisu prepisani. Pogledajte upozorenje ispod ili pokušajte ponovo.',
+        tone: 'warning' as const,
+        icon: <TriangleAlert size={22} aria-hidden="true" />,
+      };
+    }
+    if (pairedBootstrapPending) {
+      return {
+        title: 'Povezano — preuzimanje počinje automatski',
+        description: 'Ostanite na mreži dok Mirna priprema podatke na ovom uređaju.',
+        tone: 'neutral' as const,
+        icon: <RefreshCw size={22} aria-hidden="true" />,
+      };
+    }
+    if (status.pendingLocalOperationCount > 0) {
+      return {
+        title: `${status.pendingLocalOperationCount} promene čekaju slanje`,
+        description: 'Mirna će ih poslati automatski dok je aplikacija otvorena.',
+        tone: 'neutral' as const,
+        icon: <CloudUpload size={22} aria-hidden="true" />,
+      };
+    }
+    if (setup.metadata.lastSuccessfulSyncAt) {
+      return {
+        title: 'Sve je sinhronizovano',
+        description: `Poslednji put ${formatRelativeSyncTime(setup.metadata.lastSuccessfulSyncAt)}`,
+        tone: 'positive' as const,
+        icon: <CheckCircle2 size={22} aria-hidden="true" />,
+      };
+    }
+    return {
+      title: 'Sinhronizacija je uključena',
+      description: 'Prva bezbedna provera će se pokrenuti automatski.',
+      tone: 'neutral' as const,
+      icon: <ShieldCheck size={22} aria-hidden="true" />,
+    };
+  })();
+
+  const synchronize = async (allowInitialUpload = false) => {
     if (busy) return;
     setBusy(true);
     setError('');
     try {
-      const result = await services.synchronize(allowInitialUpload, forceCompaction);
+      const result = await synchronizeRuntime({
+        allowInitialUpload,
+        reason: allowInitialUpload ? 'first-upload' : 'manual',
+      });
       if (result.kind === 'blocked') {
         setError(
           'Sinhronizacija je bezbedno zaustavljena zbog konflikta ili neočekivanog remote stanja.',
@@ -1467,7 +1207,9 @@ const ActivePanel = ({
       await services.deleteCloudVault(cloudRecoveryCode, cloudDeleteConfirmation);
       setCloudRecoveryCode('');
       setCloudDeleteConfirmation('');
-      success('Šifrovani cloud trezor je obrisan. Lokalni finansijski podaci su sačuvani.');
+      success(
+        'Brisanje šifrovanog cloud trezora je pokrenuto. Lokalni finansijski podaci su sačuvani.',
+      );
       await onDisabled();
     } catch (caught) {
       setCloudRecoveryCode('');
@@ -1480,80 +1222,54 @@ const ActivePanel = ({
   return (
     <div className="grid gap-5">
       <Card className="grid gap-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <SectionTitle>Ovaj uređaj je povezan</SectionTitle>
-            <p className="mt-1 text-sm text-muted">{setup.device.displayName}</p>
+        <div className="flex min-w-0 items-start gap-3" role="status">
+          <span
+            className={
+              overview.tone === 'positive'
+                ? 'grid size-11 shrink-0 place-items-center rounded-full bg-accent-soft text-accent'
+                : overview.tone === 'warning'
+                  ? 'grid size-11 shrink-0 place-items-center rounded-full bg-warning-soft text-warning'
+                  : 'grid size-11 shrink-0 place-items-center rounded-full bg-surface-2 text-muted'
+            }
+          >
+            {overview.icon}
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-lg font-extrabold">{overview.title}</h2>
+            <p className="mt-1 text-sm leading-6 text-muted">{overview.description}</p>
           </div>
-          <StatusBadge tone={authorizationExpired ? 'warning' : 'positive'}>
-            {authorizationExpired ? 'Ovlašćenje je isteklo' : 'Aktivno'}
-          </StatusBadge>
         </div>
-        <dl className="grid gap-3 text-sm sm:grid-cols-2">
-          <div className="rounded-xl bg-surface-2 p-3">
-            <dt className="text-xs font-semibold text-muted">ID ovog uređaja</dt>
-            <dd className="mt-1 font-mono font-bold">{truncateOpaqueId(setup.device.deviceId)}</dd>
-          </div>
-          <div className="rounded-xl bg-surface-2 p-3">
-            <dt className="text-xs font-semibold text-muted">Ovlašćen do</dt>
-            <dd className="mt-1 font-bold">
-              {formatDateTime(setup.device.authorizationExpiresAt)}
-            </dd>
-          </div>
-          <div className="rounded-xl bg-surface-2 p-3">
-            <dt className="text-xs font-semibold text-muted">Poslednja sinhronizacija</dt>
-            <dd className="mt-1 font-bold">
-              {formatDateTime(setup.metadata.lastSuccessfulSyncAt ?? setup.metadata.lastSyncAt)}
-            </dd>
-          </div>
-          <div className="rounded-xl bg-surface-2 p-3">
-            <dt className="text-xs font-semibold text-muted">Nerešeni konflikti</dt>
-            <dd className="mt-1 font-bold">{status.pendingConflictCount}</dd>
-          </div>
-          <div className="rounded-xl bg-surface-2 p-3">
-            <dt className="text-xs font-semibold text-muted">Lokalne promene na čekanju</dt>
-            <dd className="mt-1 font-bold">{status.pendingLocalOperationCount}</dd>
-          </div>
-        </dl>
-        {navigator.onLine === false ? (
-          <p role="status" className="rounded-xl bg-warning-soft p-3 text-sm text-warning">
-            Nema mreže — promene ostaju na ovom uređaju.
-          </p>
-        ) : status.pendingLocalOperationCount > 0 ? (
-          <p role="status" className="rounded-xl bg-surface-2 p-3 text-sm text-muted">
-            Čekaju {status.pendingLocalOperationCount} lokalne promene.
-          </p>
-        ) : status.pendingConflictCount === 0 && setup.metadata.lastSuccessfulSyncAt ? (
-          <p role="status" className="rounded-xl bg-accent-soft p-3 text-sm text-accent">
-            Sinhronizovano.
-          </p>
-        ) : null}
+        <div className="grid gap-2 min-[390px]:grid-cols-2">
+          <Button variant="secondary" onClick={() => setShowAddDevice((current) => !current)}>
+            <Smartphone size={17} aria-hidden="true" /> Dodaj uređaj
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy || Boolean(setup.metadata.syncBlockReason)}
+            onClick={() => void synchronize(false)}
+          >
+            {busy ? <BusyIcon /> : <RefreshCw size={17} aria-hidden="true" />}
+            Sinhronizuj sada
+          </Button>
+        </div>
         {setup.metadata.bootstrapMode === 'creator-upload' &&
         setup.metadata.firstUploadConsent === 'pending' ? (
           <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
             <p>
-              Prvi upload čeka posebnu saglasnost. Mirna će lokalno napraviti snapshot, kompresovati
-              ga i šifrovati pre slanja; server ne dobija čitljive finansijske podatke.
+              Prvi prenos čeka vašu posebnu saglasnost. Mirna će podatke šifrovati na ovom uređaju
+              pre slanja; servis ne dobija čitljive finansijske podatke.
             </p>
             <Button disabled={busy} onClick={() => void synchronize(true)}>
               {busy ? <BusyIcon /> : <CloudUpload size={17} aria-hidden="true" />}
-              Saglasan sam — pošalji prvi šifrovani snapshot
+              Saglasan sam — pošalji prve šifrovane podatke
             </Button>
           </div>
         ) : null}
-        {setup.metadata.bootstrapMode === 'paired-download' &&
-        setup.metadata.lastSnapshotRevision === 0 ? (
-          <div className="grid gap-3 rounded-xl bg-warning-soft p-3 text-sm leading-6 text-warning">
-            <p>
-              Ovaj uređaj je povezan, ali još nije preuzeo početni šifrovani snapshot. Lokalno
-              stanje će prvo biti sačuvano kao safety checkpoint.
-            </p>
-
-            <Button disabled={busy} onClick={() => void synchronize(false)}>
-              {busy ? <BusyIcon /> : <CloudUpload size={17} aria-hidden="true" />}
-              Preuzmi podatke sa povezanog uređaja
-            </Button>
-          </div>
+        {pairedBootstrapPending && activity.kind === 'attention' ? (
+          <Button disabled={busy} onClick={() => void synchronize(false)}>
+            {busy ? <BusyIcon /> : <RefreshCw size={17} aria-hidden="true" />}
+            Pokušaj preuzimanje ponovo
+          </Button>
         ) : null}
         {setup.metadata.syncBlockReason ? (
           <p role="alert" className="rounded-xl bg-danger-soft p-3 text-sm leading-6 text-danger">
@@ -1561,14 +1277,31 @@ const ActivePanel = ({
             podaci nisu prepisani.
           </p>
         ) : null}
-        <Button
-          variant="secondary"
-          disabled={busy || Boolean(setup.metadata.syncBlockReason)}
-          onClick={() => void synchronize(false, true)}
-        >
-          {busy ? <BusyIcon /> : <RefreshCw size={17} aria-hidden="true" />}
-          Sinhronizuj sada
-        </Button>
+        <details className="rounded-xl border bg-surface-2 p-3 text-sm">
+          <summary className="min-h-8 cursor-pointer font-bold">Tehnički detalji</summary>
+          <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div>
+              <dt className="text-xs text-muted">ID ovog uređaja</dt>
+              <dd className="mt-1 break-all font-mono">{setup.device.deviceId}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Ovlašćen do</dt>
+              <dd className="mt-1">{formatDateTime(setup.device.authorizationExpiresAt)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Poslednja sinhronizacija</dt>
+              <dd className="mt-1">
+                {formatDateTime(setup.metadata.lastSuccessfulSyncAt ?? setup.metadata.lastSyncAt)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted">Promene / konflikti</dt>
+              <dd className="mt-1">
+                {status.pendingLocalOperationCount} / {status.pendingConflictCount}
+              </dd>
+            </div>
+          </dl>
+        </details>
       </Card>
 
       {status.pendingConflictCount > 0 ? (
@@ -1648,28 +1381,40 @@ const ActivePanel = ({
         <div className="border-b p-4">
           <SectionTitle>Povezani uređaji</SectionTitle>
           <p className="mt-1 text-xs leading-5 text-muted">
-            Prikazani su skraćeni, nečitljivi protokolski ID-jevi — ne nazivi uređaja.
+            Nazivi su sačuvani samo lokalno i ne šalju se Mirna servisu.
           </p>
         </div>
         <ul className="divide-y">
           {setup.vault.manifest.devices.map((device) => {
             const isLocal = device.deviceId === setup.device.deviceId;
+            const alias = aliasesByDeviceId.get(device.deviceId);
+            const deviceLabel = isLocal
+              ? setup.device.displayName
+              : (alias?.label ?? 'Drugi uređaj');
             const expiringSoon =
               Date.parse(device.authorizationExpiresAt) - Date.now() <= 5 * 24 * 60 * 60 * 1_000;
             return (
               <li key={device.deviceId} className="grid min-w-0 gap-3 p-4 text-sm">
                 <div className="flex min-w-0 items-center gap-3">
-                  <Smartphone size={18} className="shrink-0 text-muted" aria-hidden="true" />
+                  <span className="grid size-10 shrink-0 place-items-center rounded-full bg-surface-2 text-muted">
+                    <DeviceIcon kind={alias?.kind} />
+                  </span>
                   <div className="min-w-0 flex-1">
-                    <p className="font-mono font-bold">{truncateOpaqueId(device.deviceId)}</p>
-                    <p className="mt-1 text-xs text-muted">
-                      Ovlašćen do {formatDateTime(device.authorizationExpiresAt)}
-                    </p>
+                    <p className="font-bold">{deviceLabel}</p>
+                    <p className="mt-1 text-xs text-muted">{isLocal ? 'Ovaj uređaj' : 'Aktivan'}</p>
                   </div>
-                  {isLocal ? <StatusBadge tone="positive">Ovaj uređaj</StatusBadge> : null}
                   {expiringSoon ? <StatusBadge tone="warning">Obnova uskoro</StatusBadge> : null}
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div className="grid gap-2 min-[390px]:grid-cols-2">
+                  {!isLocal ? (
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => beginRename(device.deviceId)}
+                    >
+                      <Pencil size={16} aria-hidden="true" /> Promeni naziv
+                    </Button>
+                  ) : null}
                   <Button
                     variant="secondary"
                     disabled={busy}
@@ -1691,6 +1436,54 @@ const ActivePanel = ({
                     </Button>
                   ) : null}
                 </div>
+                {renameDeviceId === device.deviceId ? (
+                  <div className="grid gap-3 rounded-xl bg-surface-2 p-3">
+                    <Field label="Naziv uređaja">
+                      <Input
+                        value={aliasLabel}
+                        onChange={(event) => setAliasLabel(event.target.value)}
+                        maxLength={80}
+                        autoComplete="off"
+                      />
+                    </Field>
+                    <Field label="Vrsta uređaja">
+                      <select
+                        className="min-h-11 w-full rounded-xl border bg-surface px-3 text-sm"
+                        value={aliasKind}
+                        onChange={(event) => setAliasKind(event.target.value as SyncDeviceKind)}
+                      >
+                        <option value="phone">Telefon</option>
+                        <option value="computer">Računar</option>
+                        <option value="tablet">Tablet</option>
+                        <option value="other">Drugi uređaj</option>
+                      </select>
+                    </Field>
+                    <div className="grid gap-2 min-[390px]:grid-cols-2">
+                      <Button
+                        disabled={busy || aliasLabel.trim().length === 0}
+                        onClick={() => void saveAlias()}
+                      >
+                        Sačuvaj naziv
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => setRenameDeviceId(undefined)}
+                      >
+                        Odustani
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                <details className="rounded-xl bg-surface-2 p-3 text-xs">
+                  <summary className="min-h-7 cursor-pointer font-semibold">
+                    Tehnički detalji
+                  </summary>
+                  <p className="mt-2 break-all font-mono">{device.deviceId}</p>
+                  <p className="mt-1 text-muted">
+                    Ovlašćen do {formatDateTime(device.authorizationExpiresAt)}
+                  </p>
+                </details>
               </li>
             );
           })}
@@ -1711,6 +1504,7 @@ const ActivePanel = ({
               izgubljenom uređaju.
             </p>
           </div>
+          <TurnstileCard services={services} />
           <Field
             label="Recovery kod"
             hint="Kod se koristi lokalno za potvrdu i nikada se ne šalje serveru."
@@ -1783,15 +1577,40 @@ const ActivePanel = ({
         onConfirm={renewDevice}
       />
 
-      <ExistingDeviceApproval services={services} />
+      {showAddDevice ? (
+        <ExistingDeviceApproval
+          services={services}
+          vaultId={setup.vault.vaultId}
+          onChanged={onChanged}
+        />
+      ) : null}
+
+      {preOnboarding ? (
+        <Card className="grid gap-3">
+          <p className="text-sm leading-6 text-muted">
+            Uređaj i ključevi su postavljeni. Sačekajte uspešno preuzimanje pre nastavka ako ovaj
+            uređaj povezujete sa postojećim trezorom.
+          </p>
+          <Link to="/" className="inline-flex min-h-11 items-center font-bold text-accent">
+            Nastavi na lokalni onboarding
+          </Link>
+        </Card>
+      ) : null}
+
+      <div className="border-t border-danger/20 pt-5">
+        <h2 className="text-lg font-extrabold text-danger">Opasna zona</h2>
+        <p className="mt-1 text-sm leading-6 text-muted">
+          Ove radnje menjaju pristup uređaja ili trajno uklanjaju udaljene podatke i uvek traže
+          dodatnu potvrdu.
+        </p>
+      </div>
 
       <Card className="grid gap-4 border-danger/25">
         <div>
           <SectionTitle>Obriši šifrovani cloud trezor</SectionTitle>
           <p className="mt-2 text-sm leading-6 text-muted">
-            Briše R2 snapshot objekte i D1 operacije, manifeste, sesije, zahteve za uparivanje,
-            recovery omot, uređaje i operativne metapodatke. Server zadržava samo kratkotrajni
-            nečitljivi tombstone za bezbedan retry.
+            Briše šifrovane podatke, povezane uređaje i pristup sa Mirna sync servisa. Servis
+            zadržava samo kratkotrajnu nečitljivu oznaku potrebnu za bezbedno ponavljanje zahteva.
           </p>
           <p className="mt-2 text-sm font-semibold text-danger">
             Lokalni Mirna finansijski podaci se ne brišu. Ova radnja ne može da se poništi.
@@ -1803,6 +1622,7 @@ const ActivePanel = ({
           </Button>
         ) : (
           <div className="grid gap-3 rounded-xl bg-danger-soft p-3">
+            <TurnstileCard services={services} />
             <Field label="Recovery kod za cloud brisanje">
               <Input
                 aria-label="Recovery kod za cloud brisanje"
@@ -1849,18 +1669,6 @@ const ActivePanel = ({
           </div>
         )}
       </Card>
-
-      {preOnboarding ? (
-        <Card className="grid gap-3">
-          <p className="text-sm leading-6 text-muted">
-            Uređaj i ključevi su postavljeni. Sačekajte uspešno preuzimanje pre nastavka ako ovaj
-            uređaj povezujete sa postojećim trezorom.
-          </p>
-          <Link to="/" className="inline-flex min-h-11 items-center font-bold text-accent">
-            Nastavi na lokalni onboarding
-          </Link>
-        </Card>
-      ) : null}
 
       <Card className="grid gap-4 border-danger/25">
         <div>
@@ -1915,39 +1723,9 @@ const ActivePanel = ({
   );
 };
 
-const SyncContent = ({
-  services,
-  preOnboarding,
-}: {
-  services: SyncUiServices;
-  preOnboarding: boolean;
-}) => {
-  const [localStatus, setLocalStatus] = useState<SyncUiLocalStatus>();
+const SyncContent = ({ preOnboarding }: { preOnboarding: boolean }) => {
+  const { services, localStatus, loadError, activity, refresh, synchronize } = useSyncRuntime();
   const [mode, setMode] = useState<EmptyMode>('choose');
-  const [loadError, setLoadError] = useState('');
-
-  const refresh = useCallback(async () => {
-    setLoadError('');
-    try {
-      setLocalStatus(await services.loadLocalStatus());
-    } catch {
-      setLoadError(
-        'Lokalno sync podešavanje nije moguće bezbedno pročitati. Ne pokrećemo mrežne radnje.',
-      );
-    }
-  }, [services]);
-
-  const synchronizeInBackground = useCallback(() => services.synchronize(false), [services]);
-  useSnapshotSyncScheduler({
-    enabled: Boolean(localStatus?.setup),
-    vaultId: localStatus?.setup?.vault.vaultId,
-    synchronize: synchronizeInBackground,
-    onSettled: refresh,
-  });
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   const content = (() => {
     if (!localStatus && !loadError) {
@@ -1967,6 +1745,8 @@ const SyncContent = ({
         <ActivePanel
           status={{ ...localStatus, setup: localStatus.setup }}
           services={services}
+          activity={activity}
+          synchronizeRuntime={synchronize}
           preOnboarding={preOnboarding}
           onDisabled={async () => {
             setMode('choose');
@@ -2012,8 +1792,7 @@ const SyncContent = ({
   return (
     <div className="grid gap-4">
       {content}
-      <TurnstileCard services={services} />
-      <BetaDiagnosticsCard services={services} />
+      <LazyDiagnostics services={services} />
     </div>
   );
 };
@@ -2024,9 +1803,16 @@ export interface SyncManagerProps {
 }
 
 export const SyncManager = ({ preOnboarding = false, services }: SyncManagerProps) => {
-  const resolvedServices = useMemo(() => services ?? createDefaultSyncUiServices(), [services]);
-  useEffect(() => () => resolvedServices.dispose?.(), [resolvedServices]);
-  const content = <SyncContent services={resolvedServices} preOnboarding={preOnboarding} />;
+  const parentRuntime = useOptionalSyncRuntime();
+  if (services && !parentRuntime) {
+    return (
+      <SyncRuntimeProvider services={services}>
+        <SyncManager preOnboarding={preOnboarding} />
+      </SyncRuntimeProvider>
+    );
+  }
+  if (!parentRuntime) throw new Error('SyncManager requires the app-level sync runtime.');
+  const content = <SyncContent preOnboarding={preOnboarding} />;
 
   if (preOnboarding) {
     return (
@@ -2040,11 +1826,11 @@ export const SyncManager = ({ preOnboarding = false, services }: SyncManagerProp
         <header className="mb-6">
           <p className="text-sm font-semibold text-accent">Privatnost — Beta</p>
           <h1 className="mt-1 text-2xl font-extrabold tracking-tight sm:text-3xl">
-            Šifrovana sinhronizacija
+            Sinhronizacija
           </h1>
           <p className="mt-2 text-sm leading-6 text-muted">
-            Povežite ili oporavite uređaj pre lokalnog onboarding-a. Mirna nema nalog ni lozinku
-            koju može da resetuje za vas.
+            Podaci se šifruju na ovom uređaju pre slanja. Mirna nema nalog ni lozinku koju može da
+            resetuje za vas.
           </p>
         </header>
         {content}
@@ -2055,8 +1841,8 @@ export const SyncManager = ({ preOnboarding = false, services }: SyncManagerProp
   return (
     <SettingsLayout
       eyebrow="Privatnost — Beta"
-      title="Šifrovana sinhronizacija"
-      description="Accountless end-to-end enkripcija: server ne dobija čitljive finansijske podatke ni privatne ključeve."
+      title="Sinhronizacija"
+      description="Koristite iste podatke na više uređaja. Sve se šifruje na ovom uređaju pre slanja."
     >
       <div className="mx-auto max-w-3xl">{content}</div>
     </SettingsLayout>

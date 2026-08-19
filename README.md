@@ -73,7 +73,10 @@ implementation. It is disabled unless an operator supplies an explicit feature f
 is isolated from the stable production application, and has not completed an independent security
 review. The dedicated experimental target is
 [Mirna Sync — Beta](https://mirna-finansije-beta.vercel.app); use only synthetic test data and keep
-a local JSON backup. The sync
+a local JSON backup. Android PWA and desktop pairing/bootstrap/sync have completed a real staging
+exercise, but this is not a production or independent-audit claim. While the enabled app is open,
+one global runtime synchronizes on cold start, local changes, reconnect and stale foreground
+resume; it does not claim periodic execution after the OS kills the PWA process. The sync
 service receives ciphertext and operational metadata, not content-decryption keys. See the
 [sync architecture](docs/SYNC-ARCHITECTURE.md), [protocol](docs/SYNC-PROTOCOL.md),
 [recovery guide](docs/SYNC-RECOVERY.md), and [security model](docs/SYNC-SECURITY-MODEL.md).

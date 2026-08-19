@@ -17,7 +17,7 @@ if (outputRoot !== expectedOutputRoot) {
 mkdirSync(dirname(outputRoot), { recursive: true });
 rmSync(outputRoot, { recursive: true, force: true });
 
-const build = (outputDirectory, syncEnabled, apiUrl) => {
+const build = (outputDirectory, environment) => {
   const result = spawnSync(
     process.execPath,
     [viteEntrypoint, 'build', '--outDir', outputDirectory, '--emptyOutDir'],
@@ -25,8 +25,7 @@ const build = (outputDirectory, syncEnabled, apiUrl) => {
       cwd: repositoryRoot,
       env: {
         ...process.env,
-        VITE_MIRNA_SYNC_ENABLED: syncEnabled,
-        VITE_MIRNA_SYNC_API_URL: apiUrl,
+        ...environment,
       },
       stdio: 'inherit',
     },
@@ -35,8 +34,20 @@ const build = (outputDirectory, syncEnabled, apiUrl) => {
   if (result.status !== 0) throw new Error('Sync E2E Vite build failed.');
 };
 
-build(enabledOutput, 'true', 'http://localhost:8787');
-build(disabledOutput, 'false', '');
+build(enabledOutput, {
+  VITE_MIRNA_SYNC_ENABLED: 'true',
+  VITE_MIRNA_SYNC_API_URL: 'http://localhost:8787',
+  VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
+  VITE_MIRNA_APP_ENV: 'local-beta',
+  VITE_MIRNA_BETA_ONLY: 'true',
+});
+build(disabledOutput, {
+  VITE_MIRNA_SYNC_ENABLED: 'false',
+  VITE_MIRNA_SYNC_API_URL: '',
+  VITE_TURNSTILE_SITE_KEY: '',
+  VITE_MIRNA_APP_ENV: '',
+  VITE_MIRNA_BETA_ONLY: 'false',
+});
 
 const preview = (outputDirectory, port) =>
   spawn(

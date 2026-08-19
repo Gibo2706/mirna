@@ -29,7 +29,7 @@ const metadata = (overrides: Partial<SyncMetadataRecord> = {}): SyncMetadataReco
 });
 
 const setup = (value: SyncMetadataRecord): LocalSyncSetup =>
-  ({ vault: { vaultId }, metadata: value }) as LocalSyncSetup;
+  ({ vault: { vaultId, keyEpoch: 1 }, metadata: value }) as LocalSyncSetup;
 
 const operationResult = {
   uploaded: 2,
@@ -77,6 +77,29 @@ const createPorts = (input?: {
 };
 
 describe('continuous encrypted sync orchestration', () => {
+  it('serializes automatic and manual callers through one service queue', async () => {
+    const ports = createPorts();
+    let releaseFirst: (() => void) | undefined;
+    const firstOperation = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(ports.operations.synchronize)
+      .mockImplementationOnce(async () => {
+        await firstOperation;
+        return operationResult;
+      })
+      .mockResolvedValue(operationResult);
+    const service = new ContinuousSyncService(ports);
+
+    const automatic = service.synchronize();
+    const manual = service.synchronize();
+    await vi.waitFor(() => expect(ports.operations.synchronize).toHaveBeenCalledTimes(1));
+
+    releaseFirst?.();
+    await Promise.all([automatic, manual]);
+    expect(ports.operations.synchronize).toHaveBeenCalledTimes(2);
+  });
+
   it('does not start operation sync before explicit initial snapshot consent', async () => {
     const ports = createPorts({
       initialMetadata: metadata({
@@ -140,6 +163,39 @@ describe('continuous encrypted sync orchestration', () => {
       forceCompaction: true,
       signal: undefined,
     });
+  });
+
+  it('does not force compaction for an ordinary manual synchronization', async () => {
+    const ports = createPorts({
+      stats: { operationCount: 2, encryptedBytes: 512, pendingConflictCount: 0 },
+    });
+    const service = new ContinuousSyncService(ports);
+
+    await expect(service.synchronize()).resolves.toMatchObject({
+      kind: 'synchronized',
+      compacted: false,
+    });
+    expect(ports.snapshots.synchronize).toHaveBeenCalledWith({
+      continuousOperations: true,
+      forceCompaction: false,
+      signal: undefined,
+    });
+  });
+
+  it('still compacts when a key-rotation snapshot is mandatory', async () => {
+    const ports = createPorts({
+      initialMetadata: metadata({ pendingKeyRotationSnapshotEpoch: 1 }),
+      stats: { operationCount: 0, encryptedBytes: 0, pendingConflictCount: 0 },
+    });
+    const service = new ContinuousSyncService(ports);
+
+    await expect(service.synchronize()).resolves.toMatchObject({
+      kind: 'synchronized',
+      compacted: true,
+    });
+    expect(ports.snapshots.synchronize).toHaveBeenCalledWith(
+      expect.objectContaining({ forceCompaction: true }),
+    );
   });
 
   it('does not ACK past a snapshot reconciliation conflict', async () => {

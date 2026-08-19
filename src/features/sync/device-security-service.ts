@@ -142,7 +142,6 @@ export type DeviceSecurityErrorCode =
   | 'recovery-chain-invalid'
   | 'key-envelope-invalid'
   | 'typed-confirmation-mismatch'
-  | 'deletion-pending'
   | 'server-ack-mismatch';
 
 export const CLOUD_VAULT_DELETE_CONFIRMATION = 'OBRIŠI ŠIFROVANI CLOUD TREZOR' as const;
@@ -988,21 +987,14 @@ export class DeviceSecurityService {
           authority.signingPrivateKey,
         ),
       });
-      let response: Parsed<typeof vaultDeletionResponseSchema> | undefined;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        response = vaultDeletionResponseSchema.parse(await this.#api.deleteVault(request));
-        if (response.deleted) break;
-      }
+      const response = vaultDeletionResponseSchema.parse(await this.#api.deleteVault(request));
       if (
-        !response ||
-        !response.deleted ||
-        response.state !== 'completed' ||
         response.vaultId !== current.vaultId ||
         response.deletionRequestId !== transcript.idempotencyKey
       ) {
         throw new DeviceSecurityError(
-          'deletion-pending',
-          'Cloud brisanje je prihvaćeno i server će ga nastaviti bezbednim retry tokom.',
+          'server-ack-mismatch',
+          'Server nije potvrdio tačan zahtev za cloud brisanje.',
         );
       }
     } finally {
