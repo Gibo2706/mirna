@@ -53,6 +53,10 @@ describe('forecast engine', () => {
     expect(result.map((value) => value.plannedIncome)).toEqual([
       100_000, 100_000, 140_000, 140_000,
     ]);
+    expect(result.map((value) => value.actualIncome)).toEqual([0, 0, 0, 0]);
+    expect(result.map((value) => value.totalMonthIncome)).toEqual([
+      100_000, 100_000, 140_000, 140_000,
+    ]);
   });
 
   it('represents the December registration double payment as recurrence plus a normal event', () => {
@@ -149,6 +153,34 @@ describe('forecast engine', () => {
       projectedFreeCash: -4_750,
       projectedSpendableBalance: 0,
     });
+  });
+
+  it('carries projected cash forward without inventing category-budget rollover', () => {
+    const result = calculateForecast({
+      ...baseInput,
+      startMonth: '2026-07',
+      months: 2,
+      plannedIncomes: [],
+      accountBalances: { [checking.id]: 20_000, [savings.id]: 0 },
+      commitments: [],
+      variableBudgets: [
+        {
+          id: 'current-buffer',
+          name: 'Tekući budžet',
+          defaultAmount: 0,
+          categoryId: expenseCategory.id,
+          overrides: { '2026-07': 3_000 },
+          active: true,
+          createdAt: '2026-07-01T00:00:00.000Z',
+        },
+      ],
+      plannedEvents: [],
+      goals: [],
+      debts: [],
+    });
+
+    expect(result.map((month) => month.variableBudgets)).toEqual([3_000, 0]);
+    expect(result.map((month) => month.projectedSpendableBalance)).toEqual([17_000, 17_000]);
   });
 
   it('simulates only the unfulfilled part of the current month', () => {
@@ -267,12 +299,66 @@ describe('forecast engine', () => {
 
     expect(month).toMatchObject({
       plannedIncome: 0,
+      actualIncome: 100_000,
+      totalMonthIncome: 100_000,
       fixedCommitments: 0,
       variableBudgets: 6_000,
       plannedEvents: 8_000,
       savingsContributions: 20_000,
       debtRepayments: 4_100,
       projectedSpendableBalance: 38_350,
+    });
+  });
+
+  it('shows received and additional income without adding either to projected cash again', () => {
+    const receivedSalary = tx({
+      id: 'salary-received',
+      type: 'income',
+      amount: 100_000,
+      categoryId: incomeCategory.id,
+      source: 'planned-income',
+      plannedIncomeId: salary.id,
+      occurrenceKey: 'income:salary:2026-07',
+    });
+    const additionalIncome = tx({
+      id: 'additional-income',
+      type: 'income',
+      amount: 12_000,
+      categoryId: incomeCategory.id,
+    });
+    const result = calculateForecast({
+      ...baseInput,
+      startMonth: '2026-07',
+      months: 2,
+      accountBalances: { [checking.id]: 112_000, [savings.id]: 0 },
+      transactions: [receivedSalary, additionalIncome],
+      scenario: {
+        id: 'new-salary',
+        name: 'Nova plata',
+        monthlyAmount: 140_000,
+        startMonth: '2026-07',
+        createdAt: '2026-07-01T00:00:00.000Z',
+      },
+      commitments: [],
+      variableBudgets: [],
+      plannedEvents: [],
+      goals: [],
+      debts: [],
+    });
+
+    expect(result[0]).toMatchObject({
+      plannedIncome: 0,
+      actualIncome: 112_000,
+      totalMonthIncome: 112_000,
+      monthlyPlanBalance: 0,
+      projectedSpendableBalance: 112_000,
+    });
+    expect(result[1]).toMatchObject({
+      plannedIncome: 140_000,
+      actualIncome: 0,
+      totalMonthIncome: 140_000,
+      monthlyPlanBalance: 140_000,
+      projectedSpendableBalance: 252_000,
     });
   });
 

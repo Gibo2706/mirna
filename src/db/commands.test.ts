@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertFinanceDataIntegrity } from '@/domain/integrity';
 import { calculateAccountBalances } from '@/domain/calculations';
 import {
+  adjustAccountBalance,
   deleteAccount,
   deleteCategory,
   deleteDebt,
@@ -28,6 +29,7 @@ import {
   monthlyCommitment,
   savings,
   settings,
+  tx,
 } from '@/tests/factories';
 
 describe('atomic database commands', () => {
@@ -56,6 +58,44 @@ describe('atomic database commands', () => {
     expect(await db.transactions.where('occurrenceKey').equals(input.occurrenceKey).count()).toBe(
       1,
     );
+  });
+
+  it('sets an incoming-transfer destination to the exact requested balance', async () => {
+    const cash = {
+      ...savings,
+      id: 'cash',
+      name: 'Keš',
+      openingBalance: 0,
+      protected: false,
+    };
+    await db.accounts.add(cash);
+    await db.transactions.bulkAdd([
+      tx({
+        id: 'cash-transfer',
+        type: 'transfer',
+        amount: 11_000,
+        accountId: checking.id,
+        toAccountId: cash.id,
+      }),
+      tx({
+        id: 'cash-adjustment',
+        type: 'adjustment',
+        amount: 2_000,
+        accountId: cash.id,
+        source: 'adjustment',
+      }),
+    ]);
+
+    const cashBalance = async () =>
+      calculateAccountBalances(await db.accounts.toArray(), await db.transactions.toArray())[
+        cash.id
+      ];
+
+    expect(await cashBalance()).toBe(13_000);
+    await adjustAccountBalance(cash.id, 0, '2026-07-20', 'Provereno stanje');
+    expect(await cashBalance()).toBe(0);
+    await adjustAccountBalance(cash.id, 13_000, '2026-07-21', 'Ponovo provereno stanje');
+    expect(await cashBalance()).toBe(13_000);
   });
 
   it('creates debt payment and expense together and prevents overpayment', async () => {

@@ -23,17 +23,19 @@ export function calculateAccountBalances(
   );
 
   for (const transaction of transactions) {
-    if (!(transaction.accountId in balances)) continue;
-
-    if (transaction.type === 'income') balances[transaction.accountId] += transaction.amount;
-    if (transaction.type === 'expense') balances[transaction.accountId] -= transaction.amount;
-    if (transaction.type === 'adjustment') balances[transaction.accountId] += transaction.amount;
     if (transaction.type === 'transfer') {
-      balances[transaction.accountId] -= transaction.amount;
-      if (transaction.toAccountId && transaction.toAccountId in balances) {
+      if (Object.hasOwn(balances, transaction.accountId)) {
+        balances[transaction.accountId] -= transaction.amount;
+      }
+      if (transaction.toAccountId && Object.hasOwn(balances, transaction.toAccountId)) {
         balances[transaction.toAccountId] += transaction.amount;
       }
+      continue;
     }
+
+    if (!Object.hasOwn(balances, transaction.accountId)) continue;
+    balances[transaction.accountId] +=
+      transaction.type === 'expense' ? -transaction.amount : transaction.amount;
   }
 
   return balances;
