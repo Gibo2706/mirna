@@ -25,7 +25,12 @@ import type {
 
 export interface ForecastMonth {
   month: MonthKey;
+  /** Remaining planned income applied to the cash simulation. */
   plannedIncome: number;
+  /** Income transactions already included in the actual starting balances. */
+  actualIncome: number;
+  /** Actual income plus remaining planned income, for month-level display. */
+  totalMonthIncome: number;
   fixedCommitments: number;
   variableBudgets: number;
   plannedEvents: number;
@@ -147,6 +152,9 @@ export function calculateForecast(input: ForecastInput): ForecastMonth[] {
       month,
       input.transactions,
     ).filter((occurrence) => !occurrence.receivedTransactionId);
+    const actualIncome = input.transactions
+      .filter((transaction) => transaction.type === 'income' && transaction.date.startsWith(month))
+      .reduce((sum, transaction) => sum + transaction.amount, 0);
     let plannedIncome = 0;
     for (const occurrence of incomeOccurrences) {
       const plan = input.plannedIncomes.find((value) => value.id === occurrence.plannedIncomeId);
@@ -157,6 +165,7 @@ export function calculateForecast(input: ForecastInput): ForecastMonth[] {
       plannedIncome += amount;
       applyToAccount(occurrence.accountId, amount);
     }
+    const totalMonthIncome = actualIncome + plannedIncome;
 
     const fixedOccurrences = getAllCommitmentOccurrences(
       input.commitments,
@@ -291,11 +300,16 @@ export function calculateForecast(input: ForecastInput): ForecastMonth[] {
           : getGoalLifecycle(goal, Math.max(0, goalBalances[goal.id] ?? 0)),
       ]),
     );
-    const tightThreshold = Math.max(TIGHT_ABSOLUTE_BUFFER_RSD, plannedIncome * TIGHT_INCOME_RATIO);
+    const tightThreshold = Math.max(
+      TIGHT_ABSOLUTE_BUFFER_RSD,
+      totalMonthIncome * TIGHT_INCOME_RATIO,
+    );
 
     result.push({
       month,
       plannedIncome,
+      actualIncome,
+      totalMonthIncome,
       fixedCommitments,
       variableBudgets,
       plannedEvents,

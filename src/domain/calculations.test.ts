@@ -49,6 +49,30 @@ describe('financial calculations', () => {
     });
   });
 
+  it('calculates either side of a transfer independently without double-counting', () => {
+    const cash = {
+      ...savings,
+      id: 'cash',
+      name: 'Keš',
+      openingBalance: 0,
+      protected: false,
+    };
+    const transfer = tx({
+      id: 'cash-transfer',
+      type: 'transfer',
+      amount: 11_000,
+      accountId: checking.id,
+      toAccountId: cash.id,
+    });
+
+    expect(calculateAccountBalances([checking], [transfer])).toEqual({ checking: 89_000 });
+    expect(calculateAccountBalances([cash], [transfer])).toEqual({ cash: 11_000 });
+    expect(calculateAccountBalances([checking, cash], [transfer])).toEqual({
+      checking: 89_000,
+      cash: 11_000,
+    });
+  });
+
   it('never lets over-budget remaining increase safe-to-spend', () => {
     expect(
       calculateSafeToSpend({

@@ -14,14 +14,11 @@ const highRiskParts = new Set([
   'test-results',
 ]);
 
-const publicPlaceholderFiles = new Set([
-  '.env.example',
-  ['services', 'sync-worker', '.dev.vars.example'].join(sep),
-]);
+const publicConfigTemplate = /(?:^|[/\\])(?:\.env|\.dev\.vars)\.(?:example|sample|template)$/i;
+
+const privateConfigFile = /(?:^|[/\\])(?:\.env(?:\.[^/\\]+)?|\.dev\.vars(?:\.[^/\\]+)?)$/i;
 
 const highRiskNames = [
-  /(?:^|\/)\.dev\.vars(?:\.|$)/i,
-  /(?:^|\/)\.env(?:\.|$)/i,
   /(?:^|\/)SOT\.md$/i,
   /\.(?:bak|backup|key|pem|p12|snapshot|tar|tar\.gz|tgz|zip)$/i,
   /(?:^|\/)finance-backup-[^/]+\.json$/i,
@@ -98,10 +95,11 @@ export function findPathViolation(file) {
   if (parts.some((part) => highRiskParts.has(part))) {
     return 'high-risk path must not be public';
   }
-  if (
-    !publicPlaceholderFiles.has(normalized) &&
-    highRiskNames.some((pattern) => pattern.test(normalized))
-  ) {
+  if (privateConfigFile.test(normalized) && !publicConfigTemplate.test(normalized)) {
+    return 'private environment or local configuration file must not be public';
+  }
+
+  if (highRiskNames.some((pattern) => pattern.test(normalized))) {
     return 'private export, secret, or archive filename must not be public';
   }
   if (/personalPlanFixture/i.test(file)) {
@@ -119,9 +117,9 @@ export function findPathViolation(file) {
 
 export function isTextCandidate(file) {
   const normalized = normalize(file);
-  return (
-    publicPlaceholderFiles.has(normalized) || textExtensions.has(extname(normalized).toLowerCase())
-  );
+  if (publicConfigTemplate.test(normalized)) return true;
+
+  return textExtensions.has(extname(normalized).toLowerCase());
 }
 
 export function findContentViolations(file, content) {

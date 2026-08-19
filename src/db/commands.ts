@@ -280,10 +280,14 @@ export async function adjustAccountBalance(
     throw new Error('Stanje ne može biti negativno jer Mirna ne modeluje dozvoljeni minus.');
   }
   await auditedFinanceTransaction([db.accounts, db.transactions], async (audit) => {
-    const account = await db.accounts.get(accountId);
+    const [account, accounts, transactions] = await Promise.all([
+      db.accounts.get(accountId),
+      db.accounts.toArray(),
+      db.transactions.toArray(),
+    ]);
     if (!account) throw new Error('Račun ne postoji.');
-    const transactions = await db.transactions.toArray();
-    const current = calculateAccountBalances([account], transactions)[account.id] ?? 0;
+    const current =
+      calculateAccountBalances(accounts, transactions)[account.id] ?? account.openingBalance;
     const delta = targetBalance - current;
     if (delta === 0) return;
     const transaction: LedgerTransaction = {

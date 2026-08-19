@@ -249,7 +249,7 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 }}
               />
               <Bar
-                dataKey="plannedIncome"
+                dataKey="totalMonthIncome"
                 name="Prihod"
                 fill="var(--accent)"
                 radius={[5, 5, 0, 0]}
@@ -315,7 +315,7 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 {isExpanded ? (
                   <div className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-surface-2 p-3 text-xs sm:grid-cols-4">
                     {[
-                      ['Prihod', item.plannedIncome],
+                      ['Prihod meseca', item.totalMonthIncome],
                       ['Fiksno', item.fixedCommitments],
                       ['Promenljivo', item.variableBudgets],
                       ['Događaji', item.plannedEvents],
