@@ -3,3 +3,10 @@ coverage
 playwright-report
 test-results
 package-lock.json
+
+# Local Cloudflare/Wrangler generated state
+.wrangler/
+**/.wrangler/
+
+# Local source-of-truth working notes
+SOT.md
