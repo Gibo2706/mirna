@@ -296,7 +296,7 @@ const REMOTE_ERROR_CODES = new Set([
 ]);
 
 const ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  SYNC_DISABLED: 'Beta sinhronizacija nije uključena.',
+  SYNC_DISABLED: 'Sinhronizacija nije uključena.',
   INVALID_CLIENT_REQUEST: 'Zahtev za sinhronizaciju nije ispravan.',
   SESSION_REQUIRED: 'Potrebna je nova potvrda uređaja.',
   REQUEST_ABORTED: 'Zahtev za sinhronizaciju je otkazan.',
@@ -312,7 +312,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   AUTHENTICATION_REQUIRED: 'Sync sesija je istekla. Uređaj će ponovo potvrditi svoj potpis.',
   HUMAN_VERIFICATION_REQUIRED: 'Potrebna je kratka provera pre nastavka.',
   HUMAN_VERIFICATION_CONFIGURATION:
-    'Bezbednosna provera na beta serveru nije pravilno podešena. Kopirajte dijagnostiku za podršku.',
+    'Bezbednosna provera na serveru nije pravilno podešena. Kopirajte dijagnostiku za podršku.',
   HUMAN_VERIFICATION_EXPIRED: 'Bezbednosna provera je istekla ili je već iskorišćena.',
   HUMAN_VERIFICATION_REJECTED: 'Provera nije prihvaćena. Pripremite novu i pokušajte ponovo.',
   HUMAN_VERIFICATION_UNAVAILABLE:
@@ -326,20 +326,20 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   TURNSTILE_TIMEOUT: 'Bezbednosna provera je predugo čekala. Pokušajte ponovo.',
   TURNSTILE_REJECTED: 'Provera nije prihvaćena. Pokušajte ponovo ili kopirajte dijagnostiku.',
   SERVICE_BUDGET_EXHAUSTED:
-    'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.',
+    'Sinhronizacija je privremeno pauzirana zbog ograničenja servisa. Promene ostaju sačuvane na ovom uređaju.',
   SERVICE_QUOTA_EXHAUSTED:
-    'Beta servis je dostigao postavljeno ograničenje korišćenja. Lokalne promene ostaju sačuvane.',
-  SERVICE_MAINTENANCE: 'Beta sinhronizacija je privremeno zaustavljena radi provere servisa.',
+    'Servis je dostigao postavljeno ograničenje korišćenja. Lokalne promene ostaju sačuvane.',
+  SERVICE_MAINTENANCE: 'Sinhronizacija je privremeno zaustavljena radi provere servisa.',
   USAGE_ACCOUNTING_UNAVAILABLE:
-    'Beta servis trenutno ne može pouzdano da izmeri potrošnju. Sinhronizacija je zaustavljena pre novih promena.',
+    'Servis trenutno ne može pouzdano da izmeri potrošnju. Sinhronizacija je zaustavljena pre novih promena.',
   USAGE_RESERVATION_UNDERESTIMATED:
-    'Beta servis je otkrio grešku u proceni potrošnje. Kopirajte Request ID i Support ID.',
+    'Servis je otkrio grešku u proceni potrošnje. Kopirajte Request ID i Support ID.',
   USAGE_SETTLEMENT_FAILED:
-    'Beta servis nije uspeo da poravna izmerenu potrošnju. Kopirajte Request ID i Support ID.',
+    'Servis nije uspeo da poravna izmerenu potrošnju. Kopirajte Request ID i Support ID.',
   D1_STORAGE_LIMIT_REACHED:
-    'Beta baza je dostigla postavljeno ograničenje prostora. Lokalne promene ostaju sačuvane.',
+    'Cloud baza je dostigla postavljeno ograničenje prostora. Lokalne promene ostaju sačuvane.',
   VAULT_QUOTA_EXCEEDED:
-    'Beta sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
+    'Sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
   REMOTE_ERROR: 'Zahtev za sinhronizaciju nije uspeo.',
 };
 
@@ -347,12 +347,12 @@ const VERIFICATION_REASON_MESSAGES: Readonly<Record<VerificationReason, string>>
   INVALID_INPUT_RESPONSE: 'Provera nije prihvaćena. Napravite novu proveru i pokušajte ponovo.',
   TIMEOUT_OR_DUPLICATE:
     'Provera je istekla ili je isti rezultat već iskorišćen. Potrebna je potpuno nova provera.',
-  HOSTNAME_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
-  ACTION_MISMATCH: 'Beta klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
+  HOSTNAME_MISMATCH: 'Klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
+  ACTION_MISMATCH: 'Klijent i server nisu usklađeni. Kopirajte Request ID i Support ID.',
   SITEVERIFY_UNAVAILABLE:
     'Bezbednosna provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
   CONFIGURATION_ERROR:
-    'Beta bezbednosna provera nije pravilno podešena. Kopirajte Request ID i Support ID.',
+    'Bezbednosna provera nije pravilno podešena. Kopirajte Request ID i Support ID.',
 };
 
 export class SyncApiError extends Error {

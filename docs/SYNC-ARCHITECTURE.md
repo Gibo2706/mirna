@@ -1,35 +1,35 @@
 # Mirna Encrypted Sync — Architecture
 
-Status: experimental `2.4.0-beta.1` design, protocol version 1
-Deployment boundary: staging only
-Production status: disabled and not deployed
+Status: stable `2.4.1` client, protocol version 1
+Deployment boundary: existing staging-named encrypted data plane
+Production status: enabled through the existing authorized Worker
 Review status: independent security review required
 
 ## Purpose and current status
 
-Mirna Encrypted Sync is an optional, accountless, end-to-end encrypted sync
-beta. It is designed so that the sync service does not receive the keys needed
+Mirna Encrypted Sync is optional, accountless, end-to-end encrypted sync. It is
+designed so that the sync service does not receive the keys needed
 to decrypt financial content. The existing local-first application remains the
 primary system: disabling sync must preserve normal offline behavior and must
 produce no sync requests.
 
 This document describes both the intended three-phase architecture and the
-implementation state on 2026-08-19. These are not equivalent:
+implementation state on 2026-08-20. These are not equivalent:
 
-| Area                                                 | Current state                                                                                                                                               |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shared protocol primitives                           | RFC 8785 canonicalization, strict encodings, Web Crypto helpers, recovery-code primitives and signed manifest validation are implemented in the beta source |
-| Worker foundation                                    | Local D1/R2 bindings, four versioned migrations, strict HTTP/origin/body handling, health, bounded cleanup and staging rate-limit bindings are implemented  |
-| Pairing, recovery and device-auth routes             | Implemented with D1-backed state, exact retry/race controls and adversarial Worker coverage; real Android PWA/desktop staging pairing and sync completed    |
-| Client sync storage and Phase 1 lifecycle            | Dexie key capability/storage, Serbian enable/pair/recovery UI and the enable, pairing, SAS and recovery state machines pass the Phase 1 browser gate        |
-| Encrypted snapshots                                  | Implemented locally with authenticated compression, private R2 proxying, D1 revision CAS, rollback/fork pins and retry-safe cleanup                         |
-| Encrypted operation sync, conflicts and key rotation | Implemented locally with transactional outbox intent, signed ciphertext operations, explicit conflict resolution, ACK compaction and rotate-on-revoke       |
-| Cloud-vault deletion                                 | Implemented locally as recovery-authorized, resumable R2-first deletion that retains local finance data                                                     |
-| Remote staging resources                             | Dedicated beta Vercel target and staging Worker/D1/private R2 target are provisioned and have completed a real two-device staging exercise                  |
-| Production enablement                                | Not authorized; no production Worker environment is defined                                                                                                 |
+| Area                                                 | Current state                                                                                                                                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Shared protocol primitives                           | RFC 8785 canonicalization, strict encodings, Web Crypto helpers, recovery-code primitives and signed manifest validation are implemented in the 2.4.1 source |
+| Worker foundation                                    | Local D1/R2 bindings, versioned migrations, strict HTTP/origin/body handling, health, bounded cleanup and staging rate-limit bindings are implemented        |
+| Pairing, recovery and device-auth routes             | Implemented with D1-backed state, exact retry/race controls and adversarial Worker coverage; real Android PWA/desktop staging pairing and sync completed     |
+| Client sync storage and Phase 1 lifecycle            | Dexie key capability/storage, Serbian enable/pair/recovery UI and the enable, pairing, SAS and recovery state machines pass the Phase 1 browser gate         |
+| Encrypted snapshots                                  | Implemented locally with authenticated compression, private R2 proxying, D1 revision CAS, rollback/fork pins and retry-safe cleanup                          |
+| Encrypted operation sync, conflicts and key rotation | Implemented locally with transactional outbox intent, signed ciphertext operations, explicit conflict resolution, ACK compaction and rotate-on-revoke        |
+| Cloud-vault deletion                                 | Implemented locally as recovery-authorized, resumable R2-first deletion that retains local finance data                                                      |
+| Remote resources                                     | Production and beta Vercel targets share the existing staging-named Worker/D1/private R2 data plane                                                          |
+| Production enablement                                | Enabled with explicit production app environment and exact Worker/Turnstile configuration                                                                    |
 
 All three implementation phases have focused unit, Worker and isolated
-multi-context browser coverage. A real beta staging exercise also completed
+multi-context browser coverage. A real staging exercise also completed
 pairing, bootstrap and synchronization. This remains engineering/tester
 evidence, not an independent security audit or a production-readiness claim.
 
@@ -154,7 +154,7 @@ ordinary finance backups. Their roles are:
 - inbox/application frontier and applied operation IDs;
 - local conflict records;
 - snapshot/frontier pins and scheduler state;
-- beta-only Support ID and an allowlisted 200-event diagnostic ring in separate
+- privacy-safe Support ID and an allowlisted 200-event diagnostic ring in separate
   IndexedDB tables excluded from finance backup/export and sync snapshots;
 - a local-only `syncDeviceAliases` directory for friendly device labels and
   coarse device kinds. Aliases are not part of protocol v1 and never enter
@@ -273,7 +273,7 @@ after its signature, AAD, encryption tag, schema and finance integrity all pass.
 If local state is dirty while the remote revision advanced, snapshot overwrite
 is blocked instead of applying last-write-wins.
 
-The beta source implements this flow locally. A new snapshot is not accepted
+The 2.4.1 source implements this flow locally. A new snapshot is not accepted
 as routine compaction while an active device still owes an acknowledgement for
 the current snapshot. The one exception is a mandatory key-epoch rotation
 snapshot after revocation, because the old epoch must be replaced immediately.
@@ -302,7 +302,7 @@ confidentiality is then restored with a new random vault master key, a new key
 epoch, recipient-bound envelopes only for remaining devices and a signed
 manifest transition.
 
-The beta source implements this flow locally. Explicit conflict-resolution
+The 2.4.1 source implements this flow locally. Explicit conflict-resolution
 operations carry the sorted operation IDs they resolve, so every device can
 recognize the decision and avoid presenting the same conflict again. A pending
 conflict defers both compaction and server acknowledgement until the user makes
@@ -391,7 +391,7 @@ edge locations unless additional regional products are configured. See
 [D1 data location](https://developers.cloudflare.com/d1/configuration/data-location/)
 and [R2 data location](https://developers.cloudflare.com/r2/reference/data-location/).
 
-The staging beta does not claim EU-only request processing. Cloudflare still
+The shared staging-named data plane does not claim EU-only request processing. Cloudflare still
 observes ordinary request metadata at its infrastructure boundary.
 
 ## Availability and endpoint compromise
@@ -413,8 +413,8 @@ analysis and residual risks.
 
 ## Production gate
 
-The feature remains disabled by default, staging-only and experimental until
-the three phase gates pass and an independent review covers the cryptographic
-construction, recovery, revocation/rotation, conflict behavior, dependencies
-and staging adversarial results. A local or automated review is not an
-independent security audit.
+The feature remains disabled unless deployment configuration explicitly enables
+it. Production, beta and local app environments are independent from that flag.
+An independent review must still cover the cryptographic construction,
+recovery, revocation/rotation, conflict behavior, dependencies and adversarial
+results; a local or automated review is not an independent security audit.

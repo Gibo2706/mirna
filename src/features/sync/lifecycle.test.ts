@@ -45,7 +45,6 @@ import {
   type RecoveryBundleFetchRequestV1,
   type RecoveryChallengeRequestV1,
   type RecoveryCompleteRequestV1,
-  type RecoveryConfirmationValue,
   type SyncLifecycleRepositoryPort,
   type SyncPhase1ApiPort,
   type VaultCreateRequestV1,
@@ -56,17 +55,6 @@ const NOW = new Date('2026-07-31T10:00:00.000Z');
 const now = (): Date => new Date(NOW);
 const encodedSecret = (fill: number): string => bytesToBase64Url(new Uint8Array(32).fill(fill));
 const id = (fill: number): string => bytesToBase64Url(new Uint8Array(16).fill(fill));
-
-const confirmationValues = (
-  recoveryCode: string,
-  groupNumbers: readonly number[],
-): RecoveryConfirmationValue[] => {
-  const groups = recoveryCode.slice('MR1-'.length).split('-');
-  return groupNumbers.map((groupNumber) => ({
-    groupNumber,
-    value: groups[groupNumber - 1],
-  }));
-};
 
 class MemoryRepository implements SyncLifecycleRepositoryPort {
   setup: LocalSyncSetup | undefined;
@@ -444,7 +432,6 @@ const dependencies = (
   repository,
   origin: ORIGIN,
   now,
-  selectRecoveryConfirmationGroups: () => [1, 4, 7],
   pairingFinalizationCheckpoints: checkpointsFor(repository),
 });
 
@@ -456,9 +443,7 @@ const initializeVault = async (
 ): Promise<{ setup: LocalSyncSetup; recoveryCode: string }> => {
   const lifecycle = new EnableSyncLifecycle(dependencies(api, repository));
   const presentation = await lifecycle.begin('Telefon');
-  await lifecycle.confirmRecoveryCode(
-    confirmationValues(presentation.recoveryCode, presentation.confirmationGroupNumbers),
-  );
+  await lifecycle.confirmRecoveryCodeSaved();
   const setup = await lifecycle.activate();
   return { setup, recoveryCode: presentation.recoveryCode };
 };
@@ -468,28 +453,19 @@ describe('Phase 1 sync lifecycle', () => {
     expectTypeOf<MirnaSyncApi>().toMatchTypeOf<SyncPhase1ApiPort>();
   });
 
-  it('gates genesis behind show-once recovery confirmation and retries the exact server ACK boundary', async () => {
+  it('gates genesis behind show-once recovery acknowledgement and retries the exact server ACK boundary', async () => {
     const api = new MemoryPhase1Api();
     const repository = new MemoryRepository();
     const lifecycle = new EnableSyncLifecycle(dependencies(api, repository));
 
     const presentation = await lifecycle.begin('  Moj   telefon  ');
-    expect(lifecycle.state).toBe('awaiting-recovery-confirmation');
+    expect(lifecycle.state).toBe('awaiting-recovery-acknowledgement');
     expect(api.createVaultCalls).toBe(0);
     expect(repository.writes).toBe(0);
-    await expect(
-      lifecycle.confirmRecoveryCode(
-        presentation.confirmationGroupNumbers.map((groupNumber) => ({
-          groupNumber,
-          value: 'XXXX',
-        })),
-      ),
-    ).rejects.toMatchObject({ code: 'recovery-confirmation-mismatch' });
+    await expect(lifecycle.activate()).rejects.toMatchObject({ code: 'invalid-state' });
     expect(api.createVaultCalls).toBe(0);
 
-    await lifecycle.confirmRecoveryCode(
-      confirmationValues(presentation.recoveryCode, presentation.confirmationGroupNumbers),
-    );
+    await lifecycle.confirmRecoveryCodeSaved();
     repository.failNextWrite = true;
     await expect(lifecycle.activate()).rejects.toThrow('Synthetic local write failure');
     expect(lifecycle.state).toBe('registering');
@@ -693,18 +669,9 @@ describe('Phase 1 sync lifecycle', () => {
     const recovery = new RecoverDeviceLifecycle(dependencies(api, recoveredRepository));
 
     const presentation = await recovery.begin(recoveryCode, 'Novi telefon');
-    expect(recovery.state).toBe('awaiting-new-recovery-confirmation');
-    await expect(
-      recovery.confirmNewRecoveryCode(
-        presentation.confirmationGroupNumbers.map((groupNumber) => ({
-          groupNumber,
-          value: 'XXXX',
-        })),
-      ),
-    ).rejects.toMatchObject({ code: 'recovery-confirmation-mismatch' });
-    const setup = await recovery.confirmNewRecoveryCode(
-      confirmationValues(presentation.recoveryCode, presentation.confirmationGroupNumbers),
-    );
+    expect(recovery.state).toBe('awaiting-new-recovery-acknowledgement');
+    expect(presentation.recoveryCode).toMatch(/^MR1-/u);
+    const setup = await recovery.confirmNewRecoveryCodeSaved();
 
     expect(setup.vault.keyEpoch).toBe(2);
     expect(setup.vault.manifest.devices).toHaveLength(1);
@@ -725,17 +692,14 @@ describe('Phase 1 sync lifecycle', () => {
     const recoveredRepository = new MemoryRepository();
     const recovery = new RecoverDeviceLifecycle(dependencies(api, recoveredRepository));
     const presentation = await recovery.begin(recoveryCode, 'Novi telefon');
-    const confirmation = confirmationValues(
-      presentation.recoveryCode,
-      presentation.confirmationGroupNumbers,
-    );
+    expect(presentation.recoveryCode).toMatch(/^MR1-/u);
     recoveredRepository.failNextWrite = true;
 
-    await expect(recovery.confirmNewRecoveryCode(confirmation)).rejects.toThrow(
+    await expect(recovery.confirmNewRecoveryCodeSaved()).rejects.toThrow(
       'Synthetic local write failure',
     );
     expect(recovery.state).toBe('recovering');
-    const setup = await recovery.confirmNewRecoveryCode(confirmation);
+    const setup = await recovery.confirmNewRecoveryCodeSaved();
 
     expect(api.recoveryCompletionCalls).toBe(2);
     expect(recoveredRepository.writes).toBe(2);
@@ -769,10 +733,8 @@ describe('Phase 1 sync lifecycle', () => {
       });
     const repository = new MemoryRepository();
     const lifecycle = new EnableSyncLifecycle(dependencies(api, repository));
-    const presentation = await lifecycle.begin('Telefon');
-    await lifecycle.confirmRecoveryCode(
-      confirmationValues(presentation.recoveryCode, presentation.confirmationGroupNumbers),
-    );
+    await lifecycle.begin('Telefon');
+    await lifecycle.confirmRecoveryCodeSaved();
 
     await expect(lifecycle.activate()).rejects.toMatchObject({ code: 'server-ack-mismatch' });
     expect(repository.writes).toBe(0);

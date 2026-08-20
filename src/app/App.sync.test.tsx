@@ -22,8 +22,7 @@ describe('pre-onboarding sync route', () => {
     vi.stubEnv('VITE_MIRNA_SYNC_ENABLED', 'true');
     vi.stubEnv('VITE_MIRNA_SYNC_API_URL', 'http://localhost');
     vi.stubEnv('VITE_TURNSTILE_SITE_KEY', '1x00000000000000000000AA');
-    vi.stubEnv('VITE_MIRNA_APP_ENV', 'local-beta');
-    vi.stubEnv('VITE_MIRNA_BETA_ONLY', 'true');
+    vi.stubEnv('VITE_MIRNA_APP_ENV', 'local');
   });
 
   afterEach(() => {
@@ -44,7 +43,6 @@ describe('pre-onboarding sync route', () => {
 
   it('does not construct a runtime or make sync requests when the feature is disabled', () => {
     vi.stubEnv('VITE_MIRNA_SYNC_ENABLED', 'false');
-    vi.stubEnv('VITE_MIRNA_BETA_ONLY', 'false');
     const loadLocalStatus = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
@@ -57,5 +55,17 @@ describe('pre-onboarding sync route', () => {
     expect(loadLocalStatus).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(screen.queryByText('Test sync ulaz')).not.toBeInTheDocument();
+  });
+
+  it('does not render a global beta banner in the stable production experience', () => {
+    vi.stubEnv('VITE_MIRNA_APP_ENV', 'production');
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByText(/Mirna Sync — Beta/i)).not.toBeInTheDocument();
   });
 });

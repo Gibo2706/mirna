@@ -1,10 +1,10 @@
 # Mirna Encrypted Sync — Protocol V1
 
-Status: frozen core cryptographic profile for experimental `2.4.0-beta.1`
+Status: frozen core cryptographic profile for stable `2.4.1`
 Protocol version: `1`
-Deployment boundary: staging only
+Deployment boundary: configured production, beta and local clients
 Interoperability status: complete protocol-v1 implementation with a successful
-real beta staging pairing/bootstrap/sync exercise; independent security review
+real staging pairing/bootstrap/sync exercise; independent security review
 remains pending
 
 ## Normative scope
@@ -12,7 +12,7 @@ remains pending
 The words **MUST**, **MUST NOT**, **SHOULD** and **MAY** describe protocol v1
 requirements. The encoding, signature, manifest, pairing, recovery, snapshot,
 operation, device-security and deletion profiles in this document are frozen
-for protocol v1 and are implemented in the `2.4.0-beta.1` source.
+for protocol v1 and are implemented in the `2.4.1` source.
 
 An implementation MUST reject an unknown protocol version, suite, transcript
 type, object type, command type or unexpected JSON field. It MUST NOT negotiate
@@ -343,10 +343,14 @@ output uses the Crockford alphabet and grouped uppercase characters. Input may
 map `O` to `0` and `I`/`L` to `1` before checksum validation.
 
 The QR payload is generated locally and uses the exact expected Mirna origin,
-path `/more/sync`, and URL fragment `#pair=...`. Fragment material is not sent
-as an HTTP request target. The parser MUST reject a different origin or path.
-No vault key, recovery root, finance content or private device key appears in
-the QR.
+path `/more/sync`, and URL fragment
+`#protocol=1&suite=<protocol-v1-suite>&pair=<pairing-code>`. Fragment material is
+not sent as an HTTP request target. The parser MUST reject a different origin,
+path, protocol or suite. After successful parsing, the connected client removes
+the fragment with `history.replaceState`, opens the existing Add Device panel
+and pre-populates the code. It MUST NOT approve the request automatically. No
+vault key, recovery root, finance content or private device key appears in the
+QR.
 
 ### Pairing-secret separation
 
@@ -591,7 +595,7 @@ rotate recovery or keys, or delete a vault. Those operations require a fresh
 audience-bound signature.
 
 The Worker challenge/session routes and memory-only browser transport are
-implemented and exercised against the dedicated beta staging target. This is
+implemented and exercised against the shared staging-named data plane. This is
 not an independent protocol/security audit.
 
 ## Snapshot protocol
@@ -736,6 +740,6 @@ hide service metadata, prevent deletion/withholding, remotely erase an old
 device, protect plaintext on an unlocked compromised endpoint or make a
 malicious authorized device trustworthy.
 
-This profile has not passed an independent security audit. It must remain
-feature-flagged and staging-only until every phase gate and the independent
-review gate pass.
+This profile has not passed an independent security audit. It remains strictly
+feature-flagged; production enablement does not waive the independent review
+gate.

@@ -6,7 +6,7 @@ Mirna is a local-first application.
 
 Accounts, transactions, plans, goals, debts, and settings are stored in
 IndexedDB for the current browser origin. Mirna has no account system, bank
-connection or analytics. The published stable application has no cloud sync.
+connection or analytics. Optional encrypted sync does not require an account.
 
 Mirna does not provide application-level encryption. Anyone who can access the
 unlocked browser profile or device may be able to read local records.
@@ -17,11 +17,11 @@ The hosting provider, browser, and network process ordinary web-request
 metadata when application files are downloaded. Mirna does not attach
 financial records to those requests.
 
-## Experimental encrypted sync
+## Optional encrypted sync
 
-The `2.4.0-beta.1` beta source includes optional accountless encrypted sync.
-It is feature-flagged, staging-only, not deployed to production and still
-requires independent security review. When disabled, it makes no sync requests.
+Mirna 2.4.1 includes optional accountless encrypted sync. It is enabled only by
+explicit deployment configuration and still requires independent security
+review. When disabled, it makes no sync requests.
 
 When a user explicitly enables it, the browser encrypts finance snapshots and
 operations before upload. The sync service receives ciphertext plus unavoidable

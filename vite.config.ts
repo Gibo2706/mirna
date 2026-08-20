@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { isSearchProtectedDeployment } from './src/features/sync/config';
 
 const legalAssets = (): Plugin => ({
   name: 'mirna-legal-assets',
@@ -19,8 +20,8 @@ const legalAssets = (): Plugin => ({
   },
 });
 
-const betaSearchProtection = (enabled: boolean): Plugin => ({
-  name: 'mirna-beta-search-protection',
+const searchProtection = (enabled: boolean): Plugin => ({
+  name: 'mirna-search-protection',
   apply: 'build',
   transformIndexHtml() {
     if (!enabled) return [];
@@ -45,14 +46,14 @@ const betaSearchProtection = (enabled: boolean): Plugin => ({
 export default defineConfig(({ mode }) => {
   const fileEnvironment = loadEnv(mode, process.cwd(), 'VITE_');
   const appEnvironment = process.env.VITE_MIRNA_APP_ENV ?? fileEnvironment.VITE_MIRNA_APP_ENV;
-  const betaOnly = process.env.VITE_MIRNA_BETA_ONLY ?? fileEnvironment.VITE_MIRNA_BETA_ONLY;
-  const betaApplication =
-    betaOnly === 'true' && (appEnvironment === 'beta' || appEnvironment === 'local-beta');
+  const searchProtected = isSearchProtectedDeployment({
+    VITE_MIRNA_APP_ENV: appEnvironment,
+  });
 
   return {
     plugins: [
       legalAssets(),
-      betaSearchProtection(betaApplication),
+      searchProtection(searchProtected),
       react(),
       tailwindcss(),
       VitePWA({

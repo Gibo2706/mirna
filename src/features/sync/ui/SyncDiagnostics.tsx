@@ -124,7 +124,7 @@ const BetaDiagnosticsCard = ({ services }: { services: SyncUiServices }) => {
   return (
     <Card className="grid min-w-0 gap-4 overflow-hidden" data-testid="sync-beta-diagnostics">
       <div>
-        <SectionTitle>Beta dijagnostika</SectionTitle>
+        <SectionTitle>Dijagnostika sinhronizacije</SectionTitle>
         <p className="mt-2 text-sm leading-6 text-muted">
           Čuva samo tehničke događaje, bez iznosa, opisa, recovery koda, ključeva, tokena ili IP
           adrese. Lokalna istorija je ograničena na 200 događaja.

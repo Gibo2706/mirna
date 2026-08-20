@@ -3,8 +3,9 @@ export interface SyncEnvironment {
   readonly VITE_MIRNA_SYNC_API_URL?: string;
   readonly VITE_TURNSTILE_SITE_KEY?: string;
   readonly VITE_MIRNA_APP_ENV?: string;
-  readonly VITE_MIRNA_BETA_ONLY?: string;
 }
+
+export type MirnaAppEnvironment = 'production' | 'beta' | 'local';
 
 export type SyncClientConfig =
   | Readonly<{
@@ -15,22 +16,25 @@ export type SyncClientConfig =
       enabled: true;
       apiOrigin: string;
       turnstileSiteKey: string;
-      appEnvironment: 'beta' | 'local-beta';
-      betaOnly: true;
+      appEnvironment: MirnaAppEnvironment;
     }>;
 
 export class SyncConfigurationError extends Error {
   constructor() {
-    super('Podešavanje beta sinhronizacije nije ispravno.');
+    super('Podešavanje sinhronizacije nije ispravno.');
     this.name = 'SyncConfigurationError';
   }
 }
 
-export const isBetaApplication = (
-  environment: SyncEnvironment = import.meta.env as unknown as SyncEnvironment,
-): boolean =>
-  environment.VITE_MIRNA_BETA_ONLY === 'true' &&
-  (environment.VITE_MIRNA_APP_ENV === 'beta' || environment.VITE_MIRNA_APP_ENV === 'local-beta');
+const isAppEnvironment = (value: string | undefined): value is MirnaAppEnvironment =>
+  value === 'production' || value === 'beta' || value === 'local';
+
+export const isSearchProtectedDeployment = (environment: SyncEnvironment): boolean => {
+  const appEnvironment = environment.VITE_MIRNA_APP_ENV;
+  if (appEnvironment === undefined || appEnvironment === '') return false;
+  if (!isAppEnvironment(appEnvironment)) throw new SyncConfigurationError();
+  return appEnvironment === 'beta';
+};
 
 const isLocalhost = (url: URL): boolean => url.hostname === 'localhost';
 
@@ -82,8 +86,7 @@ export const readSyncClientConfig = (
     apiUrl === undefined ||
     !siteKey ||
     !/^[A-Za-z0-9_-]{20,128}$/u.test(siteKey) ||
-    (appEnvironment !== 'beta' && appEnvironment !== 'local-beta') ||
-    environment.VITE_MIRNA_BETA_ONLY !== 'true'
+    !isAppEnvironment(appEnvironment)
   ) {
     throw new SyncConfigurationError();
   }
@@ -92,6 +95,5 @@ export const readSyncClientConfig = (
     apiOrigin: parseSyncApiOrigin(apiUrl),
     turnstileSiteKey: siteKey,
     appEnvironment,
-    betaOnly: true,
   });
 };

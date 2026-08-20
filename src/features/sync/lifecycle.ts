@@ -197,7 +197,6 @@ export type SyncLifecycleErrorCode =
   | 'invalid-state'
   | 'invalid-origin'
   | 'invalid-device-name'
-  | 'recovery-confirmation-mismatch'
   | 'server-ack-mismatch'
   | 'challenge-mismatch'
   | 'manifest-mismatch'
@@ -218,20 +217,9 @@ export class SyncLifecycleError extends Error {
   }
 }
 
-export interface RecoveryConfirmationValue {
-  readonly groupNumber: number;
-  readonly value: string;
-}
-
 export interface RecoveryCodePresentation {
   readonly recoveryCode: string;
-  readonly confirmationGroupNumbers: readonly number[];
 }
-
-export type RecoveryConfirmationSelector = (
-  groupCount: number,
-  runtime: CryptoRuntime,
-) => readonly number[];
 
 interface CommonDependencies {
   readonly api: SyncPhase1ApiPort;
@@ -239,7 +227,6 @@ interface CommonDependencies {
   readonly repository?: SyncLifecycleRepositoryPort;
   readonly runtime?: CryptoRuntime;
   readonly now?: () => Date;
-  readonly selectRecoveryConfirmationGroups?: RecoveryConfirmationSelector;
   readonly pairingFinalizationCheckpoints?: PairingFinalizationCheckpointPort;
 }
 
@@ -249,7 +236,6 @@ interface ResolvedDependencies {
   readonly repository: SyncLifecycleRepositoryPort;
   readonly runtime: CryptoRuntime;
   readonly now: () => Date;
-  readonly selectRecoveryConfirmationGroups: RecoveryConfirmationSelector;
   readonly pairingFinalizationCheckpoints: PairingFinalizationCheckpointPort;
 }
 
@@ -274,15 +260,6 @@ const exactOrigin = (value: string): string => {
   }
 };
 
-const defaultConfirmationSelector: RecoveryConfirmationSelector = (groupCount, runtime) => {
-  const wanted = Math.min(3, groupCount);
-  const selected = new Set<number>();
-  while (selected.size < wanted) {
-    selected.add((randomBytes(1, runtime)[0] % groupCount) + 1);
-  }
-  return [...selected].sort((left, right) => left - right);
-};
-
 const resolveDependencies = (dependencies: CommonDependencies): ResolvedDependencies => {
   const runtime = dependencies.runtime ?? globalThis.crypto;
   if (!runtime?.subtle || typeof runtime.getRandomValues !== 'function') {
@@ -294,8 +271,6 @@ const resolveDependencies = (dependencies: CommonDependencies): ResolvedDependen
     repository: dependencies.repository ?? defaultRepository,
     runtime,
     now: dependencies.now ?? (() => new Date()),
-    selectRecoveryConfirmationGroups:
-      dependencies.selectRecoveryConfirmationGroups ?? defaultConfirmationSelector,
     pairingFinalizationCheckpoints: dependencies.pairingFinalizationCheckpoints ?? {
       stage: (setup, request) => stagePairingFinalization(setup, request),
       read: () => readPendingPairingFinalization(),
@@ -317,50 +292,6 @@ const normalizeDeviceName = (value: string): string => {
 
 const addMilliseconds = (date: Date, milliseconds: number): string =>
   new Date(date.getTime() + milliseconds).toISOString();
-
-const recoveryGroups = (code: string): readonly string[] => {
-  const groups = code.slice('MR1-'.length).split('-');
-  if (groups.some((group) => group.length === 0)) throw new Error('Recovery kod je neispravan.');
-  return groups;
-};
-
-const assertConfirmationSelection = (
-  groupCount: number,
-  groupNumbers: readonly number[],
-): readonly number[] => {
-  const unique = [...new Set(groupNumbers)].sort((left, right) => left - right);
-  if (
-    unique.length === 0 ||
-    unique.length !== groupNumbers.length ||
-    unique.some((value) => !Number.isSafeInteger(value) || value < 1 || value > groupCount)
-  ) {
-    throw new Error('Izbor grupa za potvrdu recovery koda nije ispravan.');
-  }
-  return unique;
-};
-
-const verifyRecoveryConfirmation = (
-  recoveryCode: string,
-  expectedGroupNumbers: readonly number[],
-  supplied: readonly RecoveryConfirmationValue[],
-): void => {
-  const groups = recoveryGroups(recoveryCode);
-  const suppliedMap = new Map(
-    supplied.map((entry) => [entry.groupNumber, entry.value.trim().toUpperCase()]),
-  );
-  const exactSelection =
-    suppliedMap.size === expectedGroupNumbers.length &&
-    supplied.length === expectedGroupNumbers.length &&
-    expectedGroupNumbers.every(
-      (groupNumber) => suppliedMap.get(groupNumber) === groups[groupNumber - 1],
-    );
-  if (!exactSelection) {
-    throw new SyncLifecycleError(
-      'recovery-confirmation-mismatch',
-      'Unete grupe recovery koda se ne poklapaju.',
-    );
-  }
-};
 
 const publicDeviceKeys = async (
   keyPairs: DeviceKeyPairs,
@@ -647,7 +578,6 @@ interface EnableMaterial {
   readonly vaultMasterKey: Uint8Array;
   readonly recoveryRoot: Uint8Array;
   readonly enabledAt: string;
-  readonly confirmationGroupNumbers: readonly number[];
 }
 
 interface PreparedRegistration {
@@ -658,7 +588,7 @@ interface PreparedRegistration {
 
 type EnableState =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'awaiting-recovery-confirmation'; readonly material: EnableMaterial }
+  | { readonly kind: 'awaiting-recovery-acknowledgement'; readonly material: EnableMaterial }
   | { readonly kind: 'confirmed'; readonly material: EnableMaterial }
   | { readonly kind: 'registering'; readonly registration: PreparedRegistration }
   | { readonly kind: 'active'; readonly setup: LocalSyncSetup }
@@ -693,13 +623,8 @@ export class EnableSyncLifecycle {
       randomBytes(SYNC_LIMITS.recoveryLookupIdBytes, runtime),
     );
     const recoveryCode = await createRecoveryCode(recoveryLookupId, recoveryRoot, runtime);
-    const groupCount = recoveryGroups(recoveryCode).length;
-    const confirmationGroupNumbers = assertConfirmationSelection(
-      groupCount,
-      this.#dependencies.selectRecoveryConfirmationGroups(groupCount, runtime),
-    );
     this.#state = {
-      kind: 'awaiting-recovery-confirmation',
+      kind: 'awaiting-recovery-acknowledgement',
       material: {
         displayName: normalizedName,
         vaultId: createOpaqueId(runtime),
@@ -711,24 +636,17 @@ export class EnableSyncLifecycle {
         vaultMasterKey: randomBytes(SYNC_LIMITS.vaultMasterKeyBytes, runtime),
         recoveryRoot,
         enabledAt: this.#dependencies.now().toISOString(),
-        confirmationGroupNumbers,
       },
     };
-    return { recoveryCode, confirmationGroupNumbers };
+    return { recoveryCode };
   }
 
-  async confirmRecoveryCode(values: readonly RecoveryConfirmationValue[]): Promise<void> {
-    if (this.#state.kind !== 'awaiting-recovery-confirmation') {
+  confirmRecoveryCodeSaved(): Promise<void> {
+    if (this.#state.kind !== 'awaiting-recovery-acknowledgement') {
       throw new SyncLifecycleError('invalid-state', 'Recovery kod trenutno ne čeka potvrdu.');
     }
-    const { material } = this.#state;
-    const recoveryCode = await createRecoveryCode(
-      material.recoveryLookupId,
-      material.recoveryRoot,
-      this.#dependencies.runtime,
-    );
-    verifyRecoveryConfirmation(recoveryCode, material.confirmationGroupNumbers, values);
-    this.#state = { kind: 'confirmed', material };
+    this.#state = { kind: 'confirmed', material: this.#state.material };
+    return Promise.resolve();
   }
 
   async activate(): Promise<LocalSyncSetup> {
@@ -1722,7 +1640,6 @@ interface PreparedRecovery {
   readonly challenge: Parsed<typeof recoveryChallengeSchema>;
   readonly oldGateKey: Uint8Array;
   readonly newRecoveryRoot: Uint8Array;
-  readonly confirmationGroupNumbers: readonly number[];
   readonly request: RecoveryCompleteRequestV1;
   readonly setup: LocalSyncSetup;
   readonly recoveredFinanceData?: FinanceData;
@@ -1731,7 +1648,7 @@ interface PreparedRecovery {
 
 type RecoveryState =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'awaiting-new-recovery-confirmation'; readonly recovery: PreparedRecovery }
+  | { readonly kind: 'awaiting-new-recovery-acknowledgement'; readonly recovery: PreparedRecovery }
   | { readonly kind: 'recovering'; readonly recovery: PreparedRecovery }
   | { readonly kind: 'active'; readonly setup: LocalSyncSetup }
   | { readonly kind: 'failed' };
@@ -1844,10 +1761,9 @@ export class RecoverDeviceLifecycle {
         recovery.newRecoveryRoot,
         runtime,
       );
-      this.#state = { kind: 'awaiting-new-recovery-confirmation', recovery };
+      this.#state = { kind: 'awaiting-new-recovery-acknowledgement', recovery };
       return {
         recoveryCode: newCode,
-        confirmationGroupNumbers: recovery.confirmationGroupNumbers,
         vaultId: challenge.vaultId,
         previousManifestVersion: currentManifest.manifestVersion,
       };
@@ -1858,18 +1774,9 @@ export class RecoverDeviceLifecycle {
     }
   }
 
-  async confirmNewRecoveryCode(
-    values: readonly RecoveryConfirmationValue[],
-  ): Promise<LocalSyncSetup> {
-    if (this.#state.kind === 'awaiting-new-recovery-confirmation') {
-      const recovery = this.#state.recovery;
-      const code = await createRecoveryCode(
-        recovery.request.newRecovery.recoveryLookupId,
-        recovery.newRecoveryRoot,
-        this.#dependencies.runtime,
-      );
-      verifyRecoveryConfirmation(code, recovery.confirmationGroupNumbers, values);
-      this.#state = { kind: 'recovering', recovery };
+  async confirmNewRecoveryCodeSaved(): Promise<LocalSyncSetup> {
+    if (this.#state.kind === 'awaiting-new-recovery-acknowledgement') {
+      this.#state = { kind: 'recovering', recovery: this.#state.recovery };
     }
     if (this.#state.kind !== 'recovering') {
       if (this.#state.kind === 'active') return this.#state.setup;
@@ -2325,17 +2232,10 @@ export class RecoverDeviceLifecycle {
             },
           };
         }
-        const newCode = await createRecoveryCode(newRecoveryLookupId, newRecoveryRoot, runtime);
-        const groupCount = recoveryGroups(newCode).length;
-        const confirmationGroupNumbers = assertConfirmationSelection(
-          groupCount,
-          this.#dependencies.selectRecoveryConfirmationGroups(groupCount, runtime),
-        );
         return {
           challenge: input.challenge,
           oldGateKey: input.oldGateKey,
           newRecoveryRoot,
-          confirmationGroupNumbers,
           request,
           setup,
           recoveredFinanceData: input.recoveredFinanceData,

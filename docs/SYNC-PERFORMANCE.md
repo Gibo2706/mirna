@@ -1,6 +1,6 @@
 # Mirna Encrypted Sync — Performance Characterization
 
-Status: local engineering evidence for experimental `2.4.0-beta.1`
+Status: local engineering evidence for stable `2.4.1`
 Protocol version: `1`
 Measured: 2026-07-31
 

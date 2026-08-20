@@ -24,8 +24,8 @@ what actually happened, and seeing what comes next.
   changes an account.
 - **The forecast shows where the plan becomes tight.** It projects known income, commitments,
   budgets, goals, debts, and one-off events without inventing financial advice.
-- **Financial records remain local.** The normal workflow needs no account, bank connection,
-  analytics service, or Mirna backend.
+- **Financial records remain local-first.** The normal workflow needs no account, bank
+  connection, or analytics service; optional sync sends only end-to-end encrypted content.
 
 ## See Mirna in action
 
@@ -64,20 +64,16 @@ provider or allow imported planning data to create ledger history.
 
 ## Local-first by design
 
-Mirna stores financial data in IndexedDB for the current browser origin. The published stable
-application has no application account, analytics, bank integration, or server-side copy of the
-financial database. Exports happen only when requested.
+Mirna stores financial data in IndexedDB for the current browser origin. The stable application
+has no application account, analytics, or bank integration. Exports happen only when requested.
 
-The `2.4.0-beta.1` beta source contains an optional, accountless, end-to-end encrypted sync
-implementation. It is disabled unless an operator supplies an explicit feature flag and API URL,
-is isolated from the stable production application, and has not completed an independent security
-review. The dedicated experimental target is
-[Mirna Sync — Beta](https://mirna-finansije-beta.vercel.app); use only synthetic test data and keep
-a local JSON backup. Android PWA and desktop pairing/bootstrap/sync have completed a real staging
-exercise, but this is not a production or independent-audit claim. While the enabled app is open,
-one global runtime synchronizes on cold start, local changes, reconnect and stale foreground
-resume; it does not claim periodic execution after the OS kills the PWA process. The sync
-service receives ciphertext and operational metadata, not content-decryption keys. See the
+Mirna 2.4.1 includes optional, accountless, end-to-end encrypted sync. The browser encrypts
+finance snapshots and operations before sending them. The service can store ciphertext and
+operational metadata, but it does not receive the vault master key, recovery root, device private
+keys, or readable finance content. While the enabled app is open, one global runtime synchronizes
+on cold start, local changes, reconnect and stale foreground resume; it does not claim periodic
+execution after the OS kills the PWA process. Sync has not completed an independent security
+review, so keep a separate JSON backup and recovery code. See the
 [sync architecture](docs/SYNC-ARCHITECTURE.md), [protocol](docs/SYNC-PROTOCOL.md),
 [recovery guide](docs/SYNC-RECOVERY.md), and [security model](docs/SYNC-SECURITY-MODEL.md).
 
@@ -140,7 +136,8 @@ npm run check
 npm run test:coverage
 npm run test:e2e
 npm run sync:test:e2e
-npm audit --omit=dev
+npm audit --audit-level=high
+npm audit --omit=dev --audit-level=high
 ```
 
 Documentation visuals are reproducible from a frozen synthetic fixture:

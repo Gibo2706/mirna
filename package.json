@@ -1,7 +1,7 @@
 {
   "name": "mirna-finansije",
   "private": true,
-  "version": "2.4.0-beta.1",
+  "version": "2.4.1",
   "license": "AGPL-3.0-only",
   "author": "Bogdan Marković",
   "repository": {

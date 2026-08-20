@@ -140,7 +140,7 @@ export const MorePage = ({
           <h2 className="mb-2 px-1 text-sm font-bold text-muted">Podaci i alati</h2>
           <Card className="divide-y p-0">
             {syncEnabled ? (
-              <Row to="/more/sync" icon={CloudCog} label="Sinhronizacija — Beta" detail="E2EE" />
+              <Row to="/more/sync" icon={CloudCog} label="Sinhronizacija" detail="E2EE" />
             ) : null}
             <Row
               to="/more/data"

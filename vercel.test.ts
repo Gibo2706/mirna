@@ -5,15 +5,13 @@ const stableEnvironment = {
   VITE_MIRNA_SYNC_ENABLED: 'false',
   VITE_MIRNA_SYNC_API_URL: '',
   VITE_TURNSTILE_SITE_KEY: '',
-  VITE_MIRNA_BETA_ONLY: 'false',
   VITE_MIRNA_APP_ENV: 'production',
 } as const;
 
 const betaEnvironment = {
   VITE_MIRNA_SYNC_ENABLED: 'true',
   VITE_MIRNA_SYNC_API_URL: 'https://mirna-sync-staging.bogdan-markovic2706.workers.dev',
-  VITE_TURNSTILE_SITE_KEY: 'public-test-key',
-  VITE_MIRNA_BETA_ONLY: 'true',
+  VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
   VITE_MIRNA_APP_ENV: 'beta',
 } as const;
 
@@ -33,7 +31,7 @@ const expectValidHeaderRules = (generated: ReturnType<typeof buildVercelConfig>)
 };
 
 describe('Vercel deployment CSP', () => {
-  it('keeps stable feature-off deployments isolated from beta infrastructure', () => {
+  it('keeps sync-disabled deployments isolated from external sync infrastructure', () => {
     const policy = buildContentSecurityPolicy(stableEnvironment);
 
     expect(policy).toContain("connect-src 'self'");
@@ -43,13 +41,19 @@ describe('Vercel deployment CSP', () => {
     expect(policy).not.toContain('challenges.cloudflare.com');
   });
 
-  it('allows only the exact staging and challenge origins for the beta channel', () => {
-    const policy = buildContentSecurityPolicy(betaEnvironment);
+  it.each([
+    ['production', { ...betaEnvironment, VITE_MIRNA_APP_ENV: 'production' }],
+    ['beta', betaEnvironment],
+  ] as const)(
+    'allows only the configured Worker and challenge origins for %s sync',
+    (_name, environment) => {
+      const policy = buildContentSecurityPolicy(environment);
 
-    expect(policy).toContain('https://mirna-sync-staging.bogdan-markovic2706.workers.dev');
-    expect(policy).toContain('https://challenges.cloudflare.com');
-    expect(policy).not.toContain('*');
-  });
+      expect(policy).toContain('https://mirna-sync-staging.bogdan-markovic2706.workers.dev');
+      expect(policy).toContain('https://challenges.cloudflare.com');
+      expect(policy).not.toContain('*');
+    },
+  );
 
   it('exports a named config with complete headers for Vercel schema validation', () => {
     expect(config).toBeDefined();

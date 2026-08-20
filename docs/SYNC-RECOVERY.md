@@ -1,11 +1,11 @@
 # Mirna Encrypted Sync — Recovery
 
-Status: experimental protocol v1 design for `2.4.0-beta.1`
-Deployment boundary: staging only
+Status: protocol v1 recovery design for stable `2.4.1`
+Deployment boundary: configured production, beta and local clients
 Implementation status: client/Worker recovery, current-snapshot recovery and
 atomic sole-device key/recovery rotation are implemented; pairing/bootstrap/
-sync have completed a real beta staging exercise, while independent security
-review and a dedicated production environment remain pending
+sync have completed a real staging exercise, while independent security review
+remains pending
 
 ## What recovery can and cannot do
 
@@ -238,8 +238,8 @@ The protocol-v1 recovery flow proceeds in this order:
     new random epoch and recovery record, and invalidates the old lookup/gate
     hash. Exact retries return the retained committed result and never
     reactivate the old code.
-12. The user saves and confirms the new recovery code before the client reports
-    recovery complete.
+12. The user explicitly acknowledges saving the new recovery code before the
+    client reports recovery complete.
 
 Steps 9–12 require failure injection between storage operations. A response
 loss after a successful commit must be retryable without creating two active
@@ -288,7 +288,7 @@ recovery authority, commits with expected recovery/manifest versions, and then
 invalidates the prior verifier.
 
 The old code must fail uniformly after commit. The new code is not considered
-usable until its random-group confirmation succeeds locally. The service must
+usable until the user explicitly acknowledges safe storage locally. The service must
 retain at most the minimum retry metadata needed to distinguish a completed
 rotation from a new request; it does not retain both active roots.
 
@@ -296,9 +296,10 @@ rotation from a new request; it does not retain both active roots.
 
 ### Setup
 
-The code is shown intentionally once after sync setup. Before the first
-encrypted upload, the user must confirm randomly selected code groups. The UI
-must explain that the service cannot recover the vault without the code.
+The code is shown intentionally once after sync setup. Before activation, the
+user must explicitly acknowledge that it was saved in a safe place. Copy,
+download or print never checks the acknowledgement automatically. The UI must
+explain that the service cannot recover the vault without the code.
 
 Allowed explicit actions are:
 
@@ -380,4 +381,5 @@ Recovery is not complete until focused tests cover at least:
 - multi-browser loss-and-recovery behavior using synthetic finance data only.
 
 Passing internal tests is necessary but is not an independent security audit.
-Recovery remains staging-only until the independent review gate passes.
+Recovery is available with configured sync in 2.4.1; the independent review
+gate remains an explicit security caveat.

@@ -38,15 +38,13 @@ build(enabledOutput, {
   VITE_MIRNA_SYNC_ENABLED: 'true',
   VITE_MIRNA_SYNC_API_URL: 'http://localhost:8787',
   VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
-  VITE_MIRNA_APP_ENV: 'local-beta',
-  VITE_MIRNA_BETA_ONLY: 'true',
+  VITE_MIRNA_APP_ENV: 'local',
 });
 build(disabledOutput, {
   VITE_MIRNA_SYNC_ENABLED: 'false',
   VITE_MIRNA_SYNC_API_URL: '',
   VITE_TURNSTILE_SITE_KEY: '',
-  VITE_MIRNA_APP_ENV: '',
-  VITE_MIRNA_BETA_ONLY: 'false',
+  VITE_MIRNA_APP_ENV: 'local',
 });
 
 const preview = (outputDirectory, port) =>

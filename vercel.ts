@@ -1,23 +1,22 @@
 import type { VercelConfig } from '@vercel/config/v1';
+import { readSyncClientConfig } from './src/features/sync/config';
 
 type VercelEnvironment = Readonly<Record<string, string | undefined>>;
 
 export const buildContentSecurityPolicy = (environment: VercelEnvironment): string => {
-  const betaDeployment =
-    environment.VITE_MIRNA_SYNC_ENABLED === 'true' &&
-    environment.VITE_MIRNA_BETA_ONLY === 'true' &&
-    (environment.VITE_MIRNA_APP_ENV === 'beta' || environment.VITE_MIRNA_APP_ENV === 'local-beta');
+  const syncConfig = readSyncClientConfig(environment);
+  const syncDeployment = syncConfig.enabled;
 
   return [
     "default-src 'self'",
-    betaDeployment ? "script-src 'self' https://challenges.cloudflare.com" : "script-src 'self'",
+    syncDeployment ? "script-src 'self' https://challenges.cloudflare.com" : "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self'",
-    betaDeployment
-      ? "connect-src 'self' https://challenges.cloudflare.com https://mirna-sync-staging.bogdan-markovic2706.workers.dev"
+    syncDeployment
+      ? `connect-src 'self' https://challenges.cloudflare.com ${syncConfig.apiOrigin}`
       : "connect-src 'self'",
-    betaDeployment ? 'frame-src https://challenges.cloudflare.com' : "frame-src 'none'",
+    syncDeployment ? 'frame-src https://challenges.cloudflare.com' : "frame-src 'none'",
     "worker-src 'self' blob:",
     "manifest-src 'self'",
     "object-src 'none'",

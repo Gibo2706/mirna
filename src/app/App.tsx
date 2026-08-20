@@ -2,11 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { AppShell } from '@/components/AppShell';
 import { useFinanceSnapshot } from '@/db/queries';
-import {
-  isBetaApplication,
-  readSyncClientConfig,
-  type SyncClientConfig,
-} from '@/features/sync/config';
+import { readSyncClientConfig, type SyncClientConfig } from '@/features/sync/config';
 import { SyncRuntimeProvider } from '@/features/sync/runtime/SyncRuntimeProvider';
 import type { SyncUiServices } from '@/features/sync/ui-services';
 import { ThemeSync } from './ThemeSync';
@@ -67,58 +63,31 @@ const PageLoader = () => (
   </div>
 );
 
-const BetaBanner = () => (
-  <aside className="border-b border-warning/30 bg-warning-soft px-4 py-2 text-center text-xs leading-5 text-warning">
-    <strong>Mirna Sync — Beta.</strong> Testni servis može privremeno pauzirati cloud sync; lokalni
-    podaci i JSON backup ostaju dostupni.{' '}
-    <a
-      className="font-bold underline underline-offset-2"
-      href="https://github.com/Gibo2706/mirna/blob/feat/e2ee-sync/docs/SYNC-SECURITY-MODEL.md"
-      target="_blank"
-      rel="noreferrer"
-    >
-      Bezbednosni model
-    </a>
-  </aside>
-);
-
-const AppContent = ({
-  syncConfig,
-  betaApplication,
-}: {
-  readonly syncConfig: SyncClientConfig;
-  readonly betaApplication: boolean;
-}) => {
+const AppContent = ({ syncConfig }: { readonly syncConfig: SyncClientConfig }) => {
   const snapshot = useFinanceSnapshot();
   const location = useLocation();
-  const withEnvironmentMarker = (content: React.ReactNode) => (
-    <>
-      {betaApplication ? <BetaBanner /> : null}
-      {content}
-    </>
-  );
 
-  if (snapshot === undefined) return withEnvironmentMarker(<StartupScreen />);
+  if (snapshot === undefined) return <StartupScreen />;
 
   if (snapshot === null || !snapshot.settingsRecord.onboardingCompleted) {
     if (syncConfig.enabled && location.pathname === '/more/sync') {
-      return withEnvironmentMarker(
+      return (
         <Suspense fallback={<StartupScreen />}>
           <Routes>
             <Route path="/more/sync" element={<SyncManager preOnboarding />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </Suspense>,
+        </Suspense>
       );
     }
-    return withEnvironmentMarker(
+    return (
       <Suspense fallback={<StartupScreen />}>
         <OnboardingPage snapshot={snapshot} />
-      </Suspense>,
+      </Suspense>
     );
   }
 
-  return withEnvironmentMarker(
+  return (
     <>
       <ThemeSync appearance={snapshot.settingsRecord.appearance} />
       <Suspense fallback={<PageLoader />}>
@@ -140,13 +109,13 @@ const AppContent = ({
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
-    </>,
+    </>
   );
 };
 
 export const App = ({ syncServices }: { readonly syncServices?: SyncUiServices } = {}) => {
   const syncConfig = readSyncClientConfig();
-  const content = <AppContent syncConfig={syncConfig} betaApplication={isBetaApplication()} />;
+  const content = <AppContent syncConfig={syncConfig} />;
   return syncConfig.enabled ? (
     <SyncRuntimeProvider services={syncServices}>{content}</SyncRuntimeProvider>
   ) : (

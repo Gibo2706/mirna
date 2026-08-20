@@ -45,6 +45,7 @@ describe('export and import formats', () => {
       }),
     );
     const envelope = createBackupEnvelope(data, new Date('2026-07-28T10:00:00.000Z'));
+    expect(envelope.application.version).toBe('2.4.1');
     const preview = parseBackup(JSON.stringify(envelope));
     expect(preview.envelope.data).toEqual(data);
     expect(preview.counts.transactions).toBe(1);

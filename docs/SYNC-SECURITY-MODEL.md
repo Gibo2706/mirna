@@ -1,15 +1,14 @@
 # Mirna Encrypted Sync — Security Model
 
-Status: experimental design for `2.4.0-beta.1`, protocol version 1
-Deployment boundary: staging only
+Status: stable `2.4.1` client design, protocol version 1
+Deployment boundary: configured production, beta and local clients
 Review status: not independently audited
 
 ## Security statement
 
-Mirna Sync is an optional end-to-end encrypted sync beta. It is designed so
+Mirna Sync is optional end-to-end encrypted sync. It is designed so
 that the sync service does not receive the keys needed to decrypt financial
-content. An independent security review is required before production
-enablement.
+content. An independent security review remains required.
 
 This design does not promise zero risk, formal verification, uninterrupted
 availability or protection from malicious code executing after the Mirna vault
@@ -164,10 +163,10 @@ envelope from the gate key.
 
 ## Security UX requirements
 
-- First sync requires explicit explanation, recovery confirmation and separate
+- First sync requires explicit explanation, saved-code acknowledgement and separate
   approval of the initial ciphertext upload.
-- The recovery code is shown intentionally, never auto-copied and confirmed by
-  random groups. The warning is explicit: if every authorized device and the
+- The recovery code is shown intentionally, never auto-copied and requires an
+  explicit safe-storage acknowledgement. The warning is explicit: if every authorized device and the
   recovery code are lost, encrypted cloud data cannot be recovered.
 - Pairing uses a high-entropy QR/manual capability and a transcript-derived SAS
   confirmed on both devices. A mismatch cancels and invalidates the request.
@@ -181,7 +180,7 @@ envelope from the gate key.
   token, server-verifying, success, expiry, rejection, network and
   configuration states. Retry never reuses a token and preserves an already
   prepared activation lifecycle.
-- Beta diagnostics displays Support ID and Request ID and explicitly states
+- Sync diagnostics displays Support ID and Request ID and explicitly states
   that reports must not contain financial data or secrets.
 
 ## Operational constraints
@@ -206,8 +205,9 @@ envelope from the gate key.
 - Turnstile protects only anonymous vault/pairing/recovery initiation and checks
   Siteverify success, exact hostname and action. It supplements rather than
   replaces D1 attempt counters, rate limits and cryptographic authorization.
-- No production Worker/D1/R2/Turnstile resource is defined by this beta work;
-  the existing dedicated staging resources are not a production environment.
+- Production currently uses the existing staging-named Worker/D1/R2 and
+  Turnstile resources; renaming or migrating that data plane is a separate
+  reviewed operation.
 
 ## Review and production gate
 

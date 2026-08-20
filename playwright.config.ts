@@ -30,7 +30,7 @@ export default defineConfig({
     ? undefined
     : {
         command:
-          'VITE_MIRNA_SYNC_ENABLED=false VITE_MIRNA_SYNC_API_URL= VITE_TURNSTILE_SITE_KEY= VITE_MIRNA_APP_ENV= VITE_MIRNA_BETA_ONLY=false npm run build && npm run preview -- --host 127.0.0.1',
+          'VITE_MIRNA_SYNC_ENABLED=false VITE_MIRNA_SYNC_API_URL= VITE_TURNSTILE_SITE_KEY= VITE_MIRNA_APP_ENV=local npm run build && npm run preview -- --host 127.0.0.1',
         url: 'http://127.0.0.1:4173',
         // Never attach a release gate to an unrelated/stale preview process.
         reuseExistingServer: false,

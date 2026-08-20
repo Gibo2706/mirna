@@ -458,6 +458,20 @@ describe('Mirna sync Web Crypto suite', () => {
     expect(url.hash).toContain('protocol=1');
     expect(parsePairingQrPayload(payload, 'https://mirna.example')).toBe(code);
     expect(() => parsePairingQrPayload(payload, 'https://evil.example')).toThrow();
+
+    url.hash = new URLSearchParams({
+      protocol: '2',
+      suite: SYNC_CRYPTO_SUITE,
+      pair: code,
+    }).toString();
+    expect(() => parsePairingQrPayload(url.toString(), 'https://mirna.example')).toThrow();
+
+    url.hash = new URLSearchParams({
+      protocol: String(SYNC_PROTOCOL_VERSION),
+      suite: 'MIRNA-UNSUPPORTED-SUITE',
+      pair: code,
+    }).toString();
+    expect(() => parsePairingQrPayload(url.toString(), 'https://mirna.example')).toThrow();
   });
 
   it('does not reuse generated opaque IDs in a large sample', () => {

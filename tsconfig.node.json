@@ -11,7 +11,7 @@
     "moduleDetection": "force",
     "noEmit": true,
     "strict": true,
-    "types": ["node"],
+    "types": ["node", "vite/client"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
@@ -21,6 +21,7 @@
     "vite.config.ts",
     "vercel.ts",
     "vercel.test.ts",
+    "ci-workflow.test.ts",
     "playwright.config.ts",
     "playwright.sync.config.ts",
     "eslint.config.js",

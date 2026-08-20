@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -57,6 +57,7 @@ import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 import { SyncApiError } from './api';
 import { TurnstileCard } from './ui/TurnstileCard';
 import { LazyDiagnostics } from './ui/SyncDiagnostics';
+import { parsePairingQrPayload } from '@/domain/sync/crypto';
 
 type EmptyMode = 'choose' | 'enable' | 'pair-new' | 'recover';
 
@@ -135,7 +136,7 @@ const EnablePanel = ({
     'idle',
   );
   const [presentation, setPresentation] = useState<RecoveryCodePresentation>();
-  const [confirmationValues, setConfirmationValues] = useState<Record<number, string>>({});
+  const [recoveryCodeSaved, setRecoveryCodeSaved] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -167,7 +168,7 @@ const EnablePanel = ({
     lifecycle.current = nextLifecycle;
     try {
       setPresentation(await nextLifecycle.begin(deviceName));
-      setConfirmationValues({});
+      setRecoveryCodeSaved(false);
     } catch (caught) {
       lifecycle.current = null;
       setError(safeErrorMessage(caught));
@@ -177,16 +178,11 @@ const EnablePanel = ({
   };
 
   const confirm = async () => {
-    if (!presentation || !lifecycle.current || busy) return;
+    if (!presentation || !lifecycle.current || !recoveryCodeSaved || busy) return;
     setBusy(true);
     setError('');
     try {
-      await lifecycle.current.confirmRecoveryCode(
-        presentation.confirmationGroupNumbers.map((groupNumber) => ({
-          groupNumber,
-          value: confirmationValues[groupNumber] ?? '',
-        })),
-      );
+      await lifecycle.current.confirmRecoveryCodeSaved();
       setConfirmed(true);
       success('Sačuvani recovery kod je potvrđen.');
     } catch (caught) {
@@ -212,7 +208,7 @@ const EnablePanel = ({
       setActivationRetryAvailable(false);
       setActivationError(undefined);
       setPresentation(undefined);
-      setConfirmationValues({});
+      setRecoveryCodeSaved(false);
       success('Sinhronizacija je spremna na ovom uređaju.');
       await onActivated();
     } catch (caught) {
@@ -301,18 +297,16 @@ const EnablePanel = ({
         <RecoveryCodeStep
           title="Sačuvajte svoj recovery kod"
           presentation={presentation}
-          values={confirmationValues}
-          onValueChange={(groupNumber, value) =>
-            setConfirmationValues((current) => ({ ...current, [groupNumber]: value }))
-          }
+          saved={recoveryCodeSaved}
+          onSavedChange={setRecoveryCodeSaved}
           services={services}
         />
       ) : null}
 
       {presentation && !confirmed ? (
-        <Button onClick={() => void confirm()} disabled={busy}>
+        <Button onClick={() => void confirm()} disabled={busy || !recoveryCodeSaved}>
           {busy ? <BusyIcon /> : <CheckCircle2 size={17} aria-hidden="true" />}
-          Potvrdi sačuvani kod
+          Potvrdi da je kod sačuvan
         </Button>
       ) : null}
       {presentation && confirmed ? (
@@ -644,7 +638,7 @@ const RecoveryPanel = ({
   const [oldRecoveryCode, setOldRecoveryCode] = useState('');
   const [showOldCode, setShowOldCode] = useState(false);
   const [presentation, setPresentation] = useState<RecoveryStartResult>();
-  const [confirmationValues, setConfirmationValues] = useState<Record<number, string>>({});
+  const [recoveryCodeSaved, setRecoveryCodeSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -659,7 +653,7 @@ const RecoveryPanel = ({
       setOldRecoveryCode('');
       setShowOldCode(false);
       setPresentation(result);
-      setConfirmationValues({});
+      setRecoveryCodeSaved(false);
     } catch (caught) {
       lifecycle.current = null;
       setError(safeErrorMessage(caught));
@@ -669,18 +663,13 @@ const RecoveryPanel = ({
   };
 
   const finish = async () => {
-    if (!presentation || !lifecycle.current || busy) return;
+    if (!presentation || !lifecycle.current || !recoveryCodeSaved || busy) return;
     setBusy(true);
     setError('');
     try {
-      await lifecycle.current.confirmNewRecoveryCode(
-        presentation.confirmationGroupNumbers.map((groupNumber) => ({
-          groupNumber,
-          value: confirmationValues[groupNumber] ?? '',
-        })),
-      );
+      await lifecycle.current.confirmNewRecoveryCodeSaved();
       setPresentation(undefined);
-      setConfirmationValues({});
+      setRecoveryCodeSaved(false);
       success('Oporavak je završen. Stari uređaji više nisu ovlašćeni.');
       await onActivated();
     } catch (caught) {
@@ -743,13 +732,11 @@ const RecoveryPanel = ({
           <RecoveryCodeStep
             title="Sačuvajte novi recovery kod"
             presentation={presentation}
-            values={confirmationValues}
-            onValueChange={(groupNumber, value) =>
-              setConfirmationValues((current) => ({ ...current, [groupNumber]: value }))
-            }
+            saved={recoveryCodeSaved}
+            onSavedChange={setRecoveryCodeSaved}
             services={services}
           />
-          <Button onClick={() => void finish()} disabled={busy}>
+          <Button onClick={() => void finish()} disabled={busy || !recoveryCodeSaved}>
             {busy ? <BusyIcon /> : <ShieldCheck size={17} aria-hidden="true" />}
             Potvrdi novi kod i završi oporavak
           </Button>
@@ -775,20 +762,34 @@ const DeviceIcon = ({ kind }: { kind?: SyncDeviceKind }) => {
 const ExistingDeviceApproval = ({
   services,
   vaultId,
+  initialCode = '',
   onChanged,
 }: {
   services: SyncUiServices;
   vaultId: string;
+  initialCode?: string;
   onChanged: () => Promise<void>;
 }) => {
   const { success } = useToast();
   const lifecycle = useRef<ExistingDevicePairingLifecyclePort | null>(null);
-  const [code, setCode] = useState('');
+  const [code, setCode] = useState(initialCode);
   const [prepared, setPrepared] = useState<PreparedExistingPairing>();
   const [alias, setAlias] = useState('Drugi uređaj');
   const [kind, setKind] = useState<SyncDeviceKind>('other');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const codeInput = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    codeInput.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!initialCode) return;
+    setCode(initialCode);
+    setError('');
+    codeInput.current?.focus();
+  }, [initialCode]);
 
   const inspect = async () => {
     if (busy) return;
@@ -854,6 +855,7 @@ const ExistingDeviceApproval = ({
         <>
           <Field label="QR sadržaj ili ručni kod">
             <Textarea
+              ref={codeInput}
               value={code}
               onChange={(event) => setCode(event.target.value)}
               autoComplete="off"
@@ -932,6 +934,8 @@ const ActivePanel = ({
   activity,
   synchronizeRuntime,
   preOnboarding,
+  initialPairingCode,
+  pairingDeepLinkError,
   onDisabled,
   onChanged,
 }: {
@@ -940,6 +944,8 @@ const ActivePanel = ({
   activity: SyncActivity;
   synchronizeRuntime: SyncRuntimeValue['synchronize'];
   preOnboarding: boolean;
+  initialPairingCode?: string;
+  pairingDeepLinkError?: string;
   onDisabled: () => Promise<void>;
   onChanged: () => Promise<void>;
 }) => {
@@ -957,12 +963,13 @@ const ActivePanel = ({
   const [recoveryCode, setRecoveryCode] = useState('');
   const [revokeConfirmation, setRevokeConfirmation] = useState('');
   const [showCloudDelete, setShowCloudDelete] = useState(false);
-  const [showAddDevice, setShowAddDevice] = useState(false);
+  const [showAddDevice, setShowAddDevice] = useState(Boolean(initialPairingCode));
   const [renameDeviceId, setRenameDeviceId] = useState<string>();
   const [aliasLabel, setAliasLabel] = useState('');
   const [aliasKind, setAliasKind] = useState<SyncDeviceKind>('other');
   const [cloudRecoveryCode, setCloudRecoveryCode] = useState('');
   const [cloudDeleteConfirmation, setCloudDeleteConfirmation] = useState('');
+  const addDevicePanel = useRef<HTMLDivElement>(null);
   const { setup } = status;
   const disablePhrase = 'ISKLJUČI OVAJ UREĐAJ';
   const revokePhrase = 'OPOZOVI UREĐAJ';
@@ -972,6 +979,15 @@ const ActivePanel = ({
     () => new Map(status.deviceAliases.map((alias) => [alias.deviceId, alias])),
     [status.deviceAliases],
   );
+
+  useEffect(() => {
+    if (!showAddDevice) return;
+    addDevicePanel.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }, [showAddDevice]);
+
+  useEffect(() => {
+    if (initialPairingCode) setShowAddDevice(true);
+  }, [initialPairingCode]);
 
   const beginRename = (deviceId: string) => {
     const current = aliasesByDeviceId.get(deviceId);
@@ -1016,7 +1032,8 @@ const ActivePanel = ({
     if (activity.kind === 'paused') {
       return {
         title: 'Sinhronizacija je privremeno pauzirana',
-        description: 'Testni servis je dostigao ograničenje. Lokalne promene ostaju sačuvane.',
+        description:
+          'Sinhronizacija je privremeno pauzirana zbog ograničenja servisa. Lokalne promene ostaju sačuvane.',
         tone: 'warning' as const,
         icon: <TriangleAlert size={22} aria-hidden="true" />,
       };
@@ -1240,8 +1257,13 @@ const ActivePanel = ({
           </div>
         </div>
         <div className="grid gap-2 min-[390px]:grid-cols-2">
-          <Button variant="secondary" onClick={() => setShowAddDevice((current) => !current)}>
-            <Smartphone size={17} aria-hidden="true" /> Dodaj uređaj
+          <Button
+            variant="secondary"
+            aria-expanded={showAddDevice}
+            onClick={() => setShowAddDevice((current) => !current)}
+          >
+            <Smartphone size={17} aria-hidden="true" />
+            {showAddDevice ? 'Sakrij dodavanje' : 'Dodaj uređaj'}
           </Button>
           <Button
             variant="secondary"
@@ -1303,6 +1325,19 @@ const ActivePanel = ({
           </dl>
         </details>
       </Card>
+
+      {pairingDeepLinkError ? <InlineError message={pairingDeepLinkError} /> : null}
+
+      {showAddDevice ? (
+        <div ref={addDevicePanel} data-testid="sync-add-device-panel" className="scroll-mt-4">
+          <ExistingDeviceApproval
+            services={services}
+            vaultId={setup.vault.vaultId}
+            initialCode={initialPairingCode}
+            onChanged={onChanged}
+          />
+        </div>
+      ) : null}
 
       {status.pendingConflictCount > 0 ? (
         <Card className="grid gap-4 border-warning/30">
@@ -1577,14 +1612,6 @@ const ActivePanel = ({
         onConfirm={renewDevice}
       />
 
-      {showAddDevice ? (
-        <ExistingDeviceApproval
-          services={services}
-          vaultId={setup.vault.vaultId}
-          onChanged={onChanged}
-        />
-      ) : null}
-
       {preOnboarding ? (
         <Card className="grid gap-3">
           <p className="text-sm leading-6 text-muted">
@@ -1723,9 +1750,49 @@ const ActivePanel = ({
   );
 };
 
+type PairingDeepLink =
+  | Readonly<{ kind: 'none' }>
+  | Readonly<{ kind: 'valid'; pairingCode: string }>
+  | Readonly<{ kind: 'invalid' }>;
+
+const readPairingDeepLink = (href: string, expectedOrigin: string): PairingDeepLink => {
+  const url = new URL(href);
+  if (!url.hash) return { kind: 'none' };
+  try {
+    return {
+      kind: 'valid',
+      pairingCode: parsePairingQrPayload(href, expectedOrigin),
+    };
+  } catch {
+    return { kind: 'invalid' };
+  }
+};
+
+const invalidPairingLinkMessage =
+  'QR link za uparivanje nije ispravan ili nije namenjen ovom Mirna okruženju.';
+
 const SyncContent = ({ preOnboarding }: { preOnboarding: boolean }) => {
   const { services, localStatus, loadError, activity, refresh, synchronize } = useSyncRuntime();
   const [mode, setMode] = useState<EmptyMode>('choose');
+  const [pairingDeepLink, setPairingDeepLink] = useState<PairingDeepLink>(() =>
+    readPairingDeepLink(window.location.href, window.location.origin),
+  );
+
+  useEffect(() => {
+    const readCurrentFragment = () =>
+      setPairingDeepLink(readPairingDeepLink(window.location.href, window.location.origin));
+    window.addEventListener('hashchange', readCurrentFragment);
+    return () => window.removeEventListener('hashchange', readCurrentFragment);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (pairingDeepLink.kind !== 'valid') return;
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${window.location.pathname}${window.location.search}`,
+    );
+  }, [pairingDeepLink]);
 
   const content = (() => {
     if (!localStatus && !loadError) {
@@ -1748,6 +1815,12 @@ const SyncContent = ({ preOnboarding }: { preOnboarding: boolean }) => {
           activity={activity}
           synchronizeRuntime={synchronize}
           preOnboarding={preOnboarding}
+          initialPairingCode={
+            pairingDeepLink.kind === 'valid' ? pairingDeepLink.pairingCode : undefined
+          }
+          pairingDeepLinkError={
+            pairingDeepLink.kind === 'invalid' ? invalidPairingLinkMessage : undefined
+          }
           onDisabled={async () => {
             setMode('choose');
             await refresh();
@@ -1758,6 +1831,12 @@ const SyncContent = ({ preOnboarding }: { preOnboarding: boolean }) => {
     }
 
     if (mode === 'choose') {
+      const pairingExplanation =
+        pairingDeepLink.kind === 'valid'
+          ? 'Ovaj QR link mora da se otvori na uređaju na kome je sinhronizacija već uključena. Na ovom uređaju prvo izaberite odgovarajući način povezivanja.'
+          : pairingDeepLink.kind === 'invalid'
+            ? invalidPairingLinkMessage
+            : '';
       if (localStatus.pendingPairingFinalization) {
         return (
           <NewDevicePairingPanel
@@ -1768,7 +1847,12 @@ const SyncContent = ({ preOnboarding }: { preOnboarding: boolean }) => {
           />
         );
       }
-      return <EmptyModeChooser preOnboarding={preOnboarding} onChoose={setMode} />;
+      return (
+        <div className="grid gap-4">
+          <InlineError message={pairingExplanation} />
+          <EmptyModeChooser preOnboarding={preOnboarding} onChoose={setMode} />
+        </div>
+      );
     }
     if (mode === 'enable') {
       return (
@@ -1824,7 +1908,7 @@ export const SyncManager = ({ preOnboarding = false, services }: SyncManagerProp
           <ArrowLeft size={18} aria-hidden="true" /> Nazad na početak
         </Link>
         <header className="mb-6">
-          <p className="text-sm font-semibold text-accent">Privatnost — Beta</p>
+          <p className="text-sm font-semibold text-accent">Privatnost i E2EE</p>
           <h1 className="mt-1 text-2xl font-extrabold tracking-tight sm:text-3xl">
             Sinhronizacija
           </h1>
@@ -1840,7 +1924,7 @@ export const SyncManager = ({ preOnboarding = false, services }: SyncManagerProp
 
   return (
     <SettingsLayout
-      eyebrow="Privatnost — Beta"
+      eyebrow="Privatnost i E2EE"
       title="Sinhronizacija"
       description="Koristite iste podatke na više uređaja. Sve se šifruje na ovom uređaju pre slanja."
     >

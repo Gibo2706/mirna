@@ -1,6 +1,6 @@
-# Mirna Encrypted Sync — Beta/Staging Operations
+# Mirna Encrypted Sync — Production Operations
 
-Status: experimental `2.4.0-beta.1`, protocol version 1
+Status: stable client `2.4.1`, protocol version 1
 
 Authorized Worker: `mirna-sync-staging`
 
@@ -14,8 +14,8 @@ sync data plane on 2026-08-20. Until a separate production Worker, D1 and R2
 exist, both application origins share `mirna-sync-staging` and its encrypted
 staging storage.
 
-This runbook defines the operational procedure for the shared beta-grade sync
-data plane. It must not contain Cloudflare account identifiers, credentials,
+This runbook defines the operational procedure for the shared, staging-named
+sync data plane. It must not contain Cloudflare account identifiers, credentials,
 Turnstile secrets, Vercel tokens or finance plaintext. The checked-in D1
 resource identifier is a binding identifier, not a decryption secret; it is
 still omitted from reports.
@@ -39,9 +39,9 @@ Worker requests EU-only. No regional execution product is configured.
 There is no production Worker environment, public R2 URL, Durable Object,
 Queue, paid observability or server-side encryption master key in this design.
 
-Staging CORS allows exactly the beta origin plus explicit local development at
-`http://localhost:5173` and `http://127.0.0.1:5173`. It never reflects an
-arbitrary origin and does not allow the stable production application.
+Worker CORS allows exactly the production and beta Vercel origins plus explicit
+local development at `http://localhost:5173` and `http://127.0.0.1:5173`. It
+never reflects an arbitrary origin.
 
 ## Source-controlled staging safety caps
 
@@ -110,7 +110,7 @@ SET accept_new_vaults = 0,
 WHERE singleton_id = 1;
 ```
 
-Normal beta defaults are `accept_new_vaults=1`, `accept_pairings=1`,
+Normal service defaults are `accept_new_vaults=1`, `accept_pairings=1`,
 `accept_writes=1`, `maintenance_mode=0`. Reads needed for recovery/export may
 remain available while writes are paused. The health route exposes only the
 derived `writesEnabled` boolean, never counter values or flags individually.
@@ -162,9 +162,9 @@ the Cloudflare secret store as `TURNSTILE_SECRET_KEY`. Automated local tests use
 Cloudflare's documented always-pass test keys; real staging material never
 enters `.env`, `.dev.vars`, test fixtures or Git.
 
-## Privacy-safe beta diagnostics
+## Privacy-safe sync diagnostics
 
-The beta UI creates a 128-bit random readable Support ID and stores it only in
+The sync UI creates a 128-bit random readable Support ID and stores it only in
 IndexedDB. It is not in `localStorage`, finance snapshots, encrypted sync
 payloads or JSON backups. A local ring buffer keeps at most 200 allowlisted
 technical events. The UI can copy Support ID, the last Request ID and a
@@ -195,7 +195,7 @@ ask for screenshots or exports containing finance data or recovery material.
 
 ## Local gate
 
-Use Node 22 only for the current shell and pinned Wrangler `4.118.0`:
+Use Node 22 only for the current shell and pinned Wrangler `4.120.0`:
 
 ```sh
 nvm use 22
@@ -234,16 +234,8 @@ R2 Standard:     mirna-sync-staging-eu
 Turnstile widget: Mirna Sync Beta
 ```
 
-Creation commands, when the account has already activated D1/R2 and no checkout
-or paid-plan acceptance appears:
-
-```sh
-npx wrangler d1 create mirna-sync-staging-eu --jurisdiction eu
-npx wrangler r2 bucket create mirna-sync-staging-eu \
-  --jurisdiction eu --storage-class Standard
-```
-
-Never combine a jurisdiction with a location hint. Do not enable R2
+Mirna 2.4.1 must not create, rename or replace these resources. Resource-name
+migration is a separate infrastructure change. Do not enable R2
 InfrequentAccess, `r2.dev`, a custom bucket domain or lifecycle rules.
 
 After reviewing the binding diff and regenerating types:
@@ -269,6 +261,34 @@ Set/rotate the real Turnstile secret without putting it in a command argument,
 tracked file or report. Verify the secret binding only by name. Never print its
 value.
 
+## Automated main deployment
+
+The `deploy-sync-worker` job in `.github/workflows/ci.yml` runs only for a push
+to `main`, after both `quality` and `e2e` succeed. The `production-sync` GitHub
+Environment serializes releases with `cancel-in-progress: false`. The job uses
+the locked Wrangler 4.120.0 dependency, disables automatic resource
+provisioning, applies only pending versioned D1 migrations, deploys the existing
+`mirna-sync-staging` Worker with `MIRNA_BUILD_COMMIT=${GITHUB_SHA}`, and then
+runs the read-only staging verifier against that exact SHA and production CORS.
+
+Repository or Environment owners must add only these GitHub Environment
+secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Scope the token to the single Cloudflare account with account permissions
+`Workers Scripts Write`, `D1 Edit`, and `Workers R2 Storage Read`. No zone
+permission is needed because this Worker uses its existing `workers.dev`
+endpoint and does not modify routes. `TURNSTILE_SECRET_KEY` remains an existing
+Worker secret and is not copied into GitHub Actions. Wrangler deploy does not
+delete existing encrypted Worker secrets.
+
+Every future migration in this automatic path must be forward-only and
+backward-compatible with the Worker version currently serving traffic. A
+destructive, code-first or incompatible migration requires a separately
+reviewed manual rollout and must not be added to this job.
+
 ## Vercel projects and production promotion
 
 The authorized projects and aliases are:
@@ -286,33 +306,34 @@ other project, use an isolated temporary working copy or relink only after the
 target is confirmed. This checkout can remain linked to the beta project; never
 assume that link targets production.
 
-Both currently enabled application builds use:
+Production must use:
 
 ```text
 VITE_MIRNA_SYNC_ENABLED=true
-VITE_MIRNA_SYNC_API_URL=<exact staging workers.dev origin>
-VITE_TURNSTILE_SITE_KEY=<public beta site key>
-VITE_MIRNA_APP_ENV=beta
-VITE_MIRNA_BETA_ONLY=true
+VITE_MIRNA_SYNC_API_URL=https://mirna-sync-staging.bogdan-markovic2706.workers.dev
+VITE_TURNSTILE_SITE_KEY=<public site key>
+VITE_MIRNA_APP_ENV=production
 ```
 
-Every environment change requires a new deployment of the affected project.
-While both aliases use the beta-only sync gate, each build must contain
-`noindex, nofollow`, a `robots.txt` that disallows all crawlers and a CSP that
-permits only the exact challenge origin for script/frame/connect plus the exact
-staging Worker origin for connect. `vercel.ts` derives this CSP from the same
-explicit gate. Promotion also requires the exact Vercel hostname in both the
-Worker CORS allowlist and the Turnstile widget hostname allowlist.
+The beta Vercel project uses the same sync values but
+`VITE_MIRNA_APP_ENV=beta`; local development uses `local`. Remove
+`VITE_MIRNA_BETA_ONLY` from every Vercel environment. Every environment change
+requires a new deployment of the affected project.
+
+Production is indexable and must not contain `noindex, nofollow` or a
+disallow-all `robots.txt`. Beta remains crawler-protected. Both enabled builds
+receive the exact Turnstile script/frame/connect origins and the configured
+Worker origin in CSP. Disabled builds receive neither external origin.
 
 ## Remote smoke and plaintext sentinel gate
 
 Use unique synthetic data labelled:
 
 ```text
-Synthetic beta test data. Not based on a real person's financial records.
+Synthetic sync test data. Not based on a real person's financial records.
 ```
 
-At low volume verify beta load/marker/noindex, health and strict CORS, the three
+At low volume verify the environment-specific indexing policy, health and strict CORS, the three
 Turnstile-protected anonymous entry points, device auth, create/upload/download,
 operation sync, pairing, recovery, conflict convergence, revocation/rotation,
 offline continuity and deletion. Remove disposable test vaults through the
@@ -334,7 +355,7 @@ cost incident. Worker rollback is safe only to a protocol/schema-compatible
 version; migrations are forward-only. Do not drop the database, empty the
 bucket, recreate resources or force-push as a first response.
 
-If plaintext or a real secret appears server-side: pause the beta clients,
+If plaintext or a real secret appears server-side: pause the sync clients,
 rotate/invalidate affected credentials, preserve only non-sensitive diagnostic
 metadata, repair forward, rerun the plaintext gate and deploy a reviewed build.
 

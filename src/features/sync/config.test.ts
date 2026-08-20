@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseSyncApiOrigin, readSyncClientConfig, SyncConfigurationError } from './config';
+import {
+  isSearchProtectedDeployment,
+  parseSyncApiOrigin,
+  readSyncClientConfig,
+  SyncConfigurationError,
+} from './config';
 
 describe('sync client configuration', () => {
   it.each([{}, { VITE_MIRNA_SYNC_ENABLED: '' }, { VITE_MIRNA_SYNC_ENABLED: 'false' }])(
@@ -9,23 +14,24 @@ describe('sync client configuration', () => {
     },
   );
 
-  it('accepts only an exact HTTPS staging origin when enabled', () => {
-    expect(
-      readSyncClientConfig({
-        VITE_MIRNA_SYNC_ENABLED: 'true',
-        VITE_MIRNA_SYNC_API_URL: 'https://mirna-sync-staging.example.workers.dev',
-        VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
-        VITE_MIRNA_APP_ENV: 'beta',
-        VITE_MIRNA_BETA_ONLY: 'true',
-      }),
-    ).toEqual({
-      enabled: true,
-      apiOrigin: 'https://mirna-sync-staging.example.workers.dev',
-      turnstileSiteKey: '1x00000000000000000000AA',
-      appEnvironment: 'beta',
-      betaOnly: true,
-    });
-  });
+  it.each(['production', 'beta', 'local'] as const)(
+    'accepts an exact API origin in the %s app environment',
+    (appEnvironment) => {
+      expect(
+        readSyncClientConfig({
+          VITE_MIRNA_SYNC_ENABLED: 'true',
+          VITE_MIRNA_SYNC_API_URL: 'https://mirna-sync-staging.example.workers.dev',
+          VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
+          VITE_MIRNA_APP_ENV: appEnvironment,
+        }),
+      ).toEqual({
+        enabled: true,
+        apiOrigin: 'https://mirna-sync-staging.example.workers.dev',
+        turnstileSiteKey: '1x00000000000000000000AA',
+        appEnvironment,
+      });
+    },
+  );
 
   it('allows explicit HTTP only for localhost development', () => {
     expect(parseSyncApiOrigin('http://localhost:8787')).toBe('http://localhost:8787');
@@ -45,7 +51,7 @@ describe('sync client configuration', () => {
     expect(() => parseSyncApiOrigin(candidate)).toThrow(SyncConfigurationError);
   });
 
-  it('fails closed for mistyped flags and a missing URL', () => {
+  it('fails closed for mistyped flags, environment, URL, or site key', () => {
     expect(() => readSyncClientConfig({ VITE_MIRNA_SYNC_ENABLED: 'TRUE' })).toThrow(
       SyncConfigurationError,
     );
@@ -57,9 +63,37 @@ describe('sync client configuration', () => {
         VITE_MIRNA_SYNC_ENABLED: 'true',
         VITE_MIRNA_SYNC_API_URL: 'https://sync.example.test',
         VITE_TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
-        VITE_MIRNA_APP_ENV: 'production',
-        VITE_MIRNA_BETA_ONLY: 'true',
+        VITE_MIRNA_APP_ENV: 'preview',
       }),
     ).toThrow(SyncConfigurationError);
+    expect(() =>
+      readSyncClientConfig({
+        VITE_MIRNA_SYNC_ENABLED: 'true',
+        VITE_MIRNA_SYNC_API_URL: 'https://sync.example.test',
+        VITE_TURNSTILE_SITE_KEY: 'short',
+        VITE_MIRNA_APP_ENV: 'production',
+      }),
+    ).toThrow(SyncConfigurationError);
+  });
+
+  it('protects beta search independently from sync enablement', () => {
+    expect(
+      isSearchProtectedDeployment({
+        VITE_MIRNA_SYNC_ENABLED: 'true',
+        VITE_MIRNA_APP_ENV: 'production',
+      }),
+    ).toBe(false);
+    expect(
+      isSearchProtectedDeployment({
+        VITE_MIRNA_SYNC_ENABLED: 'true',
+        VITE_MIRNA_APP_ENV: 'beta',
+      }),
+    ).toBe(true);
+    expect(
+      isSearchProtectedDeployment({
+        VITE_MIRNA_SYNC_ENABLED: 'false',
+        VITE_MIRNA_APP_ENV: 'beta',
+      }),
+    ).toBe(true);
   });
 });

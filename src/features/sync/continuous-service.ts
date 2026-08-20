@@ -8,7 +8,7 @@ const COMPACTION_ENCRYPTED_BYTES_THRESHOLD = 1024 * 1024;
 const MAX_PENDING_CONFLICTS = 100;
 const MAX_UNCOMPACTED_OPERATIONS = 5_000;
 const SAFE_PAUSE_MESSAGE =
-  'Beta sinhronizacija je privremeno pauzirana zbog ograničenja testnog servisa. Promene ostaju sačuvane na ovom uređaju.';
+  'Sinhronizacija je privremeno pauzirana zbog ograničenja servisa. Promene ostaju sačuvane na ovom uređaju.';
 
 export type ContinuousSyncResult =
   | SnapshotSyncResult

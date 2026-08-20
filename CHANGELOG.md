@@ -2,6 +2,20 @@
 
 All notable changes to Mirna are documented here.
 
+## [2.4.1] - 2026-08-20
+
+### Changed
+
+- Polished the production E2EE sync experience and removed beta-only product presentation.
+- Added validated pairing deep-link/QR autofill with immediate fragment cleanup and a visible
+  mobile Add Device panel that still requires explicit approval.
+- Replaced recovery-group transcription with an explicit saved-code acknowledgement while
+  preserving the recovery format and cryptography.
+- Added main-only automated deployment of the existing sync Worker after green quality and E2E
+  jobs, including pending D1 migrations and exact-build post-deploy verification.
+- Separated sync enablement, app environment and crawler protection so production sync remains
+  indexable while beta deployments remain noindex.
+
 ## [2.4.0-beta.1] - Unreleased
 
 ### Added

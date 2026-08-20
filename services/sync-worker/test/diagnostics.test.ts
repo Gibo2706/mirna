@@ -33,7 +33,7 @@ describe('privacy-safe beta diagnostics', () => {
   it('accepts only the tiny anonymous Turnstile allowlist and stores hashed support references', async () => {
     const context = diagnosticContext({
       action: 'mirna_vault_create',
-      build: '2.4.0-beta.1',
+      build: '2.4.1',
       eventType: 'turnstile_rejected',
       occurredAt: '2026-08-01T16:00:00.000Z',
       online: true,
@@ -61,13 +61,13 @@ describe('privacy-safe beta diagnostics', () => {
     expect(stored?.support_ref).toMatch(/^[0-9A-F]{64}$/u);
     expect(JSON.stringify(stored)).not.toContain(SUPPORT_ID);
     expect(stored?.safe_details_json).toBe(
-      '{"appBuild":"2.4.0-beta.1","online":true,"safeCode":"HUMAN_VERIFICATION_REJECTED","verificationAttemptId":"NONE","verificationReason":"NONE"}',
+      '{"appBuild":"2.4.1","online":true,"safeCode":"HUMAN_VERIFICATION_REJECTED","verificationAttemptId":"NONE","verificationReason":"NONE"}',
     );
   });
 
   it('rejects broader anonymous client events without device authentication', async () => {
     const context = diagnosticContext({
-      build: '2.4.0-beta.1',
+      build: '2.4.1',
       eventType: 'sync_request_error',
       occurredAt: '2026-08-01T16:00:00.000Z',
       online: true,
@@ -105,7 +105,7 @@ describe('privacy-safe beta diagnostics', () => {
   it('validates local test events without writing beta telemetry', async () => {
     const context = diagnosticContext(
       {
-        build: '2.4.0-beta.1',
+        build: '2.4.1',
         eventType: 'turnstile_success',
         occurredAt: '2026-08-01T16:00:00.000Z',
         online: true,

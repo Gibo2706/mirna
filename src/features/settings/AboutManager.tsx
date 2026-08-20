@@ -20,12 +20,17 @@ export const AboutManager = () => (
       </p>
       <h2 className="mt-2 text-3xl font-extrabold tracking-tight">Vaš novac ostaje vaš.</h2>
       <p className="mt-3 max-w-xl text-sm leading-6 text-white/65">
-        Bez naloga, backend-a, cloud sinhronizacije, analitike i spoljašnjih finansijskih API-ja.
+        Bez naloga, analitike, bankarskih veza i spoljašnjih finansijskih API-ja. Osnovni model je
+        local-first, uz opcionu end-to-end šifrovanu sinhronizaciju.
       </p>
     </Card>
     <div className="mt-5 grid gap-3 sm:grid-cols-3">
       {[
-        [LockKeyhole, 'Privatno', 'Finansije ostaju u IndexedDB bazi ovog uređaja.'],
+        [
+          LockKeyhole,
+          'Privatno',
+          'Finansije ostaju lokalno; uključeni sync šalje samo šifrovani sadržaj.',
+        ],
         [WifiOff, 'Offline', 'Posle prvog učitavanja app shell radi bez interneta.'],
         [Smartphone, 'Installable', 'PWA optimizovana za moderan Android telefon.'],
       ].map(([Icon, title, detail]) => (
@@ -39,8 +44,9 @@ export const AboutManager = () => (
     <Card className="mt-5">
       <h2 className="font-bold">Važna odgovornost</h2>
       <p className="mt-2 text-sm leading-6 text-muted">
-        Local-first znači da programer ili cloud servis nemaju kopiju vaših podataka. Redovno
-        preuzimajte kompletan JSON backup, naročito pre promene telefona ili čišćenja browser
+        Kada uključite E2EE sync, cloud servis može da čuva šifrovanu kopiju, ali ne dobija čitljiv
+        finansijski sadržaj niti privatne ključeve potrebne za dešifrovanje. JSON backup i recovery
+        kod i dalje su važni za izvoz i oporavak, naročito pre promene telefona ili čišćenja browser
         podataka.
       </p>
     </Card>

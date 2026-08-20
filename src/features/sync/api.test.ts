@@ -26,8 +26,7 @@ const enabledConfig: SyncClientConfig = {
   enabled: true,
   apiOrigin: API_ORIGIN,
   turnstileSiteKey: '1x00000000000000000000AA',
-  appEnvironment: 'local-beta',
-  betaOnly: true,
+  appEnvironment: 'local',
 };
 
 const protocolResponse = (body: unknown, status = 200, headers: HeadersInit = {}): Response =>
@@ -151,28 +150,28 @@ describe('Mirna sync API transport', () => {
   it.each([
     [
       'SERVICE_QUOTA_EXHAUSTED',
-      'Beta servis je dostigao postavljeno ograničenje korišćenja. Lokalne promene ostaju sačuvane.',
+      'Servis je dostigao postavljeno ograničenje korišćenja. Lokalne promene ostaju sačuvane.',
     ],
     [
       'VAULT_QUOTA_EXCEEDED',
-      'Beta sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
+      'Sinhronizacija za ovaj trezor je privremeno pauzirana. Promene ostaju sačuvane na ovom uređaju.',
     ],
-    ['SERVICE_MAINTENANCE', 'Beta sinhronizacija je privremeno zaustavljena radi provere servisa.'],
+    ['SERVICE_MAINTENANCE', 'Sinhronizacija je privremeno zaustavljena radi provere servisa.'],
     [
       'USAGE_ACCOUNTING_UNAVAILABLE',
-      'Beta servis trenutno ne može pouzdano da izmeri potrošnju. Sinhronizacija je zaustavljena pre novih promena.',
+      'Servis trenutno ne može pouzdano da izmeri potrošnju. Sinhronizacija je zaustavljena pre novih promena.',
     ],
     [
       'USAGE_RESERVATION_UNDERESTIMATED',
-      'Beta servis je otkrio grešku u proceni potrošnje. Kopirajte Request ID i Support ID.',
+      'Servis je otkrio grešku u proceni potrošnje. Kopirajte Request ID i Support ID.',
     ],
     [
       'USAGE_SETTLEMENT_FAILED',
-      'Beta servis nije uspeo da poravna izmerenu potrošnju. Kopirajte Request ID i Support ID.',
+      'Servis nije uspeo da poravna izmerenu potrošnju. Kopirajte Request ID i Support ID.',
     ],
     [
       'D1_STORAGE_LIMIT_REACHED',
-      'Beta baza je dostigla postavljeno ograničenje prostora. Lokalne promene ostaju sačuvane.',
+      'Cloud baza je dostigla postavljeno ograničenje prostora. Lokalne promene ostaju sačuvane.',
     ],
   ])('maps %s to its dedicated safe Serbian message', (code, message) => {
     expect(new SyncApiError(code).message).toBe(message);

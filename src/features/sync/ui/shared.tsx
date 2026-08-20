@@ -3,7 +3,6 @@ import { ArrowLeft, ClipboardCopy, Download, KeyRound, LoaderCircle, Printer } f
 import { useToast } from '@/components/ToastProvider';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { Field, Input } from '@/components/ui/Field';
 import type { RecoveryCodePresentation } from '../lifecycle';
 import type { SyncUiServices } from '../ui-services';
 
@@ -73,14 +72,14 @@ const SecretActions = ({
 export const RecoveryCodeStep = ({
   title,
   presentation,
-  values,
-  onValueChange,
+  saved,
+  onSavedChange,
   services,
 }: {
   title: string;
   presentation: RecoveryCodePresentation;
-  values: Readonly<Record<number, string>>;
-  onValueChange: (groupNumber: number, value: string) => void;
+  saved: boolean;
+  onSavedChange: (saved: boolean) => void;
   services: SyncUiServices;
 }) => (
   <Card className="grid gap-4 border-accent/30">
@@ -91,7 +90,8 @@ export const RecoveryCodeStep = ({
       </div>
       <p className="mt-2 text-sm leading-6 text-muted">
         Ovo je jedini način za oporavak ako izgubite sve povezane uređaje. Prikazuje se samo tokom
-        ovog koraka. Sačuvajte ga van ovog uređaja.
+        ovog koraka. Ako izgubite sve uređaje i ovaj kod, podaci iz cloud trezora ne mogu da se
+        oporave.
       </p>
     </div>
     <code
@@ -105,28 +105,16 @@ export const RecoveryCodeStep = ({
       services={services}
       filename="mirna-recovery-kod.txt"
     />
-    <div className="grid gap-3 rounded-xl border p-3">
-      <p className="text-sm font-bold">Potvrdite nasumično izabrane grupe</p>
-      <p className="text-xs leading-5 text-muted">
-        Prepišite tražene grupe iz kopije koju ste upravo sačuvali.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-3">
-        {presentation.confirmationGroupNumbers.map((groupNumber) => (
-          <Field key={groupNumber} label={`Grupa ${groupNumber}`}>
-            <Input
-              data-testid={`sync-recovery-confirmation-${groupNumber}`}
-              value={values[groupNumber] ?? ''}
-              onChange={(event) => onValueChange(groupNumber, event.target.value.toUpperCase())}
-              autoComplete="off"
-              autoCapitalize="characters"
-              spellCheck={false}
-              maxLength={16}
-              inputMode="text"
-            />
-          </Field>
-        ))}
-      </div>
-    </div>
+    <label className="flex min-h-12 items-start gap-3 rounded-xl border p-3 text-sm font-semibold">
+      <input
+        data-testid="sync-recovery-saved"
+        type="checkbox"
+        checked={saved}
+        onChange={(event) => onSavedChange(event.target.checked)}
+        className="mt-0.5 size-5 shrink-0 accent-accent"
+      />
+      <span>Sačuvao sam recovery kod na bezbednom mestu</span>
+    </label>
   </Card>
 );
 

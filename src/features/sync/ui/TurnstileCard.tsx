@@ -31,12 +31,12 @@ const VERIFICATION_STATUS: Readonly<Record<VerificationReason, string>> = {
   INVALID_INPUT_RESPONSE: 'Provera nije prihvaćena. Napravite novu proveru i pokušajte ponovo.',
   TIMEOUT_OR_DUPLICATE:
     'Provera je istekla ili je isti rezultat već iskorišćen. Potrebna je potpuno nova provera.',
-  HOSTNAME_MISMATCH: 'Beta klijent i server nisu usklađeni. Otvorite dijagnostiku za podršku.',
-  ACTION_MISMATCH: 'Beta klijent i server nisu usklađeni. Otvorite dijagnostiku za podršku.',
+  HOSTNAME_MISMATCH: 'Klijent i server nisu usklađeni. Otvorite dijagnostiku za podršku.',
+  ACTION_MISMATCH: 'Klijent i server nisu usklađeni. Otvorite dijagnostiku za podršku.',
   SITEVERIFY_UNAVAILABLE:
     'Bezbednosna provera trenutno nije dostupna. Pokušajte ponovo kada veza proradi.',
   CONFIGURATION_ERROR:
-    'Beta bezbednosna provera nije pravilno podešena. Otvorite dijagnostiku za podršku.',
+    'Bezbednosna provera nije pravilno podešena. Otvorite dijagnostiku za podršku.',
 };
 
 export const TurnstileCard = ({ services }: { services: SyncUiServices }) => {

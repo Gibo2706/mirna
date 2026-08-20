@@ -2,10 +2,9 @@
 
 ## Supported versions
 
-Security fixes target the latest published 2.3.x release and the experimental
-`2.4.0-beta.1` encrypted-sync branch. Upgrade older builds before reporting a
-version-specific problem. The beta is not production-enabled and has not passed
-an independent security audit.
+Security fixes target the latest stable Mirna 2.4.1 release. Upgrade older
+builds before reporting a version-specific problem. Encrypted sync is
+production-enabled but has not passed an independent security audit.
 
 ## Reporting a vulnerability
 
@@ -39,14 +38,14 @@ authorization bypass, cryptographic downgrade or nonce/key reuse, manifest or
 snapshot rollback/forks, device revocation failure, conflict-driven financial
 corruption, plaintext leakage and incomplete cloud deletion.
 
-Encrypted sync must remain disabled in production until its staging gates and
-an independent cryptographic/application review pass. Local and staging testing
-must use synthetic financial records only. Do not probe Cloudflare resources or
-any deployment you do not own or have explicit permission to test.
+Encrypted sync keeps protocol, cryptographic, fail-closed and local-first gates
+even when production-enabled. Local and staging testing must use synthetic
+financial records only. Do not probe Cloudflare resources or any deployment you
+do not own or have explicit permission to test.
 
-The beta staging exercise is implementation evidence only. It does not turn the
-staging Worker/D1/R2/Turnstile resources into a production environment or
-remove the independent review gate.
+The staging exercise is implementation evidence only. Production currently
+reuses the existing staging-named Worker/D1/R2 data plane; that legacy resource
+name does not remove the independent review gate.
 
 Production and development dependencies are reviewed separately. Breaking
 automated upgrades are not applied without verifying application behavior.

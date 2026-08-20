@@ -15,6 +15,7 @@ import type {
 } from './ui-services';
 import * as syncUiServices from './ui-services';
 import { SyncApiError } from './api';
+import { createPairingQrPayload } from '@/domain/sync/crypto';
 
 const supportedCapability = {
   supported: true,
@@ -161,6 +162,7 @@ const renderManager = (services: SyncUiServices) =>
   );
 
 afterEach(() => {
+  window.history.replaceState({}, '', '/');
   vi.restoreAllMocks();
 });
 
@@ -204,7 +206,7 @@ describe('Phase 1 sync UI', () => {
         requestId: firstRequestId,
         safeCode: 'HUMAN_VERIFICATION_REJECTED',
         verificationReason: 'INVALID_INPUT_RESPONSE',
-        build: '2.4.0-beta.1',
+        build: '2.4.1',
       },
     ];
     const snapshotDiagnostics = vi.fn(() => Promise.resolve({ supportId, events }));
@@ -261,7 +263,7 @@ describe('Phase 1 sync UI', () => {
     expect((await screen.findAllByText('123e4567…174000')).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('requires recovery group verification and a separate explicit activation', async () => {
+  it('requires a recovery acknowledgement and a separate explicit activation', async () => {
     const user = userEvent.setup();
     let status: SyncUiLocalStatus = {
       pendingConflictCount: 0,
@@ -270,7 +272,7 @@ describe('Phase 1 sync UI', () => {
       pendingPairingFinalization: false,
       deviceAliases: [],
     };
-    const confirmRecoveryCode = vi.fn(() => Promise.resolve());
+    const confirmRecoveryCodeSaved = vi.fn(() => Promise.resolve());
     const activate = vi.fn(() => {
       const setup = localSetup();
       status = {
@@ -289,10 +291,9 @@ describe('Phase 1 sync UI', () => {
         begin: vi.fn(() =>
           Promise.resolve({
             recoveryCode: 'MR1-AAAA-BBBB-CCCC-DDDD',
-            confirmationGroupNumbers: [2, 4],
           }),
         ),
-        confirmRecoveryCode,
+        confirmRecoveryCodeSaved,
         activate,
       }),
     });
@@ -306,14 +307,15 @@ describe('Phase 1 sync UI', () => {
       'MR1-AAAA-BBBB-CCCC-DDDD',
     );
     expect(services.copySecret).not.toHaveBeenCalled();
-    await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'bbbb');
-    await user.type(screen.getByTestId('sync-recovery-confirmation-4'), 'dddd');
-    await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
+    expect(screen.queryByTestId(/sync-recovery-confirmation-/)).not.toBeInTheDocument();
+    const acknowledgement = screen.getByTestId('sync-recovery-saved');
+    const confirmButton = screen.getByRole('button', { name: /Potvrdi da je kod sačuvan/i });
+    expect(confirmButton).toBeDisabled();
+    await user.click(acknowledgement);
+    expect(confirmButton).toBeEnabled();
+    await user.click(confirmButton);
 
-    expect(confirmRecoveryCode).toHaveBeenCalledWith([
-      { groupNumber: 2, value: 'BBBB' },
-      { groupNumber: 4, value: 'DDDD' },
-    ]);
+    expect(confirmRecoveryCodeSaved).toHaveBeenCalledOnce();
     expect(activate).not.toHaveBeenCalled();
 
     await user.click(await screen.findByRole('button', { name: /Pripremi sinhronizaciju/i }));
@@ -337,10 +339,9 @@ describe('Phase 1 sync UI', () => {
         begin: vi.fn(() =>
           Promise.resolve({
             recoveryCode: 'MR1-AAAA-BBBB-CCCC-DDDD',
-            confirmationGroupNumbers: [2, 4],
           }),
         ),
-        confirmRecoveryCode: vi.fn(() => Promise.resolve()),
+        confirmRecoveryCodeSaved: vi.fn(() => Promise.resolve()),
         activate,
       }),
     });
@@ -349,9 +350,8 @@ describe('Phase 1 sync UI', () => {
     await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
     await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
     await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
-    await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'BBBB');
-    await user.type(screen.getByTestId('sync-recovery-confirmation-4'), 'DDDD');
-    await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
+    await user.click(screen.getByTestId('sync-recovery-saved'));
+    await user.click(screen.getByRole('button', { name: /Potvrdi da je kod sačuvan/i }));
 
     const activateButton = await screen.findByRole('button', {
       name: /Pripremi sinhronizaciju/i,
@@ -399,10 +399,9 @@ describe('Phase 1 sync UI', () => {
         begin: vi.fn(() =>
           Promise.resolve({
             recoveryCode: 'MR1-AAAA-BBBB-CCCC-DDDD',
-            confirmationGroupNumbers: [2, 4],
           }),
         ),
-        confirmRecoveryCode: vi.fn(() => Promise.resolve()),
+        confirmRecoveryCodeSaved: vi.fn(() => Promise.resolve()),
         activate,
       }),
     });
@@ -411,9 +410,8 @@ describe('Phase 1 sync UI', () => {
     await user.click(await screen.findByRole('button', { name: /Uključi na prvom uređaju/i }));
     await screen.findByText(/Pregledač je prošao lokalnu proveru/i);
     await user.click(screen.getByRole('button', { name: /Napravi recovery kod/i }));
-    await user.type(screen.getByTestId('sync-recovery-confirmation-2'), 'BBBB');
-    await user.type(screen.getByTestId('sync-recovery-confirmation-4'), 'DDDD');
-    await user.click(screen.getByRole('button', { name: /Potvrdi sačuvani kod/i }));
+    await user.click(screen.getByTestId('sync-recovery-saved'));
+    await user.click(screen.getByRole('button', { name: /Potvrdi da je kod sačuvan/i }));
     await user.click(await screen.findByRole('button', { name: /Pripremi sinhronizaciju/i }));
 
     const details = await screen.findByTestId('sync-activation-accounting-error');
@@ -738,6 +736,156 @@ describe('Phase 1 sync UI', () => {
         CLOUD_VAULT_DELETE_CONFIRMATION,
       ),
     );
+  });
+
+  it('opens the same Add Device panel immediately and focuses its code field', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    setup.metadata.firstUploadConsent = 'accepted';
+    const services = baseServices(
+      {},
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+        pendingPairingFinalization: false,
+        deviceAliases: [],
+      },
+    );
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: 'Dodaj uređaj' }));
+
+    expect(screen.getByTestId('sync-add-device-panel')).toBeVisible();
+    expect(screen.getByLabelText('QR sadržaj ili ručni kod')).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Sakrij dodavanje' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
+  it('consumes a valid pairing fragment into Add Device without approving it', async () => {
+    const setup = localSetup();
+    setup.metadata.firstUploadConsent = 'accepted';
+    const prepare = vi.fn();
+    const services = baseServices(
+      {
+        createExistingDevicePairingLifecycle: () => ({
+          prepare,
+          approve: vi.fn(),
+          reject: vi.fn(),
+        }),
+      },
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+        pendingPairingFinalization: false,
+        deviceAliases: [],
+      },
+    );
+    const pairingCode = 'MIRNA-P1-EXPLICIT-USER-APPROVAL';
+    const deepLink = new URL(createPairingQrPayload(window.location.origin, pairingCode));
+    window.history.replaceState({}, '', `${deepLink.pathname}${deepLink.hash}`);
+
+    renderManager(services);
+
+    expect(await screen.findByTestId('sync-add-device-panel')).toBeVisible();
+    expect(screen.getByLabelText('QR sadržaj ili ručni kod')).toHaveValue(pairingCode);
+    expect(window.location.hash).toBe('');
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it('consumes a pairing fragment received while the sync page is already open', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    setup.metadata.firstUploadConsent = 'accepted';
+    const services = baseServices(
+      {},
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+        pendingPairingFinalization: false,
+        deviceAliases: [],
+      },
+    );
+    const pairingCode = 'MIRNA-P1-SAME-DOCUMENT-NAVIGATION';
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: 'Dodaj uređaj' }));
+    await user.type(screen.getByLabelText('QR sadržaj ili ručni kod'), 'stari kod');
+
+    const deepLink = new URL(createPairingQrPayload(window.location.origin, pairingCode));
+    window.history.replaceState({}, '', `${deepLink.pathname}${deepLink.hash}`);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    expect(await screen.findByLabelText('QR sadržaj ili ručni kod')).toHaveValue(pairingCode);
+    expect(window.location.hash).toBe('');
+  });
+
+  it('rejects a tampered pairing fragment without opening Add Device', async () => {
+    const setup = localSetup();
+    setup.metadata.firstUploadConsent = 'accepted';
+    const services = baseServices(
+      {},
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 0,
+        pendingConflicts: [],
+        pendingPairingFinalization: false,
+        deviceAliases: [],
+      },
+    );
+    window.history.replaceState(
+      {},
+      '',
+      '/more/sync#protocol=2&suite=tampered&pair=MIRNA-P1-NOT-ACCEPTED',
+    );
+
+    renderManager(services);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /QR link za uparivanje nije ispravan/i,
+    );
+    expect(screen.queryByTestId('sync-add-device-panel')).not.toBeInTheDocument();
+    expect(window.location.hash).not.toBe('');
+  });
+
+  it('requires acknowledgement before completing recovery with a new code', async () => {
+    const user = userEvent.setup();
+    const confirmNewRecoveryCodeSaved = vi.fn(() => Promise.resolve(localSetup()));
+    const services = baseServices({
+      createRecoveryLifecycle: () => ({
+        begin: vi.fn(() =>
+          Promise.resolve({
+            recoveryCode: 'MR1-NEW1-NEW2-NEW3-NEW4',
+            vaultId: 'VVVVVVVVVVVVVVVVVVVVVV',
+            previousManifestVersion: 2,
+          }),
+        ),
+        confirmNewRecoveryCodeSaved,
+      }),
+    });
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: /Izgubljeni su svi uređaji/i }));
+    await user.type(screen.getByLabelText('Postojeći recovery kod'), 'MR1-OLD1-OLD2-OLD3-OLD4');
+    await user.click(screen.getByRole('button', { name: /Proveri kod i pripremi oporavak/i }));
+
+    const finish = await screen.findByRole('button', {
+      name: /Potvrdi novi kod i završi oporavak/i,
+    });
+    expect(finish).toBeDisabled();
+    expect(screen.queryByTestId(/sync-recovery-confirmation-/)).not.toBeInTheDocument();
+    await user.click(screen.getByTestId('sync-recovery-saved'));
+    expect(finish).toBeEnabled();
+    await user.click(finish);
+    await waitFor(() => expect(confirmNewRecoveryCodeSaved).toHaveBeenCalledOnce());
   });
 
   it('does not expose a sync row or construct sync services while the flag is off', () => {

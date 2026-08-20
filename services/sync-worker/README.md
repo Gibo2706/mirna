@@ -1,7 +1,7 @@
 # Mirna encrypted sync Worker
 
-This directory is the Cloudflare Worker foundation for the experimental Mirna
-end-to-end encrypted sync beta (protocol version 1). It is part of the same
+This directory contains the Cloudflare Worker for Mirna end-to-end encrypted
+sync (protocol version 1). It is part of the same
 AGPL-3.0-only source tree as the client.
 
 The implemented HTTP surface is intentionally small:

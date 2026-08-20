@@ -25,7 +25,6 @@ import {
   type PairingCodePresentation,
   type PairingPollResult,
   type RecoveryCodePresentation,
-  type RecoveryConfirmationValue,
   type RecoveryStartResult,
 } from './lifecycle';
 import { SnapshotSyncService } from './snapshot-service';
@@ -43,7 +42,7 @@ type CryptoCapability = Awaited<ReturnType<typeof probeIndexedDbCryptoKeyPersist
 
 export interface EnableLifecyclePort {
   begin(displayName: string): Promise<RecoveryCodePresentation>;
-  confirmRecoveryCode(values: readonly RecoveryConfirmationValue[]): Promise<void>;
+  confirmRecoveryCodeSaved(): Promise<void>;
   activate(): Promise<LocalSyncSetup>;
 }
 
@@ -64,7 +63,7 @@ export interface ExistingDevicePairingLifecyclePort {
 
 export interface RecoverDeviceLifecyclePort {
   begin(recoveryCode: string, displayName: string): Promise<RecoveryStartResult>;
-  confirmNewRecoveryCode(values: readonly RecoveryConfirmationValue[]): Promise<LocalSyncSetup>;
+  confirmNewRecoveryCodeSaved(): Promise<LocalSyncSetup>;
 }
 
 export interface SyncUiLocalStatus {
@@ -145,7 +144,7 @@ const copySecretToClipboard = async (secret: string): Promise<void> => {
 
 export const createDefaultSyncUiServices = (): SyncUiServices => {
   const config = readSyncClientConfig();
-  if (!config.enabled) throw new Error('Beta sinhronizacija nije uključena.');
+  if (!config.enabled) throw new Error('Sinhronizacija nije uključena.');
 
   const diagnostics = new BetaDiagnosticsService(config.apiOrigin);
   const diagnosticEventForPhase: Readonly<Record<TurnstilePhase, string | null>> = {
