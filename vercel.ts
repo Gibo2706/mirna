@@ -1,3 +1,5 @@
+import type { VercelConfig } from '@vercel/config/v1';
+
 type VercelEnvironment = Readonly<Record<string, string | undefined>>;
 
 export const buildContentSecurityPolicy = (environment: VercelEnvironment): string => {
@@ -25,9 +27,7 @@ export const buildContentSecurityPolicy = (environment: VercelEnvironment): stri
   ].join('; ');
 };
 
-const contentSecurityPolicy = buildContentSecurityPolicy(process.env);
-
-export default {
+export const buildVercelConfig = (environment: VercelEnvironment): VercelConfig => ({
   framework: 'vite',
   installCommand: 'npm ci',
   buildCommand: 'npm run build',
@@ -60,7 +60,10 @@ export default {
     {
       source: '/(.*)',
       headers: [
-        { key: 'Content-Security-Policy', value: contentSecurityPolicy },
+        {
+          key: 'Content-Security-Policy',
+          value: buildContentSecurityPolicy(environment),
+        },
         { key: 'X-Content-Type-Options', value: 'nosniff' },
         { key: 'X-Frame-Options', value: 'DENY' },
         { key: 'Referrer-Policy', value: 'no-referrer' },
@@ -75,4 +78,6 @@ export default {
       ],
     },
   ],
-};
+});
+
+export const config: VercelConfig = buildVercelConfig(process.env);
