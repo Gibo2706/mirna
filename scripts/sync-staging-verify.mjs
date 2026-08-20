@@ -10,6 +10,7 @@ import {
 const DATABASE = 'mirna-sync-staging-eu';
 const BUCKET = 'mirna-sync-staging-eu';
 const WORKER_URL = 'https://mirna-sync-staging.bogdan-markovic2706.workers.dev/v1/health';
+const PRODUCTION_ORIGIN = 'https://mirna-finansije.vercel.app';
 const CONFIG = 'services/sync-worker/wrangler.jsonc';
 const BUILD = /^[0-9a-f]{7,64}$/u;
 const conformanceArtifact = JSON.parse(
@@ -134,6 +135,47 @@ try {
   throw new Error('Worker health provera nije uspela.');
 }
 
+try {
+  const response = await fetch(WORKER_URL, {
+    headers: {
+      Origin: PRODUCTION_ORIGIN,
+      'X-Mirna-Protocol-Version': '1',
+    },
+    cache: 'no-store',
+    redirect: 'error',
+  });
+  if (
+    response.status !== 200 ||
+    response.headers.get('Access-Control-Allow-Origin') !== PRODUCTION_ORIGIN
+  ) {
+    throw new Error('invalid production health CORS');
+  }
+  await response.body?.cancel();
+
+  const preflight = await fetch(WORKER_URL, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: PRODUCTION_ORIGIN,
+      'Access-Control-Request-Method': 'GET',
+      'Access-Control-Request-Headers': 'x-mirna-protocol-version,x-mirna-support-id',
+    },
+    cache: 'no-store',
+    redirect: 'error',
+  });
+  const allowedHeaders = preflight.headers.get('Access-Control-Allow-Headers') ?? '';
+  if (
+    preflight.status !== 204 ||
+    preflight.headers.get('Access-Control-Allow-Origin') !== PRODUCTION_ORIGIN ||
+    !allowedHeaders.includes('x-mirna-protocol-version') ||
+    !allowedHeaders.includes('x-mirna-support-id')
+  ) {
+    throw new Error('invalid production preflight CORS');
+  }
+  await preflight.body?.cancel();
+} catch {
+  throw new Error('Produkcioni Vercel origin nije ispravno dozvoljen na Worker-u.');
+}
+
 const expectedMigrations = readdirSync('services/sync-worker/migrations')
   .filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/u.test(name))
   .sort();
@@ -184,6 +226,7 @@ process.stdout.write(
       r2Objects: objectCount,
       r2Bytes: bucketBytes,
       workerBuild: health.buildCommit,
+      productionOrigin: PRODUCTION_ORIGIN,
       routeBudgetConformance: health.readiness.routeBudgetConformance,
       routeBudgetRegistryVersion: health.readiness.routeBudgetRegistryVersion,
     },

@@ -68,7 +68,7 @@
         "MIRNA_ENVIRONMENT": "staging",
         "MIRNA_BUILD_COMMIT": "replace-at-deploy",
         "MIRNA_PROTOCOL_VERSION": "1",
-        "MIRNA_ALLOWED_ORIGINS": "https://mirna-finansije-beta.vercel.app,http://localhost:5173,http://127.0.0.1:5173",
+        "MIRNA_ALLOWED_ORIGINS": "https://mirna-finansije.vercel.app,https://mirna-finansije-beta.vercel.app,http://localhost:5173,http://127.0.0.1:5173",
         "MIRNA_CLEANUP_BATCH_SIZE": "10",
         "MIRNA_EPHEMERAL_CLEANUP_BATCH_SIZE": "1000",
         "MIRNA_MAX_TOTAL_VAULTS": "50",
