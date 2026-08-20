@@ -4,18 +4,26 @@ Status: experimental `2.4.0-beta.1`, protocol version 1
 
 Authorized Worker: `mirna-sync-staging`
 
-Authorized application: <https://mirna-finansije-beta.vercel.app>
-Stable production: out of scope and unchanged
+Authorized applications:
 
-This runbook defines the operational procedure for the dedicated beta. It must
-not contain Cloudflare account identifiers, credentials, Turnstile secrets,
-Vercel tokens or finance plaintext. The checked-in D1 resource identifier is a
-binding identifier, not a decryption secret; it is still omitted from reports.
+- <https://mirna-finansije.vercel.app>
+- <https://mirna-finansije-beta.vercel.app>
+
+The production application was explicitly promoted to the existing staging
+sync data plane on 2026-08-20. Until a separate production Worker, D1 and R2
+exist, both application origins share `mirna-sync-staging` and its encrypted
+staging storage.
+
+This runbook defines the operational procedure for the shared beta-grade sync
+data plane. It must not contain Cloudflare account identifiers, credentials,
+Turnstile secrets, Vercel tokens or finance plaintext. The checked-in D1
+resource identifier is a binding identifier, not a decryption secret; it is
+still omitted from reports.
 
 ## Fixed architecture and trust boundary
 
 ```text
-Mirna beta PWA
+Mirna production/beta PWA
   -> exact-origin HTTPS
 mirna-sync-staging Worker
   -> EU-jurisdiction D1 metadata and ciphertext operations
@@ -112,6 +120,7 @@ derived `writesEnabled` boolean, never counter values or flags individually.
 The dedicated managed widget is named `Mirna Sync Beta` and is restricted to:
 
 ```text
+mirna-finansije.vercel.app
 mirna-finansije-beta.vercel.app
 localhost
 127.0.0.1
@@ -260,21 +269,24 @@ Set/rotate the real Turnstile secret without putting it in a command argument,
 tracked file or report. Verify the secret binding only by name. Never print its
 value.
 
-## Dedicated Vercel beta project
+## Vercel projects and production promotion
 
-The only authorized project and alias are:
+The authorized projects and aliases are:
 
 ```text
-project: mirna-finansije-beta
-alias:   https://mirna-finansije-beta.vercel.app
-branch:  feat/e2ee-sync
+production project: mirna-finansije
+production alias:   https://mirna-finansije.vercel.app
+production branch:  main
+beta project:       mirna-finansije-beta
+beta alias:         https://mirna-finansije-beta.vercel.app
 ```
 
 Verify `.vercel/project.json` privately before using the CLI. If it names any
-other project, use an isolated temporary working copy or relink only after
-confirming the dedicated beta project. Never alter the stable project.
+other project, use an isolated temporary working copy or relink only after the
+target is confirmed. This checkout can remain linked to the beta project; never
+assume that link targets production.
 
-The beta Production environment contains only:
+Both currently enabled application builds use:
 
 ```text
 VITE_MIRNA_SYNC_ENABLED=true
@@ -284,15 +296,13 @@ VITE_MIRNA_APP_ENV=beta
 VITE_MIRNA_BETA_ONLY=true
 ```
 
-Every env change requires a new beta deployment. The build must contain the
-visible beta marker, `noindex, nofollow`, a `robots.txt` that disallows all
-crawlers and a CSP that permits only the exact challenge origin for
-script/frame/connect plus the exact staging Worker origin for connect.
-`vercel.ts` derives this CSP from the same explicit beta-only environment gate.
-The stable project receives none of these variables and its generated CSP keeps
-`connect-src`/`script-src` at `'self'` and `frame-src` at `'none'`, so the shared
-repository configuration does not authorize staging connectivity in a stable
-feature-off deployment.
+Every environment change requires a new deployment of the affected project.
+While both aliases use the beta-only sync gate, each build must contain
+`noindex, nofollow`, a `robots.txt` that disallows all crawlers and a CSP that
+permits only the exact challenge origin for script/frame/connect plus the exact
+staging Worker origin for connect. `vercel.ts` derives this CSP from the same
+explicit gate. Promotion also requires the exact Vercel hostname in both the
+Worker CORS allowlist and the Turnstile widget hostname allowlist.
 
 ## Remote smoke and plaintext sentinel gate
 
