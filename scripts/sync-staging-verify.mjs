@@ -6,13 +6,18 @@ import {
   parseCloudflareCount,
   verifyStagingSnapshot,
 } from './sync-staging-contract.mjs';
+import {
+  fetchWorkerHealthSnapshot,
+  verifyProductionCors,
+  waitForExpectedWorkerBuild,
+  WORKER_BUILD_PATTERN,
+} from './sync-staging-verify-lib.mjs';
 
 const DATABASE = 'mirna-sync-staging-eu';
 const BUCKET = 'mirna-sync-staging-eu';
 const WORKER_URL = 'https://mirna-sync-staging.bogdan-markovic2706.workers.dev/v1/health';
 const PRODUCTION_ORIGIN = 'https://mirna-finansije.vercel.app';
 const CONFIG = 'services/sync-worker/wrangler.jsonc';
-const BUILD = /^[0-9a-f]{7,64}$/u;
 const conformanceArtifact = JSON.parse(
   readFileSync('services/sync-worker/route-budget-conformance.json', 'utf8'),
 );
@@ -39,7 +44,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
   options.set(key, value);
 }
 const expectedBuild = options.get('--expected-build');
-if (!expectedBuild || !BUILD.test(expectedBuild)) {
+if (!expectedBuild || !WORKER_BUILD_PATTERN.test(expectedBuild)) {
   throw new Error('--expected-build mora biti tačan javni build identifikator.');
 }
 
@@ -59,6 +64,12 @@ const runWrangler = (args) => {
     throw new Error('Cloudflare read-only provera nije vratila očekivani JSON.');
   }
 };
+
+const { health, healthHttpStatus } = await waitForExpectedWorkerBuild({
+  expectedBuild,
+  readHealth: () => fetchWorkerHealthSnapshot({ workerUrl: WORKER_URL }),
+  log: (message) => process.stdout.write(`${message}\n`),
+});
 
 const sql = `
 SELECT name FROM mirna_d1_migrations ORDER BY id;
@@ -121,60 +132,7 @@ const objectCount = parseCloudflareCount(r2.object_count ?? r2.objectCount, 'R2 
 const parsedBucketSize = parseCloudflareBucketBytes(r2.bucket_size ?? r2.bucketSize ?? r2.size);
 const bucketBytes = parsedBucketSize.bytes;
 
-let health;
-let healthHttpStatus;
-try {
-  const response = await fetch(WORKER_URL, {
-    headers: { 'X-Mirna-Protocol-Version': '1' },
-    cache: 'no-store',
-    redirect: 'error',
-  });
-  healthHttpStatus = response.status;
-  health = await response.json();
-} catch {
-  throw new Error('Worker health provera nije uspela.');
-}
-
-try {
-  const response = await fetch(WORKER_URL, {
-    headers: {
-      Origin: PRODUCTION_ORIGIN,
-      'X-Mirna-Protocol-Version': '1',
-    },
-    cache: 'no-store',
-    redirect: 'error',
-  });
-  if (
-    response.status !== 200 ||
-    response.headers.get('Access-Control-Allow-Origin') !== PRODUCTION_ORIGIN
-  ) {
-    throw new Error('invalid production health CORS');
-  }
-  await response.body?.cancel();
-
-  const preflight = await fetch(WORKER_URL, {
-    method: 'OPTIONS',
-    headers: {
-      Origin: PRODUCTION_ORIGIN,
-      'Access-Control-Request-Method': 'GET',
-      'Access-Control-Request-Headers': 'x-mirna-protocol-version,x-mirna-support-id',
-    },
-    cache: 'no-store',
-    redirect: 'error',
-  });
-  const allowedHeaders = preflight.headers.get('Access-Control-Allow-Headers') ?? '';
-  if (
-    preflight.status !== 204 ||
-    preflight.headers.get('Access-Control-Allow-Origin') !== PRODUCTION_ORIGIN ||
-    !allowedHeaders.includes('x-mirna-protocol-version') ||
-    !allowedHeaders.includes('x-mirna-support-id')
-  ) {
-    throw new Error('invalid production preflight CORS');
-  }
-  await preflight.body?.cancel();
-} catch {
-  throw new Error('Produkcioni Vercel origin nije ispravno dozvoljen na Worker-u.');
-}
+await verifyProductionCors({ workerUrl: WORKER_URL, productionOrigin: PRODUCTION_ORIGIN });
 
 const expectedMigrations = readdirSync('services/sync-worker/migrations')
   .filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/u.test(name))

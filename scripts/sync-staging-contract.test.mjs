@@ -153,4 +153,13 @@ describe('staging schema and accounting contract', () => {
       'Worker: accounting readiness failed',
     );
   });
+
+  it('rejects faulted Worker accounting readiness after the expected build is active', () => {
+    const snapshot = validSnapshot();
+    snapshot.health.readiness.accountingState = 'fault';
+
+    expect(verifyStagingSnapshot(snapshot, migrations, build, registryVersion).errors).toContain(
+      'Worker: accounting readiness failed',
+    );
+  });
 });
