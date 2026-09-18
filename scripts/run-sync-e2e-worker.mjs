@@ -1,14 +1,16 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { monitorWorker, publishSanitizedLog } from './sync-e2e-diagnostics.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const wranglerEntrypoint = resolve(repositoryRoot, 'node_modules/wrangler/bin/wrangler.js');
 const workerConfig = resolve(repositoryRoot, 'services/sync-worker/wrangler.jsonc');
 const stateDirectory = resolve(repositoryRoot, '.wrangler/sync-e2e-state');
 const expectedStateDirectory = resolve(repositoryRoot, '.wrangler', 'sync-e2e-state');
-const wranglerLog = resolve(repositoryRoot, '.wrangler/sync-e2e-wrangler.log');
+const wranglerLog = resolve(repositoryRoot, '.wrangler/sync-e2e-private/wrangler.log');
+const workerStatus = resolve(repositoryRoot, '.wrangler/sync-e2e-worker-status.json');
 
 if (stateDirectory !== expectedStateDirectory) {
   throw new Error('Refusing to reset an unexpected Wrangler persistence directory.');
@@ -16,6 +18,10 @@ if (stateDirectory !== expectedStateDirectory) {
 
 mkdirSync(dirname(stateDirectory), { recursive: true });
 rmSync(stateDirectory, { recursive: true, force: true });
+mkdirSync(dirname(wranglerLog), { recursive: true, mode: 0o700 });
+writeFileSync(wranglerLog, '', { mode: 0o600 });
+writeFileSync(resolve(repositoryRoot, '.wrangler/sync-e2e-wrangler.log'), '');
+rmSync(workerStatus, { force: true });
 
 const environment = {
   ...process.env,
@@ -74,23 +80,17 @@ const worker = spawn(
   },
 );
 
-let stopping = false;
-const stop = (signal = 'SIGTERM') => {
-  if (stopping) return;
-  stopping = true;
-  if (!worker.killed) worker.kill(signal);
-};
+const stop = monitorWorker(worker, {
+  saveStatus: (status) => {
+    writeFileSync(`${workerStatus}.tmp`, JSON.stringify(status));
+    renameSync(`${workerStatus}.tmp`, workerStatus);
+  },
+  publishLog: publishSanitizedLog,
+  fail: (code, message) => {
+    process.stderr.write(`${message}\n`);
+    process.exitCode = code;
+  },
+});
 
 process.once('SIGINT', () => stop('SIGINT'));
 process.once('SIGTERM', () => stop('SIGTERM'));
-
-worker.once('error', (error) => {
-  stop();
-  throw error;
-});
-
-worker.once('exit', (code, signal) => {
-  if (!stopping && code !== 0) {
-    process.exitCode = code ?? (signal ? 1 : 0);
-  }
-});

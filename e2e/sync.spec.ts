@@ -14,6 +14,7 @@ import {
   defaultSyntheticFinanceFixtureInput,
 } from '../src/tests/fixtures/syntheticFinanceFixture';
 import { SYNC_CRYPTO_SUITE, SYNC_PROTOCOL_VERSION } from '../src/domain/sync/constants';
+import { assertSyncWorkerAvailable, attachSyncWorkerDiagnostics } from './sync-worker-diagnostics';
 
 const ENABLED_APP_ORIGIN = 'http://localhost:4173';
 const DISABLED_APP_ORIGIN = 'http://localhost:4174';
@@ -64,7 +65,9 @@ const localD1Path = (): string => {
 };
 
 const localD1 = (command: string): readonly D1Row[] => {
-  const database = new DatabaseSync(localD1Path());
+  // WAL inspections must not acquire a write-capable connection. The two
+  // deliberate expiry fixtures below still need writes to this isolated DB.
+  const database = new DatabaseSync(localD1Path(), { readOnly: /^\s*SELECT\b/iu.test(command) });
   try {
     database.exec('PRAGMA busy_timeout = 5000');
     const rows: unknown = database.prepare(command).all();
@@ -619,9 +622,21 @@ const expectPrivateMaterialAbsent = (
   }
 };
 
-test.beforeEach(() => {
+test.beforeEach(async ({ request }, testInfo) => {
   requestBodies.length = 0;
   unexpectedSyncResponses.length = 0;
+  if (!testInfo.title.startsWith('disabled build')) await assertSyncWorkerAvailable(request);
+});
+
+test.afterEach(async ({ request }, testInfo) => {
+  if (!testInfo.title.startsWith('disabled build')) {
+    // Capture after every test to expose shared-state contamination at its source,
+    // including a server dying just after otherwise successful UI assertions.
+    await attachSyncWorkerDiagnostics(testInfo);
+    if (testInfo.status === testInfo.expectedStatus) {
+      await assertSyncWorkerAvailable(request);
+    }
+  }
 });
 
 test('Turnstile activation UI fits 320-430 px and rerenders at the supported breakpoint', async ({

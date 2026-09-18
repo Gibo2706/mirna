@@ -53,10 +53,18 @@ jobs:
         run: npm ci
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
+      - name: Report browser-test runtime
+        run: |
+          node --version
+          npm --version
+          npx --no-install wrangler --version
       - name: Run browser acceptance tests
         run: npm run test:e2e
       - name: Run encrypted-sync browser acceptance tests
         run: npm run sync:test:e2e
+      - name: Sanitize sync Worker failure log
+        if: failure()
+        run: node scripts/sync-e2e-diagnostics.mjs
       - name: Upload failure report
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -65,6 +73,8 @@ jobs:
           path: |
             playwright-report/
             test-results/
+            .wrangler/sync-e2e-wrangler.log
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
