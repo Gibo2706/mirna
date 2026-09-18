@@ -157,6 +157,7 @@ export const GoalsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
               goal,
               month: currentMonth,
               transactions: snapshot.transactions,
+              accounts: snapshot.accounts,
               currentGoalBalance: balances[goal.linkedAccountId] ?? 0,
             });
             return (

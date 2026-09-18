@@ -1,3 +1,4 @@
+import { classifySavingsTransfer } from '@/domain/savingsTransfers';
 import { useEffect, useRef, useState } from 'react';
 import { addMonths, format, parseISO } from 'date-fns';
 import { BarChart3, ChevronLeft, ChevronRight, CircleCheck, ReceiptText } from 'lucide-react';
@@ -91,7 +92,8 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
     .sort((left, right) => left.date.localeCompare(right.date));
   const savingsTransfers = snapshot.transactions.filter(
     (transaction) =>
-      transaction.type === 'transfer' && transaction.date.startsWith(month) && transaction.goalId,
+      transaction.date.startsWith(month) &&
+      Boolean(classifySavingsTransfer(transaction, snapshot.accounts)),
   );
   const recent = snapshot.transactions
     .filter((transaction) => transaction.date.startsWith(month))

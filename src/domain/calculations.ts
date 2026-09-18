@@ -1,6 +1,7 @@
 import { differenceInCalendarMonths, endOfMonth, isBefore, parseISO, startOfMonth } from 'date-fns';
 import { getGoalLifecycle } from './goals';
 import { getAllCommitmentOccurrences, getAllPlannedIncomeOccurrences } from './recurrence';
+import { classifySavingsTransfer } from './savingsTransfers';
 import type {
   Account,
   Debt,
@@ -108,7 +109,6 @@ export function calculateMonthlyActuals(
   accounts: Account[],
   month: MonthKey,
 ): MonthlyActuals {
-  const accountsById = new Map(accounts.map((account) => [account.id, account]));
   return transactions
     .filter((transaction) => transaction.date.startsWith(month))
     .reduce<MonthlyActuals>(
@@ -117,11 +117,7 @@ export function calculateMonthlyActuals(
         if (transaction.type === 'expense') totals.expenses += transaction.amount;
         if (transaction.type === 'transfer') {
           totals.transfers += transaction.amount;
-          const source = accountsById.get(transaction.accountId);
-          const destination = transaction.toAccountId
-            ? accountsById.get(transaction.toAccountId)
-            : undefined;
-          if (source && !source.protected && destination?.protected) {
+          if (classifySavingsTransfer(transaction, accounts)) {
             totals.savingsContributions += transaction.amount;
           }
         }
@@ -189,14 +185,13 @@ export function getGoalActualContribution(
   goal: SavingsGoal,
   month: MonthKey,
   transactions: LedgerTransaction[],
+  accounts: Account[],
 ): number {
   return transactions
     .filter(
       (transaction) =>
-        transaction.type === 'transfer' &&
-        transaction.goalId === goal.id &&
-        transaction.toAccountId === goal.linkedAccountId &&
-        transaction.date.startsWith(month),
+        transaction.date.startsWith(month) &&
+        classifySavingsTransfer(transaction, accounts, [goal])?.goal?.id === goal.id,
     )
     .reduce((sum, transaction) => sum + transaction.amount, 0);
 }
@@ -219,10 +214,16 @@ export function getEffectiveGoalContribution(input: {
   goal: SavingsGoal;
   month: MonthKey;
   transactions: LedgerTransaction[];
+  accounts: Account[];
   currentGoalBalance: number;
 }): EffectiveGoalContribution {
   const configuredPlan = getGoalContributionPlan(input.goal, input.month);
-  const actualContribution = getGoalActualContribution(input.goal, input.month, input.transactions);
+  const actualContribution = getGoalActualContribution(
+    input.goal,
+    input.month,
+    input.transactions,
+    input.accounts,
+  );
   const remainingMonthlyPlan = Math.max(0, configuredPlan - actualContribution);
   const remainingTarget = Math.max(
     0,
@@ -513,17 +514,21 @@ export function calculateMonthlyFinancialSummary(input: {
         goal,
         month: input.month,
         transactions: input.transactions,
+        accounts: input.accounts,
         currentGoalBalance: accountBalances[goal.linkedAccountId] ?? 0,
       });
       return {
         linkedAccountId: goal.linkedAccountId,
         planned: contribution.configuredPlan,
-        actual: contribution.actualContribution,
         remaining: contribution.effectiveRemainingContribution,
       };
     });
   const plannedSavings = goalRows.reduce((sum, row) => sum + row.planned, 0);
-  const actualSavings = goalRows.reduce((sum, row) => sum + row.actual, 0);
+  const actualSavings = calculateMonthlyActuals(
+    monthTransactions,
+    input.accounts,
+    input.month,
+  ).savingsContributions;
   const remainingSavings = goalRows.reduce((sum, row) => sum + row.remaining, 0);
   const remainingContributionsByAccount = new Map<string, number>();
   for (const row of goalRows) {

@@ -519,6 +519,7 @@ export function createChatGptMarkdown(snapshot: FinanceSnapshot, asOf = new Date
           goal,
           month,
           transactions: snapshot.transactions,
+          accounts: snapshot.accounts,
           currentGoalBalance: current,
         });
         const projectedShortfall = forecast.find((item) => (item.goalShortfalls[goal.id] ?? 0) > 0)

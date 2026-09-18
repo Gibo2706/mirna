@@ -663,6 +663,7 @@ describe('financial calculations', () => {
       month: '2026-07',
       transactions: [],
       currentGoalBalance: 42_800,
+      accounts: [checking, nearlyFunded],
     });
     const summary = calculateMonthlyFinancialSummary({
       month: '2026-07',

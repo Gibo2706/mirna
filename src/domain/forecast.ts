@@ -201,6 +201,7 @@ export function calculateForecast(input: ForecastInput): ForecastMonth[] {
         goal,
         month,
         transactions: input.transactions,
+        accounts: input.accounts,
         currentGoalBalance: Math.max(0, goalBalances[goal.id] ?? 0),
       });
       const contribution = contributionState.effectiveRemainingContribution;
