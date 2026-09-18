@@ -108,6 +108,26 @@ export function assertFinanceDataIntegrity(data: FinanceData): void {
         `Transakcija ${transaction.id} ima nepoznatu fiksnu obavezu.`,
       );
     }
+    if (transaction.occurrenceKey?.startsWith('commitment-funding:')) {
+      const key = transaction.occurrenceKey.slice('commitment-funding:'.length);
+      const payment = data.transactions.find((item) => item.occurrenceKey === key);
+      assert(
+        transaction.type === 'transfer' &&
+          transaction.source === 'manual' &&
+          accountById.get(transaction.accountId)?.protected &&
+          !accountById.get(transaction.toAccountId ?? '')?.protected &&
+          payment?.source === 'commitment' &&
+          payment.type === 'expense' &&
+          payment.accountId === transaction.toAccountId &&
+          payment.amount === transaction.amount &&
+          payment.date === transaction.date &&
+          !transaction.goalId &&
+          !transaction.plannedEventId &&
+          !transaction.plannedIncomeId &&
+          !transaction.debtPaymentId,
+        `Finansiranje obaveze ${transaction.id} nema odgovarajuće plaćanje.`,
+      );
+    }
     if (transaction.plannedIncomeId) {
       assert(
         plannedIncomes.has(transaction.plannedIncomeId),

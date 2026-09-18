@@ -1,5 +1,6 @@
 import { calculateAccountBalances, calculateDebtProgress } from '@/domain/calculations';
-import { getPlannedIncomeOccurrences } from '@/domain/recurrence';
+import { getCommitmentOccurrences, getPlannedIncomeOccurrences } from '@/domain/recurrence';
+import { canLinkCommitmentExpense, commitmentFundingKey } from '@/domain/payments';
 import { isGoalCompletionEvent } from '@/domain/goals';
 import {
   accountSchema,
@@ -78,8 +79,24 @@ export async function saveAccount(account: Account): Promise<void> {
       'Početno stanje ne može biti negativno jer Mirna ne modeluje dozvoljeni minus.',
     );
   }
-  await auditedFinanceTransaction([db.accounts], async (audit) => {
+  await auditedFinanceTransaction([db.accounts, db.transactions, db.goals], async (audit) => {
     const previous = await db.accounts.get(account.id);
+    const transactions = await db.transactions.toArray();
+    if (
+      previous &&
+      previous.protected !== account.protected &&
+      (transactions.some(
+        (item) => item.accountId === account.id || item.toAccountId === account.id,
+      ) ||
+        (await db.goals.where('linkedAccountId').equals(account.id).count()))
+    ) {
+      throw new Error(
+        'Račun sa istorijom ili ciljem ne može menjati namenu štednje. Dodajte novi račun.',
+      );
+    }
+    if ((calculateAccountBalances([account], transactions)[account.id] ?? 0) < 0) {
+      throw new Error('Početno stanje bi spustilo trenutno stanje računa ispod nule.');
+    }
     await db.accounts.put(account);
     await audit.upsert('account', previous, account);
   });
@@ -171,6 +188,17 @@ export async function saveTransaction(transaction: LedgerTransaction): Promise<v
       db.transactions.toArray(),
       db.transactions.get(transaction.id),
     ]);
+    if (
+      existing &&
+      ((existing.source !== 'manual' && existing.source !== 'quick-add') ||
+        existing.occurrenceKey ||
+        existing.plannedIncomeId ||
+        existing.plannedEventId ||
+        existing.goalId ||
+        existing.debtPaymentId)
+    ) {
+      throw new Error('Povezane transakcije menjajte kroz odgovarajući finansijski tok.');
+    }
     const nextTransactions = [
       ...transactions.filter((value) => value.id !== transaction.id),
       transaction,
@@ -199,10 +227,26 @@ export async function saveTransaction(transaction: LedgerTransaction): Promise<v
 
 export async function deleteTransaction(transactionId: string): Promise<void> {
   await auditedFinanceTransaction(
-    [db.transactions, db.plannedEvents, db.goals, db.debtPayments, db.debts],
+    [db.accounts, db.transactions, db.plannedEvents, db.goals, db.debtPayments, db.debts],
     async (audit) => {
       const transaction = await db.transactions.get(transactionId);
       if (!transaction) return;
+      if (transaction.occurrenceKey?.startsWith('commitment-funding:')) {
+        const paymentKey = transaction.occurrenceKey.slice('commitment-funding:'.length);
+        if (await db.transactions.where('occurrenceKey').equals(paymentKey).first()) {
+          throw new Error('Prvo obrišite povezano plaćanje obaveze.');
+        }
+      }
+      if (transaction.source === 'commitment' && transaction.occurrenceKey) {
+        const funding = await db.transactions
+          .where('occurrenceKey')
+          .equals(commitmentFundingKey(transaction.occurrenceKey))
+          .first();
+        if (funding) {
+          await db.transactions.delete(funding.id);
+          await audit.delete('transaction', funding);
+        }
+      }
       if (transaction.occurrenceKey?.startsWith('event-funding:')) {
         const eventId = transaction.occurrenceKey.slice('event-funding:'.length);
         const event = await db.plannedEvents.get(eventId);
@@ -265,6 +309,13 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
       }
       await db.transactions.delete(transactionId);
       await audit.delete('transaction', transaction);
+      const accounts = await db.accounts.toArray();
+      const balances = calculateAccountBalances(accounts, await db.transactions.toArray());
+      if (accounts.some((account) => (balances[account.id] ?? 0) < 0)) {
+        throw new Error(
+          'Brisanje bi spustilo stanje računa ispod nule. Prvo ispravite povezano trošenje.',
+        );
+      }
     },
   );
 }
@@ -306,6 +357,22 @@ export async function adjustAccountBalance(
   });
 }
 
+const requireCommitmentOccurrence = async (key: string) => {
+  const separator = key.lastIndexOf(':');
+  const commitmentId = key.slice(0, separator);
+  const dueDate = key.slice(separator + 1);
+  if (separator <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+    throw new Error('Termin obaveze nije validan.');
+  }
+  const commitment = await db.commitments.get(commitmentId);
+  if (!commitment) throw new Error('Fiksna obaveza ne postoji.');
+  const occurrence = getCommitmentOccurrences(commitment, dueDate.slice(0, 7)).find(
+    (value) => value.key === key,
+  );
+  if (!occurrence) throw new Error('Obaveza nije planirana za izabrani termin.');
+  return occurrence;
+};
+
 export async function markCommitmentPaid(input: {
   occurrenceKey: string;
   name: string;
@@ -313,13 +380,16 @@ export async function markCommitmentPaid(input: {
   date: string;
   accountId: string;
   categoryId: string;
+  actualAmount?: number;
+  paymentDate?: string;
+  paymentAccountId?: string;
+  fundingAccountId?: string;
+  notes?: string;
 }): Promise<string> {
   return auditedFinanceTransaction(
     [db.commitments, db.accounts, db.categories, db.transactions],
     async (audit) => {
-      const commitmentId = input.occurrenceKey.slice(0, input.occurrenceKey.lastIndexOf(':'));
-      const commitment = await db.commitments.get(commitmentId);
-      if (!commitment) throw new Error('Fiksna obaveza ne postoji.');
+      const commitment = await requireCommitmentOccurrence(input.occurrenceKey);
       if (
         commitment.name !== input.name ||
         commitment.amount !== input.amount ||
@@ -328,32 +398,153 @@ export async function markCommitmentPaid(input: {
       ) {
         throw new Error('Plan obaveze je promenjen. Osvežite ekran i pokušajte ponovo.');
       }
-      await requireAccount(commitment.accountId);
+      const accountId = input.paymentAccountId ?? commitment.accountId;
+      const paymentAccount = await requireAccount(accountId);
+      if (paymentAccount.archived) throw new Error('Izaberite aktivan račun za plaćanje.');
       await requireCategory(commitment.categoryId, 'expense');
       const existing = await db.transactions
         .where('occurrenceKey')
         .equals(input.occurrenceKey)
         .first();
       if (existing) return existing.id;
-      await requireAvailableFunds(commitment.accountId, input.amount);
+      const amount = input.actualAmount ?? commitment.amount;
+      const date = input.paymentDate ?? input.date;
       const transaction: LedgerTransaction = {
         id: createId('tx'),
         type: 'expense',
-        amount: input.amount,
-        accountId: input.accountId,
+        amount,
+        accountId,
         categoryId: input.categoryId,
-        date: input.date,
+        date,
         description: input.name,
         source: 'commitment',
         occurrenceKey: input.occurrenceKey,
+        notes: input.notes?.trim() || undefined,
         createdAt: nowIso(),
       };
       transactionSchema.parse(transaction);
+      if (input.fundingAccountId) {
+        const source = await requireAccount(input.fundingAccountId);
+        if (
+          !source.protected ||
+          source.archived ||
+          paymentAccount.protected ||
+          source.id === accountId
+        ) {
+          throw new Error('Štednju prebacite sa aktivnog štednog na raspoloživi račun.');
+        }
+        await requireAvailableFunds(source.id, amount, 'Nema dovoljno novca u izabranoj štednji.');
+        const funding: LedgerTransaction = {
+          id: createId('tx'),
+          type: 'transfer',
+          amount,
+          accountId: source.id,
+          toAccountId: accountId,
+          date,
+          description: `Štednja za obavezu — ${commitment.name}`,
+          source: 'manual',
+          occurrenceKey: commitmentFundingKey(input.occurrenceKey),
+          createdAt: nowIso(),
+        };
+        transactionSchema.parse(funding);
+        await db.transactions.add(funding);
+        await audit.upsert('transaction', null, funding);
+      }
+      await requireAvailableFunds(accountId, amount);
       await db.transactions.add(transaction);
       await audit.upsert('transaction', null, transaction);
       return transaction.id;
     },
   );
+}
+
+export async function linkTransactionToCommitment(input: {
+  occurrenceKey: string;
+  transactionId: string;
+  confirmAmountMismatch?: boolean;
+}): Promise<string> {
+  return auditedFinanceTransaction([db.commitments, db.transactions], async (audit) => {
+    const occurrence = await requireCommitmentOccurrence(input.occurrenceKey);
+    if (await db.transactions.where('occurrenceKey').equals(occurrence.key).first()) {
+      throw new Error('Ovaj termin obaveze je već plaćen.');
+    }
+    const transaction = await db.transactions.get(input.transactionId);
+    if (!transaction || !canLinkCommitmentExpense(transaction)) {
+      throw new Error('Izaberite samostalan trošak koji nije povezan sa drugim plaćanjem.');
+    }
+    if (transaction.amount !== occurrence.amount && !input.confirmAmountMismatch) {
+      throw new Error('Potvrdite razliku između planiranog i plaćenog iznosa.');
+    }
+    const updated = {
+      ...transaction,
+      source: 'commitment' as const,
+      occurrenceKey: occurrence.key,
+    };
+    transactionSchema.parse(updated);
+    await db.transactions.put(updated);
+    await audit.upsert('transaction', transaction, updated);
+    return transaction.id;
+  });
+}
+
+/** Remove the plan association while preserving the original expense and its identity. */
+export async function unlinkCommitmentPayment(transactionId: string): Promise<void> {
+  await auditedFinanceTransaction([db.transactions], async (audit) => {
+    const previous = await db.transactions.get(transactionId);
+    if (!previous || previous.source !== 'commitment' || !previous.occurrenceKey) {
+      throw new Error('Plaćanje obaveze ne postoji.');
+    }
+    if (
+      await db.transactions
+        .where('occurrenceKey')
+        .equals(commitmentFundingKey(previous.occurrenceKey))
+        .first()
+    ) {
+      throw new Error('Plaćanje iz štednje i transfer se uklanjaju zajedno.');
+    }
+    const value = { ...previous, source: 'manual' as const, occurrenceKey: undefined };
+    await db.transactions.put(value);
+    await audit.upsert('transaction', previous, value);
+  });
+}
+
+export async function withdrawFromGoal(input: {
+  goalId: string;
+  toAccountId: string;
+  amount: number;
+  date: string;
+  notes?: string;
+}): Promise<string> {
+  return auditedFinanceTransaction([db.goals, db.accounts, db.transactions], async (audit) => {
+    const goal = await db.goals.get(input.goalId);
+    if (!goal || goal.archived || goal.usedAt) throw new Error('Izaberite aktivan cilj.');
+    const source = await requireAccount(goal.linkedAccountId);
+    const destination = await requireAccount(input.toAccountId);
+    if (!source.protected || source.archived || destination.protected || destination.archived) {
+      throw new Error('Izaberite aktivnu štednju i raspoloživi odredišni račun.');
+    }
+    const transaction: LedgerTransaction = {
+      id: createId('tx'),
+      type: 'transfer',
+      amount: input.amount,
+      accountId: source.id,
+      toAccountId: destination.id,
+      date: input.date,
+      description: `Iskorišćena štednja — ${goal.name}`,
+      notes: input.notes?.trim() || undefined,
+      source: 'manual',
+      createdAt: nowIso(),
+    };
+    transactionSchema.parse(transaction);
+    await requireAvailableFunds(
+      source.id,
+      input.amount,
+      'Nema dovoljno sačuvanog novca za ovaj prenos.',
+    );
+    await db.transactions.add(transaction);
+    await audit.upsert('transaction', null, transaction);
+    return transaction.id;
+  });
 }
 
 export async function markPlannedIncomeReceived(input: {
@@ -705,8 +896,23 @@ export async function saveGoal(value: SavingsGoal): Promise<void> {
       throw new Error('Iskorišćeni namenski cilj mora imati plaćen povezani događaj.');
     }
   }
-  await auditedFinanceTransaction([db.goals], async (audit) => {
+  await auditedFinanceTransaction([db.goals, db.transactions], async (audit) => {
     const previous = await db.goals.get(value.id);
+    if (
+      previous &&
+      previous.linkedAccountId !== value.linkedAccountId &&
+      (await db.transactions
+        .filter(
+          (item) =>
+            item.accountId === previous.linkedAccountId ||
+            item.toAccountId === previous.linkedAccountId,
+        )
+        .count())
+    ) {
+      throw new Error(
+        'Cilj sa istorijom zadržava svoj štedni račun. Dodajte novi cilj za drugi račun.',
+      );
+    }
     await db.goals.put(value);
     await audit.upsert('goal', previous, value);
   });
@@ -805,7 +1011,14 @@ export async function deleteGoal(goalId: string): Promise<'deleted' | 'archived'
     const goal = await db.goals.get(goalId);
     if (!goal) return 'deleted';
     const [transactionCount, eventCount] = await Promise.all([
-      db.transactions.where('goalId').equals(goalId).count(),
+      db.transactions
+        .filter(
+          (transaction) =>
+            transaction.goalId === goalId ||
+            transaction.accountId === goal.linkedAccountId ||
+            transaction.toAccountId === goal.linkedAccountId,
+        )
+        .count(),
       db.plannedEvents.where('linkedGoalId').equals(goalId).count(),
     ]);
     if (transactionCount > 0 || eventCount > 0) {

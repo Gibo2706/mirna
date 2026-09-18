@@ -3,6 +3,7 @@ import { assertFinanceDataIntegrity } from './integrity';
 import type { LedgerTransaction } from './types';
 import {
   checking,
+  monthlyCommitment,
   emptyFinanceData,
   expenseCategory,
   incomeCategory,
@@ -11,6 +12,41 @@ import {
 } from '@/tests/factories';
 
 describe('finance data integrity', () => {
+  it('requires a coherent commitment funding pair at import and sync boundaries', () => {
+    const data = emptyFinanceData();
+    data.commitments = [monthlyCommitment];
+    const key = 'commitment:2026-07-31';
+    const funding = tx({
+      id: 'funding',
+      type: 'transfer',
+      amount: 500,
+      accountId: savings.id,
+      toAccountId: checking.id,
+      occurrenceKey: `commitment-funding:${key}`,
+    });
+    const payment = tx({
+      id: 'payment',
+      type: 'expense',
+      amount: 500,
+      source: 'commitment',
+      occurrenceKey: key,
+      categoryId: expenseCategory.id,
+    });
+    data.transactions = [funding, payment];
+    expect(() => assertFinanceDataIntegrity(data)).not.toThrow();
+    for (const change of [
+      { amount: 501 },
+      { date: '2026-07-16' },
+      { accountId: savings.id },
+      { source: 'manual' as const },
+    ]) {
+      data.transactions = [funding, { ...payment, ...change }];
+      expect(() => assertFinanceDataIntegrity(data)).toThrow('Finansiranje obaveze');
+    }
+    data.transactions = [funding];
+    expect(() => assertFinanceDataIntegrity(data)).toThrow('Finansiranje obaveze');
+  });
+
   it('rejects duplicate primary IDs before bulk import can collapse them', () => {
     const data = emptyFinanceData();
     data.accounts.push({ ...data.accounts[0] });
