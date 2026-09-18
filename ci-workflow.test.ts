@@ -8,6 +8,23 @@ import { describe, expect, it } from 'vitest';
 const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf8');
 const deployJob = workflow.slice(workflow.indexOf('  deploy-sync-worker:'));
 
+describe('sync E2E failure artifacts', () => {
+  it('uploads only the sanitized Wrangler log alongside existing reports on failure', () => {
+    const artifact = workflow.slice(
+      workflow.indexOf('      - name: Upload failure report'),
+      workflow.indexOf('  deploy-sync-worker:'),
+    );
+    expect(artifact).toContain('if: failure()');
+    expect(artifact).toContain('playwright-report/');
+    expect(artifact).toContain('test-results/');
+    expect(artifact).toContain('.wrangler/sync-e2e-wrangler.log');
+    expect(artifact).toContain('include-hidden-files: true');
+    expect(artifact).toContain('retention-days: 7');
+    expect(artifact).not.toMatch(/\.dev\.vars|sync-e2e-state|sync-e2e-private/u);
+    expect(workflow).toContain('run: node scripts/sync-e2e-diagnostics.mjs');
+  });
+});
+
 describe('sync Worker deployment workflow', () => {
   it('deploys only a tested main push and never a pull request or feature branch', () => {
     expect(deployJob).toContain('needs: [quality, e2e]');
