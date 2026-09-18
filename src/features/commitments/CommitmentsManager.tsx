@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import { Edit3, Plus, ReceiptText, Trash2 } from 'lucide-react';
-import type { FinanceSnapshot, FixedCommitment } from '@/domain/types';
+import { ChevronRight, Plus, ReceiptText, Trash2 } from 'lucide-react';
+import type { CommitmentOccurrence, FinanceSnapshot, FixedCommitment } from '@/domain/types';
 import { deleteCommitment, saveCommitment } from '@/db/commands';
 import { createId } from '@/lib/id';
-import { todayIso } from '@/lib/dates';
+import { getAllCommitmentOccurrences, getNextCommitmentOccurrence } from '@/domain/recurrence';
+import { CommitmentPaymentSheet } from './CommitmentPaymentSheet';
+import { currentMonthKey, formatDate, todayIso } from '@/lib/dates';
 import { formatRsd, parseIntegerInput } from '@/lib/format';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -30,6 +32,8 @@ const newCommitment = (accountId = '', categoryId = ''): FixedCommitment => ({
 export const CommitmentsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const { success } = useToast();
   const [editing, setEditing] = useState<FixedCommitment | null>(null);
+  const [details, setDetails] = useState<FixedCommitment | null>(null);
+  const [paying, setPaying] = useState<CommitmentOccurrence | null>(null);
   const [deleting, setDeleting] = useState<FixedCommitment | null>(null);
   const [error, setError] = useState('');
   const expenseCategories = snapshot.categories.filter(
@@ -53,7 +57,6 @@ export const CommitmentsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) 
       description="Obaveze stvaraju očekivane stavke. Stvarni trošak nastaje tek kada označite plaćanje."
       action={
         <Button
-          size="icon"
           onClick={() =>
             setEditing(
               newCommitment(snapshot.settingsRecord.defaultAccountId, expenseCategories[0]?.id),
@@ -61,46 +64,39 @@ export const CommitmentsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) 
           }
           aria-label="Nova fiksna obaveza"
         >
-          <Plus />
+          <Plus size={18} /> Nova obaveza
         </Button>
       }
     >
       {snapshot.commitments.length ? (
         <Card className="divide-y p-0">
           {snapshot.commitments.map((commitment) => (
-            <div
+            <button
               key={commitment.id}
-              className={`flex items-start gap-3 p-4 ${!commitment.active ? 'opacity-55' : ''}`}
+              className={`finance-row px-4 ${!commitment.active ? 'opacity-55' : ''}`}
+              onClick={() => {
+                setDetails(commitment);
+                setError('');
+              }}
+              aria-label={`Detalji obaveze ${commitment.name}`}
             >
-              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-surface-2 text-muted">
-                <ReceiptText size={19} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="line-clamp-2 break-words text-sm font-bold">{commitment.name}</p>
-                <p className="mt-1 break-words text-xs leading-5 text-muted">
+              <ReceiptText size={20} className="shrink-0 text-muted" />
+              <span className="min-w-0 flex-1">
+                <span className="block break-words text-sm font-bold">{commitment.name}</span>
+                <span className="mt-1 block text-xs text-muted">
                   {commitment.frequency === 'monthly'
                     ? `Mesečno · dan ${commitment.dueDay}`
                     : commitment.frequency === 'weekly'
                       ? 'Nedeljno'
                       : 'Godišnje'}
-                  {commitment.endDate ? ` · do ${commitment.endDate}` : ''}
-                </p>
-              </div>
-              <p className="money shrink-0 whitespace-nowrap text-sm font-extrabold">
-                {formatRsd(commitment.amount)}
-              </p>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => {
-                  setEditing(commitment);
-                  setError('');
-                }}
-                aria-label={`Izmeni ${commitment.name}`}
-              >
-                <Edit3 size={17} />
-              </Button>
-            </div>
+                  {!commitment.active ? ' · neaktivno' : ''}
+                </span>
+                <span className="money mt-1 block text-sm font-semibold">
+                  {formatRsd(commitment.amount)}
+                </span>
+              </span>
+              <ChevronRight size={18} className="shrink-0 text-muted" />
+            </button>
           ))}
         </Card>
       ) : (
@@ -111,6 +107,80 @@ export const CommitmentsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) 
         />
       )}
 
+      <Sheet
+        open={Boolean(details)}
+        onOpenChange={(open) => !open && setDetails(null)}
+        title={details?.name ?? 'Obaveza'}
+        description="Plan i plaćanja"
+      >
+        {details ? (
+          <div className="grid gap-4">
+            <p className="money text-3xl font-bold">{formatRsd(details.amount)}</p>
+            {(() => {
+              const current = getAllCommitmentOccurrences(
+                [details],
+                currentMonthKey(),
+                snapshot.transactions,
+              );
+              const next =
+                current.find((o) => !o.paidTransactionId) ??
+                getNextCommitmentOccurrence(details, todayIso(), snapshot.transactions);
+              return (
+                <>
+                  {current.map((o) => (
+                    <p
+                      key={o.key}
+                      className="flex flex-wrap justify-between gap-2 border-b py-3 text-sm"
+                    >
+                      <span>{formatDate(o.date)}</span>
+                      <strong>{o.paidTransactionId ? 'Plaćeno' : 'Čeka plaćanje'}</strong>
+                    </p>
+                  ))}
+                  {next ? (
+                    <Button
+                      size="lg"
+                      onClick={() => {
+                        setPaying(next);
+                        setDetails(null);
+                      }}
+                    >
+                      Označi kao plaćeno
+                    </Button>
+                  ) : (
+                    <p className="text-sm text-muted">Nema narednih neplaćenih termina.</p>
+                  )}
+                </>
+              );
+            })()}
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setEditing(details);
+                setDetails(null);
+              }}
+            >
+              Izmeni
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-danger"
+              onClick={() => {
+                setDeleting(details);
+                setDetails(null);
+              }}
+            >
+              Obriši plan obaveze
+            </Button>
+          </div>
+        ) : null}
+      </Sheet>
+      <CommitmentPaymentSheet
+        occurrence={paying}
+        snapshot={snapshot}
+        open={Boolean(paying)}
+        onOpenChange={(open) => !open && setPaying(null)}
+        onPaid={() => success('Označeno kao plaćeno.')}
+      />
       <Sheet
         open={Boolean(editing)}
         onOpenChange={(open) => !open && setEditing(null)}

@@ -27,9 +27,14 @@ export const AppShell = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
     <>
       <nav
         aria-label="Glavna navigacija"
-        className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/94 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:inset-y-0 md:left-0 md:right-auto md:w-24 md:border-r md:border-t-0 md:pt-6"
+        className="fixed inset-x-0 bottom-0 z-40 border-t bg-background pb-[env(safe-area-inset-bottom)] md:inset-y-0 md:left-0 md:right-auto md:w-24 md:border-r md:border-t-0 md:pt-6"
       >
-        <div className="mx-auto flex h-[4.65rem] max-w-lg items-center justify-around px-2 md:h-full md:flex-col md:justify-start md:gap-3 md:px-3">
+        <div
+          className={cn(
+            'mx-auto flex h-[4.65rem] max-w-lg items-center justify-around px-2 md:h-full md:flex-col md:justify-start md:gap-3 md:px-3',
+            showQuickAdd && 'pr-16 md:pr-3',
+          )}
+        >
           <div className="mb-5 hidden size-12 place-items-center rounded-2xl bg-foreground text-lg font-black text-background md:grid">
             M
           </div>
@@ -40,7 +45,7 @@ export const AppShell = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
               end={end}
               className={({ isActive }) =>
                 cn(
-                  'flex min-h-14 min-w-14 flex-col items-center justify-center gap-1 rounded-2xl px-2 text-[0.68rem] font-semibold text-muted transition md:w-full',
+                  'flex min-h-14 min-w-11 flex-col items-center justify-center gap-1 rounded-xl px-2 text-[0.68rem] font-semibold text-muted transition md:w-full',
                   isActive && 'bg-accent-soft text-accent',
                 )
               }
@@ -53,8 +58,7 @@ export const AppShell = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       </nav>
       {showQuickAdd ? (
         <button
-          className="fixed right-4 z-40 grid size-14 place-items-center rounded-2xl bg-accent text-white shadow-[0_10px_32px_rgb(47_125_100/0.38)] transition active:scale-95 md:right-7"
-          style={{ bottom: 'calc(5.6rem + env(safe-area-inset-bottom))' }}
+          className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-3 z-40 grid size-12 place-items-center rounded-2xl bg-accent text-white shadow-lg transition active:scale-95 md:bottom-7 md:right-7 md:size-14"
           onClick={() => setQuickAddLocationKey(location.key)}
           aria-label="Dodaj transakciju"
         >

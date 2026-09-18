@@ -18,7 +18,7 @@ export const Field = ({
   error?: string;
   children: ReactNode;
 }) => (
-  <label className="grid gap-1.5 text-sm font-medium">
+  <label className="grid min-w-0 gap-1.5 text-sm font-medium">
     <span>{label}</span>
     {children}
     {error ? (
@@ -34,7 +34,7 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
     <input
       ref={ref}
       className={cn(
-        'min-h-12 w-full rounded-xl border bg-surface px-3.5 text-base text-foreground placeholder:text-muted/70',
+        'min-h-12 min-w-0 w-full rounded-xl border bg-surface px-3.5 text-base text-foreground placeholder:text-muted',
         className,
       )}
       {...props}
@@ -47,7 +47,10 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
   ({ className, children, ...props }, ref) => (
     <select
       ref={ref}
-      className={cn('min-h-12 w-full rounded-xl border bg-surface px-3.5 text-base', className)}
+      className={cn(
+        'min-h-12 min-w-0 w-full rounded-xl border bg-surface px-3 text-base',
+        className,
+      )}
       {...props}
     >
       {children}

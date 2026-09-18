@@ -61,8 +61,8 @@ export const PlannedIncomeManager = ({ snapshot }: { snapshot: FinanceSnapshot }
       title="Planirani prihodi"
       description="Stvarni plan plate i drugih ponavljajućih prihoda. Scenariji plate ostaju samo pretpostavke prognoze."
       action={
-        <Button size="icon" onClick={openNew} aria-label="Novi planirani prihod">
-          <Plus />
+        <Button onClick={openNew} aria-label="Novi planirani prihod">
+          <Plus size={18} /> Novi planirani prihod
         </Button>
       }
     >

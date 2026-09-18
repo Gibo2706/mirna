@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Archive, Edit3, Plus, Scale, Trash2, WalletCards } from 'lucide-react';
+import { Archive, ChevronRight, Plus, Scale, Trash2, WalletCards } from 'lucide-react';
 import type { Account, FinanceSnapshot } from '@/domain/types';
 import { calculateAccountBalances } from '@/domain/calculations';
 import { adjustAccountBalance, deleteAccount, saveAccount } from '@/db/commands';
@@ -7,7 +7,6 @@ import { createId } from '@/lib/id';
 import { todayIso } from '@/lib/dates';
 import { formatRsd, parseIntegerInput } from '@/lib/format';
 import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Field, Input, Select } from '@/components/ui/Field';
@@ -29,6 +28,7 @@ const newAccount = (): Account => ({
 export const AccountsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const { success } = useToast();
   const [editing, setEditing] = useState<Account | null>(null);
+  const [details, setDetails] = useState<Account | null>(null);
   const [adjusting, setAdjusting] = useState<Account | null>(null);
   const [deleting, setDeleting] = useState<Account | null>(null);
   const [targetBalance, setTargetBalance] = useState(0);
@@ -56,74 +56,37 @@ export const AccountsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => 
       title="Računi"
       description="Stanje se izvodi iz početnog stanja i cele proverljive istorije transakcija."
       action={
-        <Button size="icon" onClick={() => setEditing(newAccount())} aria-label="Novi račun">
-          <Plus />
+        <Button onClick={() => setEditing(newAccount())} aria-label="Novi račun">
+          <Plus size={18} /> Novi račun
         </Button>
       }
     >
       {snapshot.accounts.length ? (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="divide-y border-y">
           {snapshot.accounts.map((account) => (
-            <Card key={account.id} className={account.archived ? 'opacity-60' : ''}>
-              <div className="flex items-start gap-3">
-                <span
-                  className="grid size-11 place-items-center rounded-2xl text-white"
-                  style={{ background: account.color }}
-                >
-                  <WalletCards size={20} />
+            <button
+              key={account.id}
+              className={`finance-row ${account.archived ? 'opacity-60' : ''}`}
+              onClick={() => setDetails(account)}
+              aria-label={`Detalji računa ${account.name}`}
+            >
+              <WalletCards size={22} className="shrink-0 text-muted" />
+              <span className="min-w-0 flex-1">
+                <span className="block font-bold">{account.name}</span>
+                <span className="mt-1 block text-xs text-muted">
+                  {account.protected
+                    ? 'Štednja'
+                    : account.kind === 'cash'
+                      ? 'Keš'
+                      : 'Raspoloživ račun'}
+                  {account.archived ? ' · arhiviran' : ''}
                 </span>
-                <div className="min-w-0 flex-1">
-                  <h2 className="break-words font-bold">{account.name}</h2>
-                  <p className="mt-0.5 text-xs text-muted">
-                    {account.protected
-                      ? 'Zaštićena štednja'
-                      : account.kind === 'cash'
-                        ? 'Keš'
-                        : 'Raspoloživ račun'}
-                    {account.archived ? ' · arhiviran' : ''}
-                  </p>
-                  <p className="money mt-3 text-2xl font-extrabold">
-                    {formatRsd(balances[account.id] ?? 0)}
-                  </p>
-                  <p className="mt-1 text-xs text-muted">
-                    Početno stanje {formatRsd(account.openingBalance)}
-                  </p>
-                </div>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => {
-                    setEditing(account);
-                    setError('');
-                  }}
-                  aria-label={`Izmeni ${account.name}`}
-                >
-                  <Edit3 size={18} />
-                </Button>
-              </div>
-              <div className="mt-4 flex gap-2 border-t pt-3">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => {
-                    setAdjusting(account);
-                    setTargetBalance(balances[account.id] ?? 0);
-                    setAdjustmentNote('');
-                    setError('');
-                  }}
-                >
-                  <Scale size={16} /> Uskladi stanje
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="ml-auto text-danger"
-                  onClick={() => setDeleting(account)}
-                >
-                  <Trash2 size={16} /> Obriši
-                </Button>
-              </div>
-            </Card>
+                <span className="money mt-2 block text-xl font-bold">
+                  {formatRsd(balances[account.id] ?? 0)}
+                </span>
+              </span>
+              <ChevronRight size={18} className="shrink-0 text-muted" />
+            </button>
           ))}
         </div>
       ) : (
@@ -139,6 +102,51 @@ export const AccountsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => 
         />
       )}
 
+      <Sheet
+        open={Boolean(details)}
+        onOpenChange={(open) => !open && setDetails(null)}
+        title={details?.name ?? 'Račun'}
+        description="Stanje i radnje"
+      >
+        {details ? (
+          <div className="grid gap-4">
+            <p className="money text-3xl font-bold">{formatRsd(balances[details.id] ?? 0)}</p>
+            <p className="text-sm text-muted">Početno stanje {formatRsd(details.openingBalance)}</p>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setEditing(details);
+                setDetails(null);
+                setError('');
+              }}
+            >
+              Izmeni
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setAdjusting(details);
+                setTargetBalance(balances[details.id] ?? 0);
+                setAdjustmentNote('');
+                setError('');
+                setDetails(null);
+              }}
+            >
+              <Scale size={18} /> Uskladi stanje
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-danger"
+              onClick={() => {
+                setDeleting(details);
+                setDetails(null);
+              }}
+            >
+              <Trash2 size={18} /> Obriši
+            </Button>
+          </div>
+        ) : null}
+      </Sheet>
       <Sheet
         open={Boolean(editing)}
         onOpenChange={(open) => !open && setEditing(null)}

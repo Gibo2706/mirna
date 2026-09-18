@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FinanceSnapshot, PlannedEvent } from '@/domain/types';
 import { calculateAccountBalances } from '@/domain/calculations';
+import { ProtectedSpendingPreview } from '@/features/transactions/ProtectedSpendingPreview';
+import { getProtectedSpendingImpacts } from '@/features/transactions/protectedSpending';
 import { markPlannedEventPaid } from '@/db/commands';
 import { formatDate } from '@/lib/dates';
 import { formatRsd } from '@/lib/format';
@@ -109,8 +111,8 @@ export const EventPaymentSheet = ({
             >
               {activeAccounts.map((account) => (
                 <option key={account.id} value={account.id}>
-                  {account.name}
-                  {account.protected ? ' · zaštićen' : ''}
+                  {account.name} · {formatRsd(balances[account.id] ?? 0)}
+                  {account.protected ? ' · štednja' : ''}
                 </option>
               ))}
             </Select>
@@ -135,7 +137,7 @@ export const EventPaymentSheet = ({
         {needsTopUp ? (
           <Field
             label="Dopuni sa raspoloživog računa"
-            hint={`Biće kreiran transfer od ${formatRsd(shortfall)}, pa puni rashod sa zaštićenog računa — atomski.`}
+            hint={`Biće kreiran transfer od ${formatRsd(shortfall)}, pa plaćanje događaja. Sve se čuva zajedno.`}
           >
             <Select
               value={topUpFromAccountId}
@@ -165,6 +167,13 @@ export const EventPaymentSheet = ({
           </p>
         ) : null}
 
+        <ProtectedSpendingPreview
+          impacts={getProtectedSpendingImpacts(
+            snapshot,
+            { type: 'expense', accountId: paymentAccountId, amount: event.plannedAmount },
+            { topUpAmount: needsTopUp ? shortfall : 0 },
+          )}
+        />
         <Button
           size="lg"
           className="w-full"

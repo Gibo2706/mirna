@@ -27,11 +27,11 @@
   --surface: #ffffff;
   --surface-2: #ecede8;
   --foreground: #171a18;
-  --muted: #69716c;
+  --muted: #606963;
   --border: #dde1dc;
   --accent: #2f7d64;
   --accent-soft: #e4f1eb;
-  --warning: #a76415;
+  --warning: #865014;
   --warning-soft: #fff1d2;
   --danger: #b84343;
   --danger-soft: #fbe7e5;
@@ -68,13 +68,7 @@ body {
   min-height: 100vh;
   margin: 0;
   overflow-x: hidden;
-  background:
-    radial-gradient(
-      circle at 80% -10%,
-      color-mix(in srgb, var(--accent) 10%, transparent),
-      transparent 35rem
-    ),
-    var(--background);
+  background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
   font-synthesis: none;
@@ -107,6 +101,65 @@ a {
 .money {
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.025em;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--foreground);
+}
+input,
+textarea {
+  caret-color: var(--accent);
+}
+* {
+  scrollbar-color: var(--border) transparent;
+  scrollbar-width: thin;
+}
+a {
+  text-underline-offset: 0.2em;
+}
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+.finance-section {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  padding-block: 1.25rem;
+}
+.finance-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 0.75rem;
+  padding-block: 1rem;
+  text-align: left;
+}
+button.finance-row:hover,
+a.finance-row:hover {
+  background: var(--surface-2);
+}
+.sheet-actions {
+  position: sticky;
+  bottom: -1rem;
+  z-index: 1;
+  display: grid;
+  gap: 0.5rem;
+  margin-inline: -1rem;
+  margin-bottom: -1rem;
+  padding: 1rem;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+@media (min-width: 640px) {
+  .sheet-actions {
+    bottom: -1.5rem;
+    margin: 0 -1.5rem -1.5rem;
+    padding: 1.25rem 1.5rem;
+  }
 }
 
 .screen {

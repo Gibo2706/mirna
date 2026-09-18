@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-17T21:00:00Z",
+  "title": "Design System: Mirna",
+  "extensions": {
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" }
+    ],
+    "typographyMeta": {
+      "money": {
+        "displayName": "Primary money",
+        "purpose": "Safe-to-spend amount; other money remains compact and tabular."
+      }
+    }
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "Record what happened; understand what remains.",
+    "overview": "A calm mobile finance utility with divided lists and explicit financial consequences.",
+    "keyCharacteristics": ["Finance first", "Mobile first", "Ledger derived", "Serbian and RSD"],
+    "dos": ["Use clear signed money and account balances", "Keep one dominant financial summary"],
+    "donts": ["Repeat decorative metric cards", "Hide payment consequences"]
+  }
+}

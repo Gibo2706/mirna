@@ -1,23 +1,28 @@
-import { classifySavingsTransfer } from '@/domain/savingsTransfers';
 import { useEffect, useRef, useState } from 'react';
 import { addMonths, format, parseISO } from 'date-fns';
 import { BarChart3, ChevronLeft, ChevronRight, CircleCheck, ReceiptText } from 'lucide-react';
 import { Link } from 'react-router';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import type { FinanceSnapshot, PlannedEvent, PlannedIncomeOccurrence } from '@/domain/types';
+import type {
+  CommitmentOccurrence,
+  FinanceSnapshot,
+  PlannedEvent,
+  PlannedIncomeOccurrence,
+} from '@/domain/types';
 import { calculateBudgetProgress, calculateMonthlyFinancialSummary } from '@/domain/calculations';
 import { getAllCommitmentOccurrences, getAllPlannedIncomeOccurrences } from '@/domain/recurrence';
+import { classifySavingsTransfer } from '@/domain/savingsTransfers';
 import { currentMonthKey, formatDate, formatMonth, todayIso } from '@/lib/dates';
 import { formatCompactRsd, formatRsd, parseIntegerInput } from '@/lib/format';
 import { useCurrentDate } from '@/lib/useCurrentDate';
-import { markCommitmentPaid, markPlannedIncomeReceived } from '@/db/commands';
+import { markPlannedIncomeReceived } from '@/db/commands';
 import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
 import { Progress } from '@/components/ui/Progress';
 import { PageHeader } from '@/components/PageHeader';
 import { useToast } from '@/components/ToastProvider';
 import { Field, Input, Select, Textarea } from '@/components/ui/Field';
 import { Sheet } from '@/components/ui/Sheet';
+import { CommitmentPaymentSheet } from '@/features/commitments/CommitmentPaymentSheet';
 import { EventPaymentSheet } from '@/features/events/EventPaymentSheet';
 import { MoneyValue } from '@/components/ui/MoneyValue';
 import { StatusBadge } from '@/components/ui/StatusBadge';
@@ -28,6 +33,7 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const previousCurrentMonth = useRef(liveCurrentMonth);
   const { success } = useToast();
   const [actionError, setActionError] = useState('');
+  const [payingCommitment, setPayingCommitment] = useState<CommitmentOccurrence | null>(null);
   const [payingEvent, setPayingEvent] = useState<PlannedEvent | null>(null);
   const [receivingIncome, setReceivingIncome] = useState<PlannedIncomeOccurrence | null>(null);
   const [receivedAmount, setReceivedAmount] = useState(0);
@@ -93,7 +99,7 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const savingsTransfers = snapshot.transactions.filter(
     (transaction) =>
       transaction.date.startsWith(month) &&
-      Boolean(classifySavingsTransfer(transaction, snapshot.accounts)),
+      classifySavingsTransfer(transaction, snapshot.accounts, snapshot.goals),
   );
   const recent = snapshot.transactions
     .filter((transaction) => transaction.date.startsWith(month))
@@ -127,22 +133,7 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
     summary.savings.planned > 0 ||
     summary.debt.planned > 0;
 
-  const payOccurrence = async (occurrence: (typeof occurrences)[number]) => {
-    setActionError('');
-    try {
-      await markCommitmentPaid({
-        occurrenceKey: occurrence.key,
-        name: occurrence.name,
-        amount: occurrence.amount,
-        date: occurrence.date,
-        accountId: occurrence.accountId,
-        categoryId: occurrence.categoryId,
-      });
-      success('Obaveza je označena kao plaćena.');
-    } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : 'Obaveza nije evidentirana.');
-    }
-  };
+  const payOccurrence = (occurrence: CommitmentOccurrence) => setPayingCommitment(occurrence);
 
   const openReceiveIncome = (occurrence: (typeof incomeOccurrences)[number]) => {
     setActionError('');
@@ -242,41 +233,50 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       </div>
 
       {hasPlan || recent.length ? (
-        <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <section aria-label="Plan i stvarno stanje" className="border-y py-4">
+          <div className="grid grid-cols-[minmax(0,1fr)_repeat(3,minmax(0,1fr))] gap-2 border-b pb-3 text-right text-xs font-semibold text-muted">
+            <span className="text-left">Ovaj mesec</span>
+            <span>Plan</span>
+            <span>Stvarno</span>
+            <span>Preostalo</span>
+          </div>
           {[
-            ['Prihod', plan.income, actuals.income],
-            ['Fiksne obaveze', plan.fixed, plan.fixedPaid],
+            ['Prihod', summary.income.planned, summary.income.actual, summary.income.remaining],
+            ['Fiksno', summary.fixed.planned, summary.fixed.actual, summary.fixed.remaining],
             [
               'Promenljivo',
-              plan.variable,
-              budgets.reduce((sum, item) => sum + item.progress.actual, 0),
+              summary.variable.planned,
+              summary.variable.actual,
+              summary.variable.remaining,
             ],
-            ['Ukupni troškovi', summary.plannedExpenses, actuals.expenses],
-          ].map(([label, planned, actual]) => (
-            <Card key={String(label)}>
-              <p className="text-xs font-bold uppercase tracking-wide text-muted">{label}</p>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div>
-                  <p className="text-[0.68rem] text-muted">PLANIRANO</p>
-                  <p className="money mt-1 font-extrabold">{formatRsd(Number(planned))}</p>
-                </div>
-                <div>
-                  <p className="text-[0.68rem] text-muted">STVARNO</p>
-                  <p className="money mt-1 font-extrabold">{formatRsd(Number(actual))}</p>
-                </div>
-              </div>
-            </Card>
+            ['Događaji', summary.events.planned, summary.events.actual, summary.events.remaining],
+            ['Štednja', summary.savings.planned, summary.savings.actual, summary.savings.remaining],
+            ['Dugovi', summary.debt.planned, summary.debt.actual, summary.debt.remaining],
+            ['Van plana', 0, summary.unplanned.actual, 0],
+          ].map(([label, planned, actual, remaining]) => (
+            <div
+              key={String(label)}
+              className="grid grid-cols-[minmax(0,1fr)_repeat(3,minmax(0,1fr))] items-center gap-2 border-b py-3 text-right text-xs last:border-0 sm:text-sm"
+            >
+              <span className="text-left font-semibold">{label}</span>
+              {[planned, actual, remaining].map((value, index) => (
+                <span key={index} className="money break-words">
+                  {Number(value).toLocaleString('sr-RS')}
+                </span>
+              ))}
+            </div>
           ))}
+          <p className="mt-2 text-xs text-muted">
+            Svi iznosi su u RSD. Štednja je prenos između vaših računa.
+          </p>
         </section>
       ) : null}
 
       <div className="mt-5 grid gap-5 lg:grid-cols-[0.85fr_1.15fr]">
         <section className="section-stack">
-          <Card className="p-0">
+          <section className="finance-section">
             <div className="p-4">
-              <p className="text-xs font-bold uppercase tracking-wide text-muted">
-                Planirani prihod
-              </p>
+              <p className="text-sm font-semibold text-muted">Planirani prihod</p>
               <h2 className="mt-1 font-bold">
                 {formatRsd(summary.income.actualPlanned)} primljeno ·{' '}
                 {formatRsd(summary.income.remaining)} preostalo
@@ -286,7 +286,7 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
               {incomeOccurrences.map((occurrence) => (
                 <div key={occurrence.key} className="flex items-center gap-3 p-4">
                   <span
-                    className={`grid size-10 place-items-center rounded-xl ${
+                    className={`grid w-5 shrink-0 place-items-center ${
                       occurrence.receivedTransactionId
                         ? 'bg-accent-soft text-accent'
                         : 'bg-surface-2 text-muted'
@@ -333,14 +333,14 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 </p>
               ) : null}
             </div>
-          </Card>
+          </section>
 
           {hasPlan || recent.length ? (
-            <Card>
-              <div className="mb-4 flex items-center gap-2">
+            <details className="finance-section">
+              <summary className="flex min-h-11 cursor-pointer items-center gap-2 text-sm font-semibold">
                 <BarChart3 className="text-accent" size={20} />
-                <h2 className="font-bold">Plan naspram stvarnog</h2>
-              </div>
+                Plan naspram stvarnog · grafik
+              </summary>
               <div className="h-64 w-full" aria-label="Grafik plana i stvarnog">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData} margin={{ left: -18, right: 4 }}>
@@ -371,15 +371,13 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-            </Card>
+            </details>
           ) : null}
 
-          <Card className="p-0">
+          <section className="finance-section">
             <div className="flex items-start justify-between gap-3 p-4">
               <div>
-                <p className="text-xs font-bold uppercase tracking-wide text-muted">
-                  Neplanirani / ostali troškovi
-                </p>
+                <p className="text-sm font-semibold text-muted">Neplanirani / ostali troškovi</p>
                 <h2 className="money mt-1 text-lg font-extrabold">
                   {formatRsd(summary.unplanned.actual)}
                 </h2>
@@ -387,15 +385,11 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                   Troškovi koji nisu fiksna obaveza, aktivni promenljivi budžet, događaj ili dug.
                 </p>
               </div>
-              <span
-                className={`rounded-full px-2 py-1 text-[0.68rem] font-bold ${
-                  summary.expenseReconciliation.status === 'OK'
-                    ? 'bg-accent-soft text-accent'
-                    : 'bg-warning-soft text-warning'
-                }`}
-              >
-                OBRAČUN {summary.expenseReconciliation.status}
-              </span>
+              {summary.expenseReconciliation.status !== 'OK' ? (
+                <p role="alert" className="text-sm font-semibold text-warning">
+                  Zbir troškova se ne poklapa. Proverite transakcije.
+                </p>
+              ) : null}
             </div>
             <div className="max-h-72 divide-y overflow-y-auto border-t">
               {unplannedTransactions.map((transaction) => (
@@ -416,28 +410,26 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 </p>
               ) : null}
             </div>
-          </Card>
+          </section>
 
-          <Card className="p-0">
+          <section className="finance-section">
             <div className="flex items-center justify-between p-4">
               <div>
-                <p className="text-xs font-bold uppercase tracking-wide text-muted">
-                  Fiksne obaveze
-                </p>
+                <p className="text-sm font-semibold text-muted">Fiksne obaveze</p>
                 <h2 className="mt-1 font-bold">
                   {occurrences.filter((value) => value.paidTransactionId).length} /{' '}
                   {occurrences.length} plaćeno
                 </h2>
               </div>
               <p className="money text-sm font-bold">
-                {formatRsd(Math.max(0, plan.fixed - plan.fixedPaid))} preostalo
+                {formatRsd(summary.fixed.remaining)} preostalo
               </p>
             </div>
             <div className="divide-y border-t">
               {occurrences.map((occurrence) => (
                 <div key={occurrence.key} className="flex items-center gap-3 p-4">
                   <span
-                    className={`grid size-10 place-items-center rounded-xl ${occurrence.paidTransactionId ? 'bg-accent-soft text-accent' : 'bg-surface-2 text-muted'}`}
+                    className={`grid w-5 shrink-0 place-items-center ${occurrence.paidTransactionId ? 'bg-accent-soft text-accent' : 'bg-surface-2 text-muted'}`}
                   >
                     {occurrence.paidTransactionId ? (
                       <CircleCheck size={19} />
@@ -468,15 +460,13 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 <p className="p-6 text-center text-sm text-muted">Nema obaveza za ovaj mesec.</p>
               ) : null}
             </div>
-          </Card>
+          </section>
         </section>
 
         <section className="section-stack">
-          <Card>
+          <section className="finance-section">
             <div className="mb-4">
-              <p className="text-xs font-bold uppercase tracking-wide text-muted">
-                Promenljivi budžeti
-              </p>
+              <p className="text-sm font-semibold text-muted">Promenljivi budžeti</p>
               <h2 className="mt-1 text-lg font-bold">Plan, stvarno i preostalo</h2>
             </div>
             <div className="grid gap-5">
@@ -527,11 +517,10 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 <p className="text-sm text-muted">Još nema aktivnih promenljivih budžeta.</p>
               ) : null}
             </div>
-          </Card>
+          </section>
 
-          <Card className="p-0">
+          <section className="finance-section">
             <div className="p-4">
-              <p className="text-xs font-bold uppercase tracking-wide text-muted">Jednokratno</p>
               <h2 className="mt-1 font-bold">Planirani događaji</h2>
             </div>
             <div className="divide-y border-t">
@@ -540,11 +529,11 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 return (
                   <div
                     key={event.id}
-                    className="grid grid-cols-[2.5rem_minmax(0,1fr)_auto] items-start gap-3 p-4"
+                    className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-start gap-3 p-4"
                     data-testid="month-planned-event-row"
                   >
                     <span
-                      className={`grid size-10 place-items-center rounded-xl ${event.paidTransactionId ? 'bg-accent-soft text-accent' : 'bg-surface-2 text-muted'}`}
+                      className={`grid w-5 shrink-0 place-items-center ${event.paidTransactionId ? 'bg-accent-soft text-accent' : 'bg-surface-2 text-muted'}`}
                     >
                       {event.paidTransactionId ? <CircleCheck size={19} /> : '•'}
                     </span>
@@ -581,47 +570,42 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 <p className="p-6 text-center text-sm text-muted">Nema planiranih događaja.</p>
               ) : null}
             </div>
-          </Card>
+          </section>
 
-          <Card>
-            <p className="text-xs font-bold uppercase tracking-wide text-muted">
-              Štednja i slobodan novac
-            </p>
+          <section className="finance-section">
+            <p className="text-sm font-semibold text-muted">Štednja i slobodan novac</p>
             <div className="mt-4 grid grid-cols-2 gap-3">
-              <div className="rounded-xl bg-surface-2 p-3">
+              <div className="border-b py-3">
                 <p className="text-xs text-muted">Plan doprinosa</p>
                 <p className="money mt-1 font-extrabold">{formatRsd(summary.savings.planned)}</p>
-                <p className="mt-1 text-[0.68rem] text-muted">istorijski plan meseca</p>
+                <p className="mt-1 text-xs text-muted">istorijski plan meseca</p>
               </div>
-              <div className="rounded-xl bg-accent-soft p-3">
+              <div className="border-b py-3">
                 <p className="text-xs text-muted">Prebačeno u štednju</p>
                 <p className="money mt-1 font-extrabold">
                   {formatRsd(actuals.savingsContributions)}
                 </p>
-                <p className="mt-1 text-[0.68rem] text-muted">
-                  {savingsTransfers.length} transfera
-                </p>
+                <p className="mt-1 text-xs text-muted">{savingsTransfers.length} transfera</p>
               </div>
-              <div className="rounded-xl bg-surface-2 p-3">
+              <div className="border-b py-3">
                 <p className="text-xs text-muted">Preostali doprinos</p>
                 <p className="money mt-1 font-extrabold">{formatRsd(summary.savings.remaining)}</p>
-                <p className="mt-1 text-[0.68rem] text-muted">posle target cap-a</p>
+                <p className="mt-1 text-xs text-muted">do mesečnog plana i ciljnog iznosa</p>
               </div>
-              <div className="rounded-xl bg-surface-2 p-3">
+              <div className="border-b py-3">
                 <p className="text-xs text-muted">Slobodan plan</p>
                 <p
                   className={`money mt-1 font-extrabold ${plan.freeCash < 0 ? 'text-danger' : ''}`}
                 >
                   {formatRsd(plan.freeCash)}
                 </p>
-                <p className="mt-1 text-[0.68rem] text-muted">prihod − svi planovi</p>
+                <p className="mt-1 text-xs text-muted">prihod − svi planovi</p>
               </div>
             </div>
-          </Card>
+          </section>
 
-          <Card className="p-0">
+          <section className="finance-section">
             <div className="p-4">
-              <p className="text-xs font-bold uppercase tracking-wide text-muted">Aktivnost</p>
               <h2 className="mt-1 font-bold">Transakcije u mesecu</h2>
             </div>
             <div className="max-h-80 divide-y overflow-y-auto border-t">
@@ -649,7 +633,7 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                 </p>
               ) : null}
             </div>
-          </Card>
+          </section>
         </section>
       </div>
       <Sheet
@@ -736,6 +720,13 @@ export const MonthPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
           </form>
         ) : null}
       </Sheet>
+      <CommitmentPaymentSheet
+        occurrence={payingCommitment}
+        snapshot={snapshot}
+        open={Boolean(payingCommitment)}
+        onOpenChange={(open) => !open && setPayingCommitment(null)}
+        onPaid={() => success('Označeno kao plaćeno.')}
+      />
       <EventPaymentSheet
         event={payingEvent}
         snapshot={snapshot}

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Edit3, Gauge, Plus, Trash2 } from 'lucide-react';
+import { ChevronRight, Gauge, Plus, Trash2 } from 'lucide-react';
 import type { FinanceSnapshot, VariableBudget } from '@/domain/types';
 import { deleteVariableBudget, saveVariableBudget } from '@/db/commands';
 import { createId } from '@/lib/id';
@@ -27,6 +27,7 @@ const newBudget = (categoryId = ''): VariableBudget => ({
 export const BudgetsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const { success } = useToast();
   const [editing, setEditing] = useState<VariableBudget | null>(null);
+  const [details, setDetails] = useState<VariableBudget | null>(null);
   const [deleting, setDeleting] = useState<VariableBudget | null>(null);
   const [overrideMonth, setOverrideMonth] = useState(currentMonthKey());
   const [overrideAmount, setOverrideAmount] = useState(0);
@@ -47,12 +48,8 @@ export const BudgetsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       title="Promenljivi budžeti"
       description="Podrazumevani mesečni plan sa opcionim izuzetkom za konkretan mesec."
       action={
-        <Button
-          size="icon"
-          onClick={() => open(newBudget(categories[0]?.id))}
-          aria-label="Novi budžet"
-        >
-          <Plus />
+        <Button onClick={() => open(newBudget(categories[0]?.id))} aria-label="Novi budžet">
+          <Plus size={18} /> Novi budžet
         </Button>
       }
     >
@@ -64,31 +61,21 @@ export const BudgetsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       {snapshot.variableBudgets.length ? (
         <Card className="divide-y p-0">
           {snapshot.variableBudgets.map((budget) => (
-            <div
+            <button
               key={budget.id}
-              className={`flex items-start gap-3 p-4 ${!budget.active ? 'opacity-55' : ''}`}
+              className={`finance-row px-4 ${!budget.active ? 'opacity-55' : ''}`}
+              onClick={() => setDetails(budget)}
+              aria-label={`Detalji budžeta ${budget.name}`}
             >
-              <span className="grid size-10 place-items-center rounded-xl bg-surface-2 text-muted">
-                <Gauge size={19} />
+              <Gauge size={20} className="shrink-0 text-muted" />
+              <span className="min-w-0 flex-1">
+                <span className="block font-bold">{budget.name}</span>
+                <span className="money mt-1 block text-sm">
+                  {formatRsd(budget.defaultAmount)} mesečno
+                </span>
               </span>
-              <div className="min-w-0 flex-1">
-                <p className="break-words font-bold">{budget.name}</p>
-                <p className="text-xs text-muted">
-                  {Object.keys(budget.overrides).length} mesečnih izmena
-                </p>
-              </div>
-              <p className="money shrink-0 whitespace-nowrap text-sm font-extrabold">
-                {formatRsd(budget.defaultAmount)}
-              </p>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => open(budget)}
-                aria-label={`Izmeni ${budget.name}`}
-              >
-                <Edit3 size={17} />
-              </Button>
-            </div>
+              <ChevronRight size={18} className="shrink-0 text-muted" />
+            </button>
           ))}
         </Card>
       ) : (
@@ -98,6 +85,43 @@ export const BudgetsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
           description="Postavite mesečne okvire za kategorije poput hrane i goriva."
         />
       )}
+      <Sheet
+        open={Boolean(details)}
+        onOpenChange={(value) => !value && setDetails(null)}
+        title={details?.name ?? 'Budžet'}
+        description="Mesečni plan"
+      >
+        {details ? (
+          <div className="grid gap-4">
+            <p className="money text-3xl font-bold">
+              {formatRsd(details.overrides[currentMonthKey()] ?? details.defaultAmount)}
+            </p>
+            <p className="text-sm text-muted">
+              {Object.keys(details.overrides).length} mesečnih izmena ·{' '}
+              {details.active ? 'aktivan' : 'neaktivan'}
+            </p>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                open(details);
+                setDetails(null);
+              }}
+            >
+              Izmeni
+            </Button>
+            <Button
+              variant="ghost"
+              className="text-danger"
+              onClick={() => {
+                setDeleting(details);
+                setDetails(null);
+              }}
+            >
+              Obriši budžet
+            </Button>
+          </div>
+        ) : null}
+      </Sheet>
       <Sheet
         open={Boolean(editing)}
         onOpenChange={(openValue) => !openValue && setEditing(null)}

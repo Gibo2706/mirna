@@ -15,6 +15,9 @@ import { Field, Input, Select, Textarea } from '@/components/ui/Field';
 import { Progress } from '@/components/ui/Progress';
 import { Sheet } from '@/components/ui/Sheet';
 import { SettingsLayout } from '@/components/SettingsLayout';
+import { ProtectedSpendingPreview } from '@/features/transactions/ProtectedSpendingPreview';
+import { getProtectedSpendingImpacts } from '@/features/transactions/protectedSpending';
+import { calculateAccountBalances } from '@/domain/calculations';
 import { useToast } from '@/components/ToastProvider';
 
 const newDebt = (): Debt => ({
@@ -349,7 +352,13 @@ export const DebtsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                     .filter((account) => !account.archived)
                     .map((account) => (
                       <option key={account.id} value={account.id}>
-                        {account.name}
+                        {account.name} ·{' '}
+                        {formatRsd(
+                          calculateAccountBalances(snapshot.accounts, snapshot.transactions)[
+                            account.id
+                          ] ?? 0,
+                        )}
+                        {account.protected ? ' · štednja' : ''}
                       </option>
                     ))}
                 </Select>
@@ -361,6 +370,15 @@ export const DebtsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
             <Field label="Beleška">
               <Textarea value={notes} onChange={(event) => setNotes(event.target.value)} />
             </Field>
+            {paymentSource === 'self' ? (
+              <ProtectedSpendingPreview
+                impacts={getProtectedSpendingImpacts(snapshot, {
+                  type: 'expense',
+                  accountId,
+                  amount,
+                })}
+              />
+            ) : null}
             {error ? (
               <p role="alert" className="rounded-xl bg-danger-soft p-3 text-sm text-danger">
                 {error}

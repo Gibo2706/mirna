@@ -1,6 +1,7 @@
 import { ArrowLeft } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
+import { PageHeader } from './PageHeader';
 
 export const SettingsLayout = ({
   eyebrow = 'Podešavanja',
@@ -22,16 +23,7 @@ export const SettingsLayout = ({
     >
       <ArrowLeft size={18} /> Više
     </Link>
-    <header className="mb-6 flex items-start justify-between gap-3">
-      <div>
-        <p className="text-sm font-semibold text-accent">{eyebrow}</p>
-        <h1 className="mt-1 text-2xl font-extrabold tracking-tight sm:text-3xl">{title}</h1>
-        {description ? (
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">{description}</p>
-        ) : null}
-      </div>
-      {action}
-    </header>
+    <PageHeader eyebrow={eyebrow} title={title} description={description} action={action} />
     {children}
   </main>
 );

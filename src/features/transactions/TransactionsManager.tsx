@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Edit3, ReceiptText, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowDownLeft,
+  ArrowRightLeft,
+  ArrowUpRight,
+  ChevronRight,
+  ReceiptText,
+  Scale,
+  Trash2,
+} from 'lucide-react';
 import type { FinanceSnapshot, LedgerTransaction } from '@/domain/types';
-import { deleteTransaction, saveTransaction } from '@/db/commands';
+import { deleteTransaction, saveTransaction, unlinkCommitmentPayment } from '@/db/commands';
 import { formatDate } from '@/lib/dates';
 import { formatRsd, parseIntegerInput } from '@/lib/format';
 import { Button } from '@/components/ui/Button';
@@ -11,12 +19,19 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Field, Input, Select, Textarea } from '@/components/ui/Field';
 import { Sheet } from '@/components/ui/Sheet';
 import { SettingsLayout } from '@/components/SettingsLayout';
+import { AccountPicker } from './AccountPicker';
+import { ProtectedSpendingPreview } from './ProtectedSpendingPreview';
+import { getProtectedSpendingImpacts, protectedSpendingDescription } from './protectedSpending';
+import { commitmentFundingKey } from '@/domain/payments';
 import { useToast } from '@/components/ToastProvider';
 
 export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const { success } = useToast();
   const [editing, setEditing] = useState<LedgerTransaction | null>(null);
   const [deleting, setDeleting] = useState<LedgerTransaction | null>(null);
+  const [confirmSave, setConfirmSave] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const busy = useRef(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [monthFilter, setMonthFilter] = useState('');
@@ -42,7 +57,36 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
   }, [monthFilter, search, snapshot.transactions]);
   const visibleTransactions = transactions.slice(0, visibleCount);
   useEffect(() => setVisibleCount(100), [monthFilter, search]);
-  const canEdit = editing?.source === 'manual' || editing?.source === 'quick-add';
+  const canEdit = Boolean(
+    editing &&
+    (editing.source === 'manual' || editing.source === 'quick-add') &&
+    !editing.occurrenceKey &&
+    !editing.goalId &&
+    !editing.plannedEventId &&
+    !editing.debtPaymentId &&
+    !editing.plannedIncomeId,
+  );
+  const impacts = editing
+    ? getProtectedSpendingImpacts(snapshot, editing, { replacingId: editing.id })
+    : [];
+  const save = async () => {
+    if (!editing || !canEdit || busy.current) return;
+    busy.current = true;
+    setSaving(true);
+    setError('');
+    try {
+      await saveTransaction(editing);
+      setEditing(null);
+      setConfirmSave(false);
+      success('Transakcija je izmenjena.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Izmena nije sačuvana.');
+      setConfirmSave(false);
+    } finally {
+      busy.current = false;
+      setSaving(false);
+    }
+  };
   const categories = snapshot.categories.filter(
     (category) => !category.archived && category.kind === editing?.type,
   );
@@ -82,13 +126,15 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
                   <span
                     className={`grid size-10 shrink-0 place-items-center rounded-xl ${transaction.type === 'expense' ? 'bg-danger-soft text-danger' : transaction.type === 'income' ? 'bg-accent-soft text-accent' : 'bg-surface-2 text-muted'}`}
                   >
-                    {transaction.type === 'income'
-                      ? '↙'
-                      : transaction.type === 'expense'
-                        ? '↗'
-                        : transaction.type === 'transfer'
-                          ? '↔'
-                          : '≈'}
+                    {transaction.type === 'income' ? (
+                      <ArrowDownLeft size={18} />
+                    ) : transaction.type === 'expense' ? (
+                      <ArrowUpRight size={18} />
+                    ) : transaction.type === 'transfer' ? (
+                      <ArrowRightLeft size={18} />
+                    ) : (
+                      <Scale size={18} />
+                    )}
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="line-clamp-2 break-words text-sm font-bold">
@@ -118,7 +164,7 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
                     }}
                     aria-label={`Detalji ${transaction.description}`}
                   >
-                    <Edit3 size={17} />
+                    <ChevronRight size={17} />
                   </Button>
                 </div>
               );
@@ -144,7 +190,7 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
 
       <Sheet
         open={Boolean(editing)}
-        onOpenChange={(open) => !open && setEditing(null)}
+        onOpenChange={(open) => !open && !busy.current && setEditing(null)}
         title={canEdit ? 'Izmeni transakciju' : 'Detalji transakcije'}
         description={
           !canEdit
@@ -158,15 +204,8 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
             onSubmit={(event) => {
               event.preventDefault();
               if (!canEdit) return;
-              void (async () => {
-                try {
-                  await saveTransaction(editing);
-                  setEditing(null);
-                  success('Transakcija je izmenjena.');
-                } catch (caught) {
-                  setError(caught instanceof Error ? caught.message : 'Izmena nije sačuvana.');
-                }
-              })();
+              if (impacts.length) setConfirmSave(true);
+              else void save();
             }}
           >
             <Field label="Tip">
@@ -199,33 +238,25 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
               />
             </Field>
             <Field label={editing.type === 'transfer' ? 'Sa računa' : 'Račun'}>
-              <Select
+              <AccountPicker
+                snapshot={snapshot}
+                accountIds={snapshot.accounts.map((a) => a.id)}
                 disabled={!canEdit}
                 value={editing.accountId}
-                onChange={(event) => setEditing({ ...editing, accountId: event.target.value })}
-              >
-                {snapshot.accounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.name}
-                  </option>
-                ))}
-              </Select>
+                onChange={(e) => setEditing({ ...editing, accountId: e.target.value })}
+              />
             </Field>
             {editing.type === 'transfer' ? (
               <Field label="Na račun">
-                <Select
+                <AccountPicker
+                  snapshot={snapshot}
+                  accountIds={snapshot.accounts
+                    .filter((a) => a.id !== editing.accountId)
+                    .map((a) => a.id)}
                   disabled={!canEdit}
                   value={editing.toAccountId ?? ''}
-                  onChange={(event) => setEditing({ ...editing, toAccountId: event.target.value })}
-                >
-                  {snapshot.accounts
-                    .filter((account) => account.id !== editing.accountId)
-                    .map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.name}
-                      </option>
-                    ))}
-                </Select>
+                  onChange={(e) => setEditing({ ...editing, toAccountId: e.target.value })}
+                />
               </Field>
             ) : editing.type !== 'adjustment' ? (
               <Field label="Kategorija">
@@ -270,9 +301,49 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
                 {error}
               </p>
             ) : null}
+            <ProtectedSpendingPreview impacts={canEdit ? impacts : []} />
             {canEdit ? (
-              <Button type="submit" size="lg">
+              <Button type="submit" size="lg" disabled={saving}>
                 Sačuvaj izmene
+              </Button>
+            ) : null}
+            {editing.occurrenceKey &&
+            snapshot.transactions.some(
+              (t) => t.occurrenceKey === commitmentFundingKey(editing.occurrenceKey!),
+            ) ? (
+              <p className="text-sm text-muted">
+                Ovo plaćanje je povezano sa prenosom iz štednje. Brisanjem se zajedno poništavaju
+                plaćanje i prenos; odvajanje nije dostupno.
+              </p>
+            ) : null}
+            {editing.source === 'commitment' && editing.occurrenceKey ? (
+              <Button
+                variant="outline"
+                disabled={
+                  saving ||
+                  snapshot.transactions.some(
+                    (t) => t.occurrenceKey === commitmentFundingKey(editing.occurrenceKey!),
+                  )
+                }
+                onClick={() => {
+                  if (busy.current) return;
+                  busy.current = true;
+                  setSaving(true);
+                  void unlinkCommitmentPayment(editing.id)
+                    .then(() => {
+                      setEditing(null);
+                      success('Veza je uklonjena. Trošak ostaje sačuvan.');
+                    })
+                    .catch((e: unknown) =>
+                      setError(e instanceof Error ? e.message : 'Veza nije uklonjena.'),
+                    )
+                    .finally(() => {
+                      busy.current = false;
+                      setSaving(false);
+                    });
+                }}
+              >
+                Odvoji od obaveze
               </Button>
             ) : null}
             <Button
@@ -290,6 +361,16 @@ export const TransactionsManager = ({ snapshot }: { snapshot: FinanceSnapshot })
         ) : null}
       </Sheet>
 
+      <ConfirmDialog
+        open={confirmSave}
+        onOpenChange={setConfirmSave}
+        title="Potvrdi korišćenje štednje"
+        description={protectedSpendingDescription(impacts)}
+        confirmLabel="Potvrdi i sačuvaj"
+        onConfirm={save}
+        pending={saving}
+        closeOnConfirm={false}
+      />
       <ConfirmDialog
         open={Boolean(deleting)}
         onOpenChange={(open) => !open && setDeleting(null)}

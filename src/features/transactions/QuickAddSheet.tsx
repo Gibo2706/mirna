@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownLeft, ArrowRightLeft, ArrowUpRight, Check, WalletCards } from 'lucide-react';
 import type { FinanceSnapshot, QuickAddPreset, TransactionType } from '@/domain/types';
+import { calculateAccountBalances } from '@/domain/calculations';
+import { getProtectedSpendingImpacts, protectedSpendingDescription } from './protectedSpending';
 import { saveTransaction } from '@/db/commands';
 import { createId } from '@/lib/id';
 import { formatDate, todayIso } from '@/lib/dates';
@@ -37,6 +39,13 @@ export const QuickAddSheet = ({
   const [error, setError] = useState('');
   const savingRef = useRef(false);
 
+  const balances = useMemo(
+    () => calculateAccountBalances(snapshot.accounts, snapshot.transactions),
+    [snapshot.accounts, snapshot.transactions],
+  );
+  const savingsImpact = protectedSpendingDescription(
+    getProtectedSpendingImpacts(snapshot, { type, accountId, toAccountId, amount }),
+  );
   const accounts = snapshot.accounts.filter((account) => !account.archived);
   const categories = snapshot.categories.filter(
     (category) => !category.archived && category.kind === type,
@@ -163,7 +172,7 @@ export const QuickAddSheet = ({
                 {presets.map((item) => (
                   <button
                     key={item.id}
-                    className="min-h-28 rounded-2xl border bg-surface p-4 text-left transition hover:border-accent active:scale-[0.98]"
+                    className="min-h-16 rounded-xl border-b bg-surface p-3 text-left transition hover:border-accent active:scale-[0.98]"
                     onClick={() => choosePreset(item)}
                   >
                     <span className="text-2xl">{item.emoji}</span>
@@ -236,7 +245,8 @@ export const QuickAddSheet = ({
                 <option value="">Izaberite račun</option>
                 {accounts.map((account) => (
                   <option key={account.id} value={account.id}>
-                    {account.name}
+                    {account.name} · {formatRsd(balances[account.id] ?? 0)}
+                    {account.protected ? ' · štednja' : ''}
                   </option>
                 ))}
               </Select>
@@ -253,7 +263,8 @@ export const QuickAddSheet = ({
                       .filter((account) => account.id !== accountId)
                       .map((account) => (
                         <option key={account.id} value={account.id}>
-                          {account.name}
+                          {account.name} · {formatRsd(balances[account.id] ?? 0)}
+                          {account.protected ? ' · štednja' : ''}
                         </option>
                       ))}
                   </Select>
@@ -298,15 +309,17 @@ export const QuickAddSheet = ({
                 {error}
               </p>
             ) : null}
-            <Button type="submit" size="lg" className="mt-1 w-full" disabled={!valid || saving}>
-              {saving ? (
-                'Čuvam…'
-              ) : (
-                <>
-                  <Check size={19} /> Sačuvaj {amount > 0 ? formatRsd(amount) : ''}
-                </>
-              )}
-            </Button>
+            <div className="sheet-actions">
+              <Button type="submit" size="lg" className="mt-1 w-full" disabled={!valid || saving}>
+                {saving ? (
+                  'Čuvam…'
+                ) : (
+                  <>
+                    <Check size={19} /> Sačuvaj {amount > 0 ? formatRsd(amount) : ''}
+                  </>
+                )}
+              </Button>
+            </div>
             <Button type="button" variant="ghost" onClick={() => setPreset(null)}>
               <WalletCards size={18} /> Nazad na presete
             </Button>
@@ -319,7 +332,7 @@ export const QuickAddSheet = ({
           if (!savingRef.current) setConfirmOpen(nextOpen);
         }}
         title={`Potvrditi ${transactionLabel}?`}
-        description={confirmationDescription}
+        description={[confirmationDescription, savingsImpact].filter(Boolean).join(' ')}
         confirmLabel="Potvrdi i sačuvaj"
         onConfirm={saveConfirmedTransaction}
         pending={saving}

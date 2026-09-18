@@ -1,5 +1,5 @@
 import {
-  ArrowRight,
+  ChevronRight,
   CalendarClock,
   BanknoteArrowDown,
   CircleDollarSign,
@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router';
 import type { FinanceSnapshot } from '@/domain/types';
-import { Card } from '@/components/ui/Card';
 import { PageHeader } from '@/components/PageHeader';
 
 const Row = ({
@@ -33,13 +32,13 @@ const Row = ({
   label: string;
   detail?: string;
 }) => (
-  <Link to={to} className="flex min-h-16 items-center gap-3 px-4 transition hover:bg-surface-2">
-    <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-surface-2 text-muted">
+  <Link to={to} className="flex min-h-16 items-center gap-3 px-1 transition hover:bg-surface-2">
+    <span className="grid w-6 shrink-0 place-items-center text-muted">
       <Icon size={19} />
     </span>
-    <span className="flex-1 font-semibold">{label}</span>
+    <span className="min-w-0 flex-1 font-semibold">{label}</span>
     {detail ? <span className="text-xs text-muted">{detail}</span> : null}
-    <ArrowRight size={17} className="text-muted" />
+    <ChevronRight size={17} className="text-muted" />
   </Link>
 );
 
@@ -65,7 +64,7 @@ export const MorePage = ({
     <div className="grid gap-5 lg:grid-cols-2">
       <section>
         <h2 className="mb-2 px-1 text-sm font-bold text-muted">Novac</h2>
-        <Card className="divide-y p-0">
+        <div className="divide-y border-y">
           <Row
             to="/more/income"
             icon={BanknoteArrowDown}
@@ -116,12 +115,12 @@ export const MorePage = ({
               snapshot.plannedEvents.filter((value) => !value.paidTransactionId).length,
             )}
           />
-        </Card>
+        </div>
       </section>
       <div className="grid content-start gap-5">
         <section>
           <h2 className="mb-2 px-1 text-sm font-bold text-muted">Brzi unos i prognoza</h2>
-          <Card className="divide-y p-0">
+          <div className="divide-y border-y">
             <Row
               to="/more/presets"
               icon={ListChecks}
@@ -134,11 +133,11 @@ export const MorePage = ({
               label="Scenariji plate"
               detail={String(snapshot.salaryScenarios.length)}
             />
-          </Card>
+          </div>
         </section>
         <section>
           <h2 className="mb-2 px-1 text-sm font-bold text-muted">Podaci i alati</h2>
-          <Card className="divide-y p-0">
+          <div className="divide-y border-y">
             {syncEnabled ? (
               <Row to="/more/sync" icon={CloudCog} label="Sinhronizacija" detail="E2EE" />
             ) : null}
@@ -154,11 +153,11 @@ export const MorePage = ({
               label="AI pomoć za plan"
               detail="Lokalni prenos"
             />
-          </Card>
+          </div>
         </section>
         <section>
           <h2 className="mb-2 px-1 text-sm font-bold text-muted">Aplikacija</h2>
-          <Card className="divide-y p-0">
+          <div className="divide-y border-y">
             <Row
               to="/more/appearance"
               icon={MoonStar}
@@ -173,7 +172,7 @@ export const MorePage = ({
             />
             <Row to="/more/help" icon={HelpCircle} label="Pomoć i vodič" />
             <Row to="/more/about" icon={Info} label="O aplikaciji" />
-          </Card>
+          </div>
         </section>
       </div>
     </div>

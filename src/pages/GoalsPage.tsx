@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { addMonths, format, parseISO } from 'date-fns';
-import { Edit3, Plus, Target, Trash2, TrendingUp } from 'lucide-react';
+import { ChevronRight, Plus, Target, Trash2 } from 'lucide-react';
 import type { FinanceSnapshot, SavingsGoal } from '@/domain/types';
 import {
   calculateAccountBalances,
@@ -12,13 +12,14 @@ import { createId } from '@/lib/id';
 import { currentMonthKey, formatDate, formatMonth, todayIso } from '@/lib/dates';
 import { formatRsd, parseIntegerInput } from '@/lib/format';
 import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Field, Input, Select, Textarea } from '@/components/ui/Field';
 import { Progress } from '@/components/ui/Progress';
 import { Sheet } from '@/components/ui/Sheet';
 import { PageHeader } from '@/components/PageHeader';
+import { SavingsWithdrawalSheet } from '@/features/goals/SavingsWithdrawalSheet';
+import { getGoalActivity } from '@/domain/goalActivity';
 import { useToast } from '@/components/ToastProvider';
 
 const emptyGoal = (accountId = ''): SavingsGoal => ({
@@ -38,6 +39,8 @@ export const GoalsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
   const { success } = useToast();
   const [editing, setEditing] = useState<SavingsGoal | null>(null);
   const [contributing, setContributing] = useState<SavingsGoal | null>(null);
+  const [details, setDetails] = useState<SavingsGoal | null>(null);
+  const [withdrawing, setWithdrawing] = useState<SavingsGoal | null>(null);
   const [deleting, setDeleting] = useState<SavingsGoal | null>(null);
   const [fromAccountId, setFromAccountId] = useState(
     snapshot.settingsRecord.defaultAccountId ?? '',
@@ -113,10 +116,9 @@ export const GoalsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       <PageHeader
         eyebrow="Štednja"
         title="Ciljevi"
-        description="Svaka uplata je transfer na namenski račun, nikada prikriveni trošak."
+        description="Odvojite za važne stvari. Koristite kada zatreba."
         action={
           <Button
-            size="icon"
             onClick={() =>
               setEditing(
                 emptyGoal(
@@ -128,134 +130,91 @@ export const GoalsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
             }
             aria-label="Novi cilj"
           >
-            <Plus />
+            <Plus size={18} /> Novi cilj
           </Button>
         }
       />
 
-      <Card className="mb-5 overflow-hidden rounded-hero border-0 bg-[#17251f] p-5 text-white">
-        <p className="text-sm font-semibold text-white/65">Ukupno u namenskoj štednji</p>
-        <p className="money mt-2 text-4xl font-extrabold tracking-[-0.05em]">
-          {formatRsd(totalSaved)}
-        </p>
-        <p className="mt-2 text-sm text-white/60">
-          {goals.length} cilja · zaštićeno od bezbednog trošenja
-        </p>
-      </Card>
-
+      <section className="mb-7 border-b pb-6">
+        <p className="text-sm text-muted">Ukupno u namenskoj štednji</p>
+        <p className="money mt-1 text-4xl font-bold tracking-tight">{formatRsd(totalSaved)}</p>
+        <p className="mt-2 text-sm text-muted">Odvojeno od novca za svakodnevno trošenje.</p>
+      </section>
       {goals.length ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-x-8 lg:grid-cols-2">
           {goals.map((goal) => {
             const progress = calculateGoalProgress(
               goal,
               balances[goal.linkedAccountId] ?? 0,
               new Date(),
             );
-            const account = snapshot.accounts.find((value) => value.id === goal.linkedAccountId);
-            const currentMonth = currentMonthKey();
             const contribution = getEffectiveGoalContribution({
               goal,
-              month: currentMonth,
-              transactions: snapshot.transactions,
+              month: currentMonthKey(),
               accounts: snapshot.accounts,
+              transactions: snapshot.transactions,
               currentGoalBalance: balances[goal.linkedAccountId] ?? 0,
             });
             return (
-              <Card key={goal.id} className="relative p-5">
-                <div className="flex items-start gap-3">
-                  <span className="grid size-12 place-items-center rounded-2xl bg-accent-soft text-2xl">
-                    {goal.emoji}
-                  </span>
+              <article key={goal.id} data-testid="goal-row" className="border-b pb-6 pt-4">
+                <button
+                  className="finance-row pt-0"
+                  onClick={() => setDetails(goal)}
+                  aria-label={`Detalji cilja ${goal.name}`}
+                >
+                  <Target size={22} className="shrink-0 text-accent" />
                   <div className="min-w-0 flex-1">
-                    <h2 className="text-lg font-extrabold">{goal.name}</h2>
-                    <p className="truncate text-xs text-muted">
-                      {account?.name ?? 'Nepovezan račun'} ·{' '}
-                      {goal.goalType === 'sinking' ? 'namenski cilj' : 'rezervni fond'}
-                    </p>
-                  </div>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => setEditing(goal)}
-                    aria-label={`Izmeni ${goal.name}`}
-                  >
-                    <Edit3 size={18} />
-                  </Button>
-                </div>
-                {progress.lifecycle === 'used' ? (
-                  <div className="mt-5 rounded-xl bg-accent-soft p-4">
-                    <p className="text-lg font-extrabold text-accent">Iskorišćeno</p>
+                    <h2 className="text-xl font-bold">{goal.name}</h2>
                     <p className="mt-1 text-xs text-muted">
-                      Namena je završena. Istorijski cilj: {formatRsd(goal.targetAmount)}
-                      {goal.usedAt ? ` · ${formatDate(goal.usedAt)}` : ''}
+                      {goal.goalType === 'reserve' ? 'Rezervni fond' : 'Namenski cilj'}
                     </p>
                   </div>
-                ) : (
-                  <>
-                    <div className="mt-5 flex items-end justify-between">
-                      <div>
-                        <p className="money text-xl font-extrabold">
-                          {formatRsd(progress.current)}
-                        </p>
-                        <p className="mt-1 text-xs text-muted">od {formatRsd(goal.targetAmount)}</p>
-                      </div>
-                      <p className="text-lg font-extrabold text-accent">{progress.percentage}%</p>
-                    </div>
-                    <Progress className="mt-3 h-2.5" value={progress.percentage} />
-                  </>
-                )}
-                <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                  <div className="rounded-xl bg-surface-2 p-3">
-                    <p className="text-xs text-muted">
-                      {progress.lifecycle === 'used' ? 'Status' : 'Preostalo'}
-                    </p>
-                    <p className="money mt-1 font-bold">
-                      {progress.lifecycle === 'used'
-                        ? 'Iskorišćeno'
-                        : formatRsd(progress.remaining)}
-                    </p>
-                  </div>
-                  <div className="rounded-xl bg-surface-2 p-3">
-                    <p className="text-xs text-muted">Rok</p>
-                    <p className="mt-1 font-bold">
-                      {goal.targetDate ? formatDate(goal.targetDate) : 'Bez roka'}
-                    </p>
-                  </div>
-                </div>
+                  <ChevronRight size={18} className="shrink-0 text-muted" />
+                </button>
+                <p className="money text-2xl font-bold">
+                  {formatRsd(progress.current)}{' '}
+                  <span className="text-sm font-normal text-muted">
+                    / {formatRsd(goal.targetAmount)}
+                  </span>
+                </p>
+                <Progress className="my-3 h-1.5" value={progress.percentage} />
+                <p className="text-sm text-muted">
+                  {progress.lifecycle === 'used'
+                    ? 'Iskorišćeno · namena je završena'
+                    : `Preostalo ${formatRsd(progress.remaining)}`}
+                </p>
+                <p className="mt-2 text-xs text-muted">
+                  Ovog meseca uplaćeno{' '}
+                  <strong className="text-foreground">
+                    {formatRsd(contribution.actualContribution)}
+                  </strong>{' '}
+                  · još {formatRsd(contribution.effectiveRemainingContribution)}
+                </p>
                 {progress.lifecycle !== 'used' ? (
-                  <div className="mt-3 rounded-xl bg-surface-2 p-3 text-sm">
-                    <p className="text-xs text-muted">Plan doprinosa ovog meseca</p>
-                    <div className="mt-1 flex flex-wrap justify-between gap-2">
-                      <span>Plan {formatRsd(contribution.configuredPlan)}</span>
-                      <span>Stvarno {formatRsd(contribution.actualContribution)}</span>
-                      <strong>
-                        Preostalo {formatRsd(contribution.effectiveRemainingContribution)}
-                      </strong>
-                    </div>
+                  <div className="mt-4 grid gap-2 min-[390px]:grid-cols-2">
+                    <Button
+                      onClick={() => openContribution(goal)}
+                      disabled={progress.remaining === 0}
+                    >
+                      Prebaci u štednju
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => setWithdrawing(goal)}
+                      disabled={progress.current <= 0}
+                    >
+                      Iskoristi sredstva
+                    </Button>
                   </div>
                 ) : null}
-                {progress.recommendedMonthlyContribution ? (
-                  <div className="mt-3 flex items-start gap-2 rounded-xl bg-accent-soft p-3 text-sm">
-                    <TrendingUp size={17} className="mt-0.5 shrink-0 text-accent" />
-                    <p>
-                      Potrebno još približno{' '}
-                      <strong>{formatRsd(progress.recommendedMonthlyContribution)} mesečno</strong>{' '}
-                      da bi cilj bio dostignut na vreme.
-                    </p>
-                  </div>
-                ) : null}
-                {goal.targetDate && goal.targetDate < todayIso() && progress.targetShortfall > 0 ? (
-                  <p className="mt-3 rounded-xl bg-warning-soft p-3 text-sm text-warning">
-                    Rok je prošao. Manjak cilja je {formatRsd(progress.targetShortfall)}; plan nije
-                    automatski povećan.
+                {progress.current <= 0 ? (
+                  <p className="mt-2 text-xs text-muted">
+                    Sredstva možete koristiti nakon prve uplate.
                   </p>
+                ) : progress.remaining === 0 ? (
+                  <p className="mt-2 text-xs text-muted">Cilj je popunjen.</p>
                 ) : null}
-                {progress.lifecycle !== 'used' ? (
-                  <Button className="mt-4 w-full" onClick={() => openContribution(goal)}>
-                    Prebaci u štednju
-                  </Button>
-                ) : null}
-              </Card>
+              </article>
             );
           })}
         </div>
@@ -271,6 +230,117 @@ export const GoalsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
           }
         />
       )}
+      <Sheet
+        open={Boolean(details)}
+        onOpenChange={(open) => !open && setDetails(null)}
+        title={details?.name ?? 'Detalji cilja'}
+        description="Plan i istorija štednje"
+      >
+        {details ? (
+          <div className="grid gap-5">
+            <dl className="divide-y text-sm">
+              {[
+                ['Cilj', formatRsd(details.targetAmount)],
+                ['Sačuvano', formatRsd(balances[details.linkedAccountId] ?? 0)],
+                ['Rok', details.targetDate ? formatDate(details.targetDate) : 'Bez roka'],
+                [
+                  'Mesečni plan',
+                  formatRsd(
+                    getEffectiveGoalContribution({
+                      goal: details,
+                      month: currentMonthKey(),
+                      accounts: snapshot.accounts,
+                      transactions: snapshot.transactions,
+                      currentGoalBalance: balances[details.linkedAccountId] ?? 0,
+                    }).configuredPlan,
+                  ),
+                ],
+                [
+                  'Preporučena mesečna uplata',
+                  formatRsd(
+                    calculateGoalProgress(
+                      details,
+                      balances[details.linkedAccountId] ?? 0,
+                      new Date(),
+                    ).recommendedMonthlyContribution ?? 0,
+                  ),
+                ],
+              ].map(([label, value]) => (
+                <div key={label} className="flex flex-wrap justify-between gap-3 py-3">
+                  <dt className="text-muted">{label}</dt>
+                  <dd className="money font-semibold">{value}</dd>
+                </div>
+              ))}
+            </dl>
+            {details.targetDate &&
+            details.targetDate < todayIso() &&
+            (balances[details.linkedAccountId] ?? 0) < details.targetAmount ? (
+              <p className="text-sm text-warning">
+                Rok je prošao. Do cilja nedostaje{' '}
+                {formatRsd(details.targetAmount - (balances[details.linkedAccountId] ?? 0))}.
+              </p>
+            ) : null}
+            {details.notes ? <p className="text-sm text-muted">{details.notes}</p> : null}
+            <section>
+              <h3 className="font-bold">Aktivnost</h3>
+              <ul className="mt-2 divide-y">
+                {getGoalActivity(details, snapshot.accounts, snapshot.transactions).map(
+                  ({ transaction, kind, amount }) => (
+                    <li key={transaction.id} className="flex gap-3 py-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold">
+                          {kind === 'contribution'
+                            ? 'Uplata u štednju'
+                            : kind === 'withdrawal'
+                              ? 'Iskorišćena sredstva'
+                              : transaction.description}
+                        </p>
+                        <p className="mt-1 text-xs text-muted">
+                          {formatDate(transaction.date)}
+                          {transaction.notes ? ` · ${transaction.notes}` : ''}
+                        </p>
+                      </div>
+                      <span className="money shrink-0 text-sm font-semibold">
+                        {amount > 0 ? '+' : '−'}
+                        {formatRsd(Math.abs(amount))}
+                      </span>
+                    </li>
+                  ),
+                )}
+              </ul>
+              {getGoalActivity(details, snapshot.accounts, snapshot.transactions).length === 0 ? (
+                <p className="py-4 text-sm text-muted">
+                  Ovde će se pojaviti uplate i korišćenje štednje.
+                </p>
+              ) : null}
+            </section>
+            <div className="sheet-actions">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setEditing(details);
+                  setDetails(null);
+                  setError('');
+                }}
+              >
+                Izmeni cilj
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </Sheet>
+      {withdrawing ? (
+        <SavingsWithdrawalSheet
+          key={withdrawing.id}
+          goal={withdrawing}
+          snapshot={snapshot}
+          onClose={() => setWithdrawing(null)}
+          onSaved={() => {
+            setWithdrawing(null);
+            success('Novac je prebačen na raspoloživi račun. Ciljni iznos ostaje isti.');
+          }}
+        />
+      ) : null}
 
       <Sheet
         open={Boolean(editing)}
@@ -452,7 +522,7 @@ export const GoalsPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
 
       <Sheet
         open={Boolean(contributing)}
-        onOpenChange={(open) => !open && setContributing(null)}
+        onOpenChange={(open) => !open && !contributionSavingRef.current && setContributing(null)}
         title={`Prebaci za ${contributing?.name ?? 'cilj'}`}
         description="Ovo je transfer između vaših računa i ne povećava troškove."
       >

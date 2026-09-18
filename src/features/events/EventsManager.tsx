@@ -61,13 +61,12 @@ export const EventsManager = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       description="Jednokratni troškovi koji dolaze. Status i radnje su odvojeni da plan ostane jasan."
       action={
         <Button
-          size="icon"
           onClick={() =>
             setEditing(newEvent(snapshot.settingsRecord.defaultAccountId, categories[0]?.id))
           }
           aria-label="Novi planirani događaj"
         >
-          <Plus />
+          <Plus size={18} /> Novi događaj
         </Button>
       }
     >

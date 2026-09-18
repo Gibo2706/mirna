@@ -18,7 +18,6 @@ import { currentMonthKey, formatMonth } from '@/lib/dates';
 import { formatCompactRsd, formatRsd } from '@/lib/format';
 import { useCurrentDate } from '@/lib/useCurrentDate';
 import { saveSalaryScenario, updateSettings } from '@/db/commands';
-import { Card } from '@/components/ui/Card';
 import { Field, Input, Select } from '@/components/ui/Field';
 import { PageHeader } from '@/components/PageHeader';
 
@@ -106,9 +105,9 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
         <PageHeader
           eyebrow="Narednih 12 meseci"
           title="Prognoza"
-          description="Deterministički pregled onoga što sledi po trenutnom planu."
+          description="Šta vas čeka u narednih 12 meseci po trenutnom planu."
         />
-        <Card className="border-dashed py-10 text-center">
+        <section className="border-dashed py-10 text-center">
           <CalendarRange className="mx-auto text-muted" size={28} />
           <h2 className="mt-4 text-lg font-bold">Prognoza još nema dovoljno plana</h2>
           <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted">
@@ -121,7 +120,7 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
           >
             Postavi plan
           </Link>
-        </Card>
+        </section>
       </main>
     );
   }
@@ -131,10 +130,10 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
       <PageHeader
         eyebrow="Narednih 12 meseci"
         title="Prognoza"
-        description="Deterministički pregled planiranog cash-flow-a, bez promene istorijskih podataka."
+        description="Kako se raspoloživi novac menja kroz narednih 12 meseci."
       />
 
-      <Card className="mb-5 grid gap-4 sm:grid-cols-2">
+      <section className="finance-section mb-5 grid gap-4 sm:grid-cols-2">
         <Field label="Scenario plate">
           <Select value={scenarioId} onChange={(event) => void selectScenario(event.target.value)}>
             <option value="">Osnovni plan — bez scenarija</option>
@@ -153,32 +152,30 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
             onChange={(event) => void updateScenarioStart(event.target.value)}
           />
         </Field>
-        <div className="flex items-start gap-2 rounded-xl bg-accent-soft p-3 text-sm sm:col-span-2">
+        <div className="flex items-start gap-2 border-t pt-3 text-sm sm:col-span-2">
           <Info size={17} className="mt-0.5 shrink-0 text-accent" />
           <p>
             Scenario utiče samo na prognozu. Mesečni plan i stvarne transakcije ostaju nepromenjeni.
           </p>
         </div>
-      </Card>
+      </section>
       {error ? (
         <p role="alert" className="mb-5 rounded-xl bg-danger-soft p-3 text-sm text-danger">
           {error}
         </p>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Card
+      <div className="grid gap-5 border-y py-5 sm:grid-cols-2">
+        <section
           className={
             tightestIsCashDeficit
-              ? 'bg-danger-soft'
+              ? 'p-3 text-danger'
               : tightestHasPlanDeficit
-                ? 'bg-warning-soft'
+                ? 'p-3 text-warning'
                 : ''
           }
         >
-          <p className="text-xs font-bold uppercase tracking-wide text-muted">
-            Najslabiji mesečni saldo
-          </p>
+          <p className="text-xs font-bold  text-muted">Najslabiji mesečni saldo</p>
           <div className="mt-2 flex items-center gap-2">
             {tightestHasPlanDeficit ? (
               <AlertTriangle className={tightestIsCashDeficit ? 'text-danger' : 'text-warning'} />
@@ -194,11 +191,9 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
               </p>
             </div>
           </div>
-        </Card>
-        <Card>
-          <p className="text-xs font-bold uppercase tracking-wide text-muted">
-            Najniže raspoloživo stanje
-          </p>
+        </section>
+        <section>
+          <p className="text-xs font-bold  text-muted">Najniže raspoloživo stanje</p>
           <div className="mt-2 flex items-center gap-2">
             <CalendarRange className="text-accent" />
             <div>
@@ -212,10 +207,10 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
               </p>
             </div>
           </div>
-        </Card>
+        </section>
       </div>
 
-      <Card className="mt-5">
+      <section className="mt-5">
         <div>
           <h2 className="font-bold">Prilivi, planirani odlivi i stanje</h2>
           <p className="mt-1 text-xs text-muted">
@@ -271,11 +266,11 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
             </ComposedChart>
           </ResponsiveContainer>
         </div>
-      </Card>
+      </section>
 
       <section className="mt-5">
         <h2 className="mb-3 text-lg font-bold">Mesec po mesec</h2>
-        <Card className="divide-y p-0">
+        <section className="divide-y p-0">
           {forecast.map((item) => {
             const isExpanded = expanded === item.month;
             const shortfallTotal = Object.values(item.goalShortfalls).reduce(
@@ -305,7 +300,13 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                     >
                       {formatRsd(item.projectedSpendableBalance)}
                     </p>
-                    <p className="text-[0.68rem] text-muted">na kraju meseca</p>
+                    <p className="text-xs text-muted">
+                      {item.status === 'negative'
+                        ? 'Nedostaje novac'
+                        : item.status === 'tight'
+                          ? 'Malo prostora'
+                          : 'na kraju meseca'}
+                    </p>
                   </div>
                   <ChevronDown
                     size={18}
@@ -313,7 +314,7 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
                   />
                 </div>
                 {isExpanded ? (
-                  <div className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-surface-2 p-3 text-xs sm:grid-cols-4">
+                  <div className="mt-4 grid grid-cols-2 gap-2 border-b py-3 text-xs sm:grid-cols-4">
                     {[
                       ['Prihod meseca', item.totalMonthIncome],
                       ['Fiksno', item.fixedCommitments],
@@ -360,7 +361,7 @@ export const ForecastPage = ({ snapshot }: { snapshot: FinanceSnapshot }) => {
               </button>
             );
           })}
-        </Card>
+        </section>
       </section>
     </main>
   );
