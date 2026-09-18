@@ -416,7 +416,8 @@ const editBudgetAmount = async (page: Page, name: string, amount: string): Promi
   if (new URL(page.url()).pathname !== '/more/budgets') {
     await page.goto(`${ENABLED_APP_ORIGIN}/more/budgets`);
   }
-  await page.getByRole('button', { name: `Izmeni ${name}` }).click();
+  await page.getByRole('button', { name: `Detalji budžeta ${name}` }).click();
+  await page.getByRole('button', { name: 'Izmeni', exact: true }).click();
   await page.getByLabel('Podrazumevani mesečni iznos').fill(amount);
   await page.getByRole('button', { name: 'Sačuvaj budžet' }).click();
   await expect(page.getByText('Budžet je sačuvan.')).toBeVisible();

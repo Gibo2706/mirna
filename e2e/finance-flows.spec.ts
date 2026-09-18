@@ -758,8 +758,8 @@ test('goal-funded spending and self/external debt payments preserve cash semanti
 
   await navigate(page, 'Ciljevi');
   const trainingGoal = page
-    .getByRole('heading', { name: 'Stručna radionica', exact: true })
-    .locator('xpath=ancestor::div[contains(@class,"rounded-card")][1]');
+    .getByTestId('goal-row')
+    .filter({ has: page.getByRole('heading', { name: 'Stručna radionica', exact: true }) });
   await trainingGoal.getByRole('button', { name: 'Prebaci u štednju' }).click();
   await page.getByLabel('Iznos (RSD)').fill('96000');
   await page.getByRole('button', { name: /Prebaci 96.000 RSD/ }).click();
@@ -805,8 +805,8 @@ test('protected event top-up is atomic, idempotent, and preserves historical goa
 
   await navigate(page, 'Ciljevi');
   const relocationCard = page
-    .getByRole('heading', { name: 'Preseljenje', exact: true })
-    .locator('xpath=ancestor::div[contains(@class,"rounded-card")][1]');
+    .getByTestId('goal-row')
+    .filter({ has: page.getByRole('heading', { name: 'Preseljenje', exact: true }) });
   await relocationCard.getByRole('button', { name: 'Prebaci u štednju' }).click();
   await page.getByLabel('Iznos (RSD)').fill('240000');
   await page.getByRole('button', { name: /Prebaci 240.000 RSD/ }).click();
@@ -910,8 +910,8 @@ test('protected event top-up is atomic, idempotent, and preserves historical goa
   await navigate(page, 'Ciljevi');
   await expect(
     page
-      .getByRole('heading', { name: 'Preseljenje', exact: true })
-      .locator('xpath=ancestor::div[contains(@class,"rounded-card")][1]'),
+      .getByTestId('goal-row')
+      .filter({ has: page.getByRole('heading', { name: 'Preseljenje', exact: true }) }),
   ).toContainText('Iskorišćeno');
 
   await navigate(page, 'Mesec');
@@ -948,7 +948,8 @@ test('retroactive salary keeps the July occurrence linked and books actual cash 
 
   await page.getByLabel('Izaberi mesec').fill('2032-08');
   const incomeCard = page.getByText('Prihod', { exact: true }).first().locator('xpath=..');
-  await expect(incomeCard).toContainText('187.000 RSD');
+  await expect(incomeCard).toContainText('187.000');
+  await expect(page.getByText('Svi iznosi su u RSD.', { exact: false })).toBeVisible();
 });
 
 test('midnight rollover refreshes the current month and calculations without reload', async ({
@@ -1017,8 +1018,8 @@ test('seed, daily expense, goal transfer and paid commitment preserve finance in
 
   await navigate(page, 'Ciljevi');
   const relocationCard = page
-    .getByRole('heading', { name: 'Preseljenje', exact: true })
-    .locator('xpath=ancestor::div[contains(@class,"rounded-card")][1]');
+    .getByTestId('goal-row')
+    .filter({ has: page.getByRole('heading', { name: 'Preseljenje', exact: true }) });
   await relocationCard.getByRole('button', { name: 'Prebaci u štednju' }).click();
   await page.getByLabel('Iznos (RSD)').fill('42000');
   await page.getByRole('button', { name: /Prebaci 42.000 RSD/ }).click();
@@ -1027,6 +1028,7 @@ test('seed, daily expense, goal transfer and paid commitment preserve finance in
 
   await navigate(page, 'Početna');
   await page.getByRole('button', { name: 'Označi kao plaćeno: Rata za laptop' }).click();
+  await page.getByRole('button', { name: 'Potvrdi plaćanje', exact: true }).click();
   await expect(page.getByText('Označeno kao plaćeno.')).toBeVisible();
 
   await navigate(page, 'Više');
