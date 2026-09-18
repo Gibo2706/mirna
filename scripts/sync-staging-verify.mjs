@@ -65,11 +65,14 @@ const runWrangler = (args) => {
   }
 };
 
-const { health, healthHttpStatus } = await waitForExpectedWorkerBuild({
+const healthSnapshot = await waitForExpectedWorkerBuild({
   expectedBuild,
-  readHealth: () => fetchWorkerHealthSnapshot({ workerUrl: WORKER_URL }),
+  readHealth: () =>
+    fetchWorkerHealthSnapshot({ workerUrl: WORKER_URL, productionOrigin: PRODUCTION_ORIGIN }),
   log: (message) => process.stdout.write(`${message}\n`),
 });
+
+const { health, healthHttpStatus } = healthSnapshot;
 
 const sql = `
 SELECT name FROM mirna_d1_migrations ORDER BY id;
@@ -132,7 +135,16 @@ const objectCount = parseCloudflareCount(r2.object_count ?? r2.objectCount, 'R2 
 const parsedBucketSize = parseCloudflareBucketBytes(r2.bucket_size ?? r2.bucketSize ?? r2.size);
 const bucketBytes = parsedBucketSize.bytes;
 
-await verifyProductionCors({ workerUrl: WORKER_URL, productionOrigin: PRODUCTION_ORIGIN });
+const cors = await verifyProductionCors({
+  workerUrl: WORKER_URL,
+  productionOrigin: PRODUCTION_ORIGIN,
+  healthSnapshot,
+});
+if (cors.readiness === 'SERVICE_DEGRADED') {
+  process.stderr.write(
+    'SERVICE_DEGRADED: HTTP 503; production CORS passed, full readiness must pass separately.\n',
+  );
+}
 
 const expectedMigrations = readdirSync('services/sync-worker/migrations')
   .filter((name) => /^\d{4}_[a-z0-9_]+\.sql$/u.test(name))

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { verifyStagingSnapshot } from './sync-staging-contract.mjs';
 import {
   fetchWorkerHealthSnapshot,
   verifyProductionCors,
@@ -56,7 +57,7 @@ describe('Worker deployment convergence', () => {
       now: clock.now,
     });
 
-    expect(result).toMatchObject({ attempts: 3, elapsedMs: 4_000 });
+    expect(result).toMatchObject({ attempts: 3, elapsedMs: 20_000 });
     expect(clock.sleep).toHaveBeenCalledTimes(2);
   });
 
@@ -128,24 +129,206 @@ describe('Worker deployment convergence', () => {
   });
 });
 
-describe('production CORS verification', () => {
-  it('fails when the expected production origin is not returned exactly', async () => {
-    const fetchImpl = vi.fn(() =>
-      Promise.resolve(
-        new Response('{}', {
-          status: 200,
-          headers: { 'Access-Control-Allow-Origin': 'https://wrong.example' },
-        }),
-      ),
-    );
+const workerUrl = 'https://worker.example/v1/health';
+const productionOrigin = 'https://mirna-finansije.vercel.app';
+const corsHeaders = {
+  'Access-Control-Allow-Origin': productionOrigin,
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'X-Mirna-Protocol-Version, X-Mirna-Support-Id',
+};
+const response = (status = 200, headers = corsHeaders, build = expectedBuild) =>
+  Response.json(
+    { ...health(build), status: status === 503 ? 'degraded' : 'ok' },
+    { status, headers },
+  );
+const preflight = (status = 204, headers = corsHeaders) => new Response(null, { status, headers });
+const converge = (fetchImpl, clock = virtualTime()) =>
+  waitForExpectedWorkerBuild({
+    expectedBuild,
+    readHealth: () =>
+      fetchWorkerHealthSnapshot({ fetchImpl, workerUrl, productionOrigin, now: clock.now }),
+    sleep: clock.sleep,
+    now: clock.now,
+  });
+const checkCors = async (fetchImpl, clock = virtualTime()) => {
+  const healthSnapshot = await converge(fetchImpl, clock);
+  const result = await verifyProductionCors({
+    fetchImpl,
+    workerUrl,
+    productionOrigin,
+    healthSnapshot,
+    sleep: clock.sleep,
+    now: clock.now,
+  });
+  return { result, healthSnapshot };
+};
 
-    await expect(
-      verifyProductionCors({
-        fetchImpl,
-        workerUrl: 'https://worker.example/health',
-        productionOrigin: 'https://mirna-finansije.vercel.app',
-      }),
-    ).rejects.toThrow(/Produkcioni Vercel origin/u);
+describe('production CORS verification', () => {
+  it('passes exact GET origin and strict preflight without an extra GET', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response()).mockResolvedValueOnce(preflight());
+    await checkCors(fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0][1].headers.Origin).toBe(productionOrigin);
+    expect(fetchImpl.mock.calls[1][1].method).toBe('OPTIONS');
+  });
+
+  it.each(['https://wrong.example', '*', ''])('rejects GET origin %s precisely', async (origin) => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, { 'Access-Control-Allow-Origin': origin }));
+    await expect(checkCors(fetchImpl)).rejects.toThrow(
+      /CORS_ORIGIN_MISMATCH[\s\S]*Expected:[\s\S]*Received:/u,
+    );
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('accepts CORS on valid 503 while retaining degraded readiness for the full verifier', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response(503))
+      .mockResolvedValueOnce(preflight());
+    const { result, healthSnapshot } = await checkCors(fetchImpl);
+    expect(result).toEqual({ healthHttpStatus: 503, readiness: 'SERVICE_DEGRADED' });
+    const verification = verifyStagingSnapshot(healthSnapshot, [], expectedBuild);
+    expect(verification.ok).toBe(false);
+    expect(verification.errors).toContain('Worker: health HTTP status is not ready');
+    expect(verification.errors).toContain('Worker: health status is not ready');
+  });
+
+  it('retries rate-limited GET after a full limiter window, including non-JSON 429', async () => {
+    const clock = virtualTime();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('limited', { status: 429, headers: corsHeaders }))
+      .mockResolvedValueOnce(response())
+      .mockResolvedValueOnce(preflight());
+    await checkCors(fetchImpl, clock);
+    expect(clock.sleep).toHaveBeenCalledExactlyOnceWith(60_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('bounds persistent GET 429 and preserves HTTP status and ACAO', async () => {
+    const clock = virtualTime();
+    const fetchImpl = vi.fn(async () => {
+      // A real response takes time; a 60s deadline alone cannot fit a 60s cooldown.
+      await clock.sleep(100);
+      return new Response(null, { status: 429, headers: corsHeaders });
+    });
+    await expect(checkCors(fetchImpl, clock)).rejects.toThrow(
+      /RATE_LIMITED: HTTP 429[\s\S]*Access-Control-Allow-Origin: https:\/\/mirna-finansije.vercel.app/u,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(clock.now()).toBe(60_200);
+  });
+
+  it.each(['120', new Date(120_000).toUTCString()])(
+    'does not retry early when Retry-After %s exceeds the deadline',
+    async (retryAfter) => {
+      const fetchImpl = vi.fn(() =>
+        Promise.resolve(
+          new Response(null, {
+            status: 429,
+            headers: { ...corsHeaders, 'Retry-After': retryAfter },
+          }),
+        ),
+      );
+      await expect(checkCors(fetchImpl)).rejects.toThrow(/RATE_LIMITED: HTTP 429/u);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('reports OPTIONS 403 with every CORS response header', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response())
+      .mockResolvedValueOnce(preflight(403));
+    await expect(checkCors(fetchImpl)).rejects.toThrow(
+      /CORS_PREFLIGHT_STATUS: HTTP 403[\s\S]*Allow-Origin:[\s\S]*Allow-Headers:[\s\S]*Allow-Methods:/u,
+    );
+  });
+
+  it.each([
+    { 'Access-Control-Allow-Headers': 'x-mirna-protocol-version' },
+    { 'Access-Control-Allow-Headers': 'x-mirna-protocol-version,x-mirna-support-id-fake' },
+    { 'Access-Control-Allow-Headers': '*' },
+    { 'Access-Control-Allow-Methods': 'POST, OPTIONS' },
+    { 'Access-Control-Allow-Origin': '*' },
+  ])('rejects invalid preflight headers %j', async (headers) => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response())
+      .mockResolvedValueOnce(preflight(204, { ...corsHeaders, ...headers }));
+    await expect(checkCors(fetchImpl)).rejects.toThrow(/CORS_(HEADERS|ORIGIN)_MISMATCH/u);
+  });
+
+  it('bounds preflight 429 retries and preserves rate-limit diagnostics', async () => {
+    const clock = virtualTime();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response())
+      .mockImplementation(() => Promise.resolve(preflight(429)));
+    await expect(checkCors(fetchImpl, clock)).rejects.toThrow(
+      /RATE_LIMITED: HTTP 429[\s\S]*OPTIONS/u,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(clock.now()).toBe(60_000);
+  });
+
+  it('reports preflight network failure distinctly', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response())
+      .mockRejectedValueOnce(new TypeError('fetch failed'));
+    await expect(checkCors(fetchImpl)).rejects.toThrow(/NETWORK_FAILURE.*OPTIONS/u);
+  });
+
+  it('recovers from a preflight 429 after one cooldown', async () => {
+    const clock = virtualTime();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(response())
+      .mockResolvedValueOnce(preflight(429))
+      .mockResolvedValueOnce(preflight());
+    await checkCors(fetchImpl, clock);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(clock.now()).toBe(60_000);
+  });
+
+  it('does not reuse a snapshot fetched without the production Origin', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response());
+    const healthSnapshot = await fetchWorkerHealthSnapshot({ fetchImpl, workerUrl });
+    await expect(
+      verifyProductionCors({ fetchImpl, workerUrl, productionOrigin, healthSnapshot }),
+    ).rejects.toThrow(/not requested with the expected Origin/u);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('caps real GET network failures at seven attempts with their own diagnostic', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    await expect(checkCors(fetchImpl)).rejects.toThrow(/NETWORK_FAILURE: Worker health GET/u);
+    expect(fetchImpl).toHaveBeenCalledTimes(7);
+  });
+
+  it('caps old builds at seven GETs even with the longer cooldown deadline', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(response(200, corsHeaders, oldBuild)));
+    await expect(checkCors(fetchImpl)).rejects.toThrow(/Attempts: 7/u);
+    expect(fetchImpl).toHaveBeenCalledTimes(7);
+  });
+
+  it('keeps convergence plus preflight below 10 health requests even at the deadline', async () => {
+    const clock = virtualTime();
+    const requests = [];
+    const fetchImpl = vi.fn((url, options) => {
+      requests.push(clock.now());
+      expect(requests.filter((time) => clock.now() - time <= 60_000).length).toBeLessThan(10);
+      expect(options.headers.Origin).toBe(productionOrigin);
+      return Promise.resolve(
+        options.method === 'OPTIONS'
+          ? preflight()
+          : response(200, corsHeaders, clock.now() < 60_000 ? oldBuild : expectedBuild),
+      );
+    });
+    await checkCors(fetchImpl, clock);
+    expect(requests).toEqual([0, 10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 60_000]);
   });
 });
