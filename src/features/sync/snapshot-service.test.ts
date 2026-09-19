@@ -738,13 +738,14 @@ it('bounds manifest pagination to 100 pages even for a cryptographically valid l
   let pages = 0;
   await expect(
     collectVerifiedManifestChain({
-      getManifestChanges: async (after) => {
+      getManifestChanges: (after) => {
         pages += 1;
-        return {
+
+        return Promise.resolve({
           protocolVersion: 1,
           manifests: [history[after]],
           nextAfterManifestVersion: after + 1,
-        };
+        });
       },
       expected: history.at(-1)!,
       expectedHash: await manifestBodyHash(history.at(-1)!),
