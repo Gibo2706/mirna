@@ -82,7 +82,7 @@ describe('shared verified manifest chain', () => {
   it('verifies recovery through the previous recovery authority, not the new standalone key', async () => {
     const f = await recoveryFixture();
     const input = {
-      getManifestChanges: async () => page([f.genesis, f.current]),
+      getManifestChanges: () => Promise.resolve(page([f.genesis, f.current])),
       expected: f.current,
       expectedHash: await manifestBodyHash(f.current),
     };
@@ -92,7 +92,7 @@ describe('shared verified manifest chain', () => {
       collectVerifiedManifestChain({
         ...input,
         expected: forged,
-        getManifestChanges: async () => page([f.genesis, forged]),
+        getManifestChanges: () => Promise.resolve(page([f.genesis, forged])),
       }),
     ).rejects.toThrow(/Potpis/);
   });
@@ -100,7 +100,7 @@ describe('shared verified manifest chain', () => {
   it('resolves the historical active creator after recovery revocation without granting an epoch downgrade', async () => {
     const f = await recoveryFixture();
     const parent = await resolveSnapshotParentManifest({
-      getManifestChanges: async () => page([f.genesis, f.current]),
+      getManifestChanges: () => Promise.resolve(page([f.genesis, f.current])),
       trusted: f.current,
       trustedHash: await manifestBodyHash(f.current),
       parentHash: await manifestBodyHash(f.genesis),
@@ -168,7 +168,7 @@ describe('shared verified manifest chain', () => {
     if (attack === 'truncated') manifests = [f.genesis];
     await expect(
       collectVerifiedManifestChain({
-        getManifestChanges: async () => page(manifests, cursor),
+        getManifestChanges: () => Promise.resolve(page(manifests, cursor)),
         expected: f.current,
         expectedHash: await manifestBodyHash(f.current),
       }),
@@ -178,7 +178,8 @@ describe('shared verified manifest chain', () => {
 
 it('requires the exact advertised endpoint for forward traversal but can resolve an older local history anchor', async () => {
   const f = await recoveryFixture();
-  const getManifestChanges = async () => page([f.genesis, f.current]);
+  const getManifestChanges: () => Promise<unknown> = () =>
+    Promise.resolve(page([f.genesis, f.current]));
   await expect(
     collectVerifiedManifestChain({
       getManifestChanges,
