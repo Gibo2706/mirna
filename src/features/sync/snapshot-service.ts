@@ -8,11 +8,7 @@ import {
   signDomainSeparatedCanonical,
 } from '@/domain/sync/crypto';
 import { bytesToBase64Url, clearBytes } from '@/domain/sync/encoding';
-import {
-  manifestBodyHash,
-  validateManifestTransition,
-  verifyStandaloneManifestWithPin,
-} from '@/domain/sync/manifest';
+import { manifestBodyHash, verifyStandaloneManifestWithPin } from '@/domain/sync/manifest';
 import {
   authChallengeSchema,
   vaultManifestSchema,
@@ -26,6 +22,7 @@ import {
   openEncryptedSnapshot,
   prepareFinanceDataForSnapshotApply,
   type EncryptedSnapshotArtifactV1,
+  type SyncSnapshotV1,
 } from '@/domain/sync/snapshot';
 import {
   SYNC_CRYPTO_SUITE,
@@ -38,6 +35,7 @@ import {
   type SnapshotMetadataChanges,
 } from '@/db/sync/snapshot-repository';
 import { SyncApiError, type DownloadedSnapshotV1, type MirnaSyncApi } from './api';
+import { collectVerifiedManifestChain, resolveSnapshotParentManifest } from './manifest-chain';
 
 const snapshotCommitSchema = z.strictObject({
   protocolVersion: z.literal(SYNC_PROTOCOL_VERSION),
@@ -82,6 +80,7 @@ export interface SnapshotSyncApiPort {
     signature: string;
   }): Promise<unknown>;
   getCurrentManifest(): Promise<unknown>;
+  getManifestChanges(afterManifestVersion: number): Promise<unknown>;
   uploadSnapshot(
     artifact: EncryptedSnapshotArtifactV1,
     idempotencyKey: string,
@@ -150,12 +149,23 @@ const isSnapshotNotFound = (error: unknown): boolean =>
   error instanceof SyncApiError && error.status === 404 && error.code === 'SNAPSHOT_NOT_FOUND';
 
 const manifestSigningKey = async (manifest: VaultManifestV1, deviceId: string) => {
-  const device =
-    manifest.devices.find((candidate) => candidate.deviceId === deviceId) ??
-    manifest.revokedDevices.find((candidate) => candidate.deviceId === deviceId);
+  const device = manifest.devices.find((candidate) => candidate.deviceId === deviceId);
   if (!device) throw new SnapshotSyncError('snapshot-invalid', 'Autor snimka nije u manifestu.');
   return importSigningPublicKey(device.publicKeys.signing);
 };
+
+export const canRevalidateSnapshotManifest = (metadata: SyncMetadataRecord): boolean =>
+  metadata.syncBlockReason === 'fork-detected' &&
+  metadata.lastErrorCode === 'SNAPSHOT_MANIFEST_PIN_MISMATCH';
+
+class SnapshotProofError extends Error {
+  constructor(
+    readonly reason: NonNullable<SyncMetadataRecord['syncBlockReason']>,
+    readonly code: string,
+  ) {
+    super(code);
+  }
+}
 
 export class SnapshotSyncService {
   readonly #api: SnapshotSyncApiPort;
@@ -199,7 +209,8 @@ export class SnapshotSyncService {
     if (pairedBootstrapPending && setup.metadata.syncBlockReason === 'local-remote-conflict') {
       setup = await this.#repository.preparePairedDeviceBootstrap(setup, this.#now().toISOString());
     }
-    if (setup.metadata.syncBlockReason) {
+    const revalidating = canRevalidateSnapshotManifest(setup.metadata);
+    if (setup.metadata.syncBlockReason && !revalidating) {
       return {
         kind: 'blocked',
         revision: setup.metadata.lastSnapshotRevision,
@@ -207,17 +218,67 @@ export class SnapshotSyncService {
       };
     }
 
-    await this.#authenticate(setup);
-    const remoteManifest = vaultManifestSchema.parse(await this.#api.getCurrentManifest());
-    setup = await this.#reconcileManifest(setup, remoteManifest);
+    let revalidationRemote: DownloadedSnapshotV1 | undefined;
+    let revalidatedSnapshot: SyncSnapshotV1 | undefined;
+    try {
+      await this.#authenticate(setup);
+      const remoteManifest = vaultManifestSchema.parse(await this.#api.getCurrentManifest());
+      if (revalidating) {
+        revalidationRemote = await this.#api.downloadCurrentSnapshot({ signal: options.signal });
+      }
+      setup = await this.#reconcileManifest(
+        setup,
+        remoteManifest,
+        revalidating
+          ? async (candidate) => {
+              const key = await openEncryptedKeyEnvelope(
+                candidate.vaultKey.encryptedKey,
+                candidate.device.localWrappingKey,
+              );
+              try {
+                revalidatedSnapshot = await this.#verifySnapshot(
+                  candidate,
+                  key,
+                  revalidationRemote!,
+                  true,
+                );
+                const data = await this.#repository.readFinanceDataForRemoteBootstrap();
+                if (!data)
+                  throw new SnapshotProofError('integrity-failure', 'LOCAL_FINANCE_STATE_MISSING');
+              } finally {
+                clearBytes(key);
+              }
+            }
+          : undefined,
+      );
+      if (revalidating) {
+        setup = await this.#repository.clearRevalidatedManifestBlock(setup);
+        if (
+          options.continuousOperations &&
+          revalidationRemote!.envelope.revision > setup.metadata.lastSnapshotRevision
+        ) {
+          // Operation catch-up must precede acceptance of a newer compaction frontier.
+          clearBytes(revalidationRemote!.ciphertext);
+          return { kind: 'up-to-date', revision: setup.metadata.lastSnapshotRevision };
+        }
+      }
+    } catch (error) {
+      if (!revalidating) throw error;
+      if (revalidationRemote) clearBytes(revalidationRemote.ciphertext);
+      return {
+        kind: 'blocked',
+        revision: setup.metadata.lastSnapshotRevision,
+        reason: 'fork-detected',
+      };
+    }
     const vaultMasterKey = await openEncryptedKeyEnvelope(
       setup.vaultKey.encryptedKey,
       setup.device.localWrappingKey,
     );
     try {
-      let remote: DownloadedSnapshotV1 | undefined;
+      let remote: DownloadedSnapshotV1 | undefined = revalidationRemote;
       try {
-        remote = await this.#api.downloadCurrentSnapshot({ signal: options.signal });
+        remote ??= await this.#api.downloadCurrentSnapshot({ signal: options.signal });
       } catch (error) {
         if (!isSnapshotNotFound(error)) throw error;
       }
@@ -243,9 +304,16 @@ export class SnapshotSyncService {
         }
         return await this.#upload(setup, vaultMasterKey, options, true);
       }
-      return await this.#acceptOrAdvance(setup, vaultMasterKey, remote, options);
+      return await this.#acceptOrAdvance(
+        setup,
+        vaultMasterKey,
+        remote,
+        options,
+        revalidatedSnapshot,
+      );
     } finally {
       clearBytes(vaultMasterKey);
+      if (revalidationRemote) clearBytes(revalidationRemote.ciphertext);
     }
   }
 
@@ -290,6 +358,7 @@ export class SnapshotSyncService {
   async #reconcileManifest(
     setup: LocalSyncSetup,
     remoteManifest: VaultManifestV1,
+    beforeAdvance?: (candidate: LocalSyncSetup) => Promise<void>,
   ): Promise<LocalSyncSetup> {
     const localHash = await manifestBodyHash(setup.vault.manifest);
     const remoteHash = await manifestBodyHash(remoteManifest);
@@ -304,12 +373,35 @@ export class SnapshotSyncService {
         manifestVersion: remoteManifest.manifestVersion,
         manifestHash: remoteHash,
       });
+      await beforeAdvance?.(setup);
       return setup;
     }
-    if (remoteManifest.manifestVersion !== setup.vault.manifest.manifestVersion + 1) {
+    if (remoteManifest.manifestVersion < setup.vault.manifest.manifestVersion) {
       throw new SnapshotSyncError('manifest-gap', 'Nedostaje tranzicija manifesta.');
     }
-    await validateManifestTransition(setup.vault.manifest, remoteManifest);
+    const chain = await collectVerifiedManifestChain({
+      getManifestChanges: (after) => this.#api.getManifestChanges(after),
+      previous: setup.vault.manifest,
+      expected: remoteManifest,
+      expectedHash: remoteHash,
+    });
+    // Validate the full chain and snapshot proof before any durable pin advancement.
+    const steps: LocalSyncSetup[] = [];
+    let candidate = setup;
+    for (const manifest of chain) {
+      candidate = await this.#prepareManifestAdvance(candidate, manifest);
+      steps.push(candidate);
+    }
+    await beforeAdvance?.(candidate);
+    for (const next of steps) setup = await this.#repository.advanceSetup(setup, next);
+    return setup;
+  }
+
+  async #prepareManifestAdvance(
+    setup: LocalSyncSetup,
+    remoteManifest: VaultManifestV1,
+  ): Promise<LocalSyncSetup> {
+    const remoteHash = await manifestBodyHash(remoteManifest);
     const localDevice = remoteManifest.devices.find(
       (device) => device.deviceId === setup.device.deviceId,
     );
@@ -351,9 +443,79 @@ export class SnapshotSyncService {
         vaultKey: { ...setup.vaultKey, encryptedKey },
         metadata: { ...setup.metadata, lastManifestHash: remoteHash },
       };
-      return await this.#repository.advanceSetup(setup, next);
+      return next;
     } finally {
       clearBytes(vaultMasterKey);
+    }
+  }
+
+  async #verifySnapshot(
+    setup: LocalSyncSetup,
+    vaultMasterKey: Uint8Array,
+    remote: DownloadedSnapshotV1,
+    requireFullHistory = false,
+  ) {
+    const { envelope } = remote;
+    const remoteHash = await hashEncryptedSnapshotEnvelope(envelope);
+    if (envelope.vaultId !== setup.vault.vaultId) {
+      throw new SnapshotProofError('fork-detected', 'SNAPSHOT_VAULT_MISMATCH');
+    }
+    if (envelope.revision < setup.metadata.lastSnapshotRevision) {
+      throw new SnapshotProofError('rollback-detected', 'SNAPSHOT_ROLLBACK_DETECTED');
+    }
+    const sameRevision = envelope.revision === setup.metadata.lastSnapshotRevision;
+    if (sameRevision && remoteHash !== setup.metadata.lastSnapshotHash) {
+      throw new SnapshotProofError('fork-detected', 'SNAPSHOT_FORK_DETECTED');
+    }
+    const pairingPin =
+      setup.metadata.lastSnapshotRevision === 0 &&
+      setup.metadata.lastSnapshotHash === null &&
+      setup.metadata.lastSnapshotId === envelope.snapshotId;
+    if (
+      !sameRevision &&
+      !pairingPin &&
+      (envelope.baseRevision !== setup.metadata.lastSnapshotRevision ||
+        envelope.previousSnapshotHash !== setup.metadata.lastSnapshotHash)
+    ) {
+      throw new SnapshotProofError('fork-detected', 'SNAPSHOT_CHAIN_GAP');
+    }
+    let parent = setup.vault.manifest;
+    if (requireFullHistory || envelope.parentManifestHash !== setup.metadata.lastManifestHash) {
+      try {
+        parent = await resolveSnapshotParentManifest({
+          getManifestChanges: (after) => this.#api.getManifestChanges(after),
+          trusted: setup.vault.manifest,
+          trustedHash: setup.metadata.lastManifestHash,
+          parentHash: envelope.parentManifestHash,
+        });
+      } catch {
+        throw new SnapshotProofError('fork-detected', 'SNAPSHOT_MANIFEST_PIN_MISMATCH');
+      }
+    }
+    try {
+      if (parent.keyEpoch !== envelope.keyEpoch) throw new Error('Snapshot parent epoch mismatch.');
+      return await openEncryptedSnapshot({
+        envelope,
+        ciphertext: remote.ciphertext,
+        vaultMasterKey,
+        signingPublicKey: await manifestSigningKey(parent, envelope.creatingDeviceId),
+        expected: {
+          vaultId: setup.vault.vaultId,
+          keyEpoch: setup.vault.keyEpoch,
+          currentRevision:
+            sameRevision || pairingPin
+              ? envelope.baseRevision
+              : setup.metadata.lastSnapshotRevision,
+          currentSnapshotHash:
+            sameRevision || pairingPin
+              ? envelope.previousSnapshotHash
+              : setup.metadata.lastSnapshotHash,
+          parentManifestHash: envelope.parentManifestHash,
+          creatingDeviceId: envelope.creatingDeviceId,
+        },
+      });
+    } catch {
+      throw new SnapshotProofError('integrity-failure', 'SNAPSHOT_INTEGRITY_FAILURE');
     }
   }
 
@@ -362,8 +524,24 @@ export class SnapshotSyncService {
     vaultMasterKey: Uint8Array,
     remote: DownloadedSnapshotV1,
     options: SnapshotSyncOptions,
+    revalidatedSnapshot?: SyncSnapshotV1,
   ): Promise<SnapshotSyncResult> {
     const { envelope } = remote;
+    let verifiedSnapshot = revalidatedSnapshot;
+    if (
+      envelope.revision !== setup.metadata.lastSnapshotRevision ||
+      canRevalidateSnapshotManifest(setup.metadata)
+    ) {
+      try {
+        verifiedSnapshot ??= await this.#verifySnapshot(setup, vaultMasterKey, remote);
+      } catch (error) {
+        if (error instanceof SnapshotProofError)
+          return this.#block(setup, error.reason, error.code);
+        throw error;
+      } finally {
+        clearBytes(remote.ciphertext);
+      }
+    }
     const remoteHash = await hashEncryptedSnapshotEnvelope(envelope);
     if (envelope.vaultId !== setup.vault.vaultId) {
       return this.#block(setup, 'fork-detected', 'SNAPSHOT_VAULT_MISMATCH');
@@ -400,6 +578,7 @@ export class SnapshotSyncService {
               lastSyncAt: syncedAt,
               lastErrorCode: undefined,
             }),
+            setup.metadata,
           );
           return { kind: 'up-to-date', revision: envelope.revision };
         }
@@ -420,7 +599,9 @@ export class SnapshotSyncService {
           lastSyncAt: syncedAt,
           lastSuccessfulSyncAt: syncedAt,
           lastErrorCode: undefined,
+          syncBlockReason: undefined,
         }),
+        setup.metadata,
       );
       return { kind: 'up-to-date', revision: envelope.revision };
     }
@@ -436,14 +617,6 @@ export class SnapshotSyncService {
     ) {
       return this.#block(setup, 'fork-detected', 'SNAPSHOT_CHAIN_GAP');
     }
-    const allowedManifestHashes = new Set([
-      setup.metadata.lastManifestHash,
-      setup.vault.manifest.previousManifestHash,
-    ]);
-    if (!allowedManifestHashes.has(envelope.parentManifestHash)) {
-      return this.#block(setup, 'fork-detected', 'SNAPSHOT_MANIFEST_PIN_MISMATCH');
-    }
-
     const localData = await this.#repository.readFinanceDataForRemoteBootstrap();
     if (!localData && !bootstrapFromPairingPin) {
       return this.#block(setup, 'integrity-failure', 'LOCAL_FINANCE_STATE_MISSING');
@@ -474,31 +647,7 @@ export class SnapshotSyncService {
       };
     }
 
-    let snapshot;
-    try {
-      snapshot = await openEncryptedSnapshot({
-        envelope,
-        ciphertext: remote.ciphertext,
-        vaultMasterKey,
-        signingPublicKey: await manifestSigningKey(setup.vault.manifest, envelope.creatingDeviceId),
-        expected: {
-          vaultId: setup.vault.vaultId,
-          keyEpoch: setup.vault.keyEpoch,
-          currentRevision: bootstrapFromPairingPin
-            ? envelope.baseRevision
-            : setup.metadata.lastSnapshotRevision,
-          currentSnapshotHash: bootstrapFromPairingPin
-            ? envelope.previousSnapshotHash
-            : setup.metadata.lastSnapshotHash,
-          parentManifestHash: envelope.parentManifestHash,
-          creatingDeviceId: envelope.creatingDeviceId,
-        },
-      });
-    } catch {
-      return this.#block(setup, 'integrity-failure', 'SNAPSHOT_INTEGRITY_FAILURE');
-    } finally {
-      clearBytes(remote.ciphertext);
-    }
+    const snapshot = verifiedSnapshot!;
     const localSettings = localData?.settings[0];
     const ready = await prepareFinanceDataForSnapshotApply(snapshot, {
       appearance: localSettings?.appearance ?? 'system',
@@ -694,6 +843,7 @@ export class SnapshotSyncService {
             lastSuccessfulSyncAt: syncedAt,
             lastErrorCode: undefined,
           }),
+          setup.metadata,
         );
         return { kind: 'up-to-date', revision: setup.metadata.lastSnapshotRevision };
       }
@@ -708,6 +858,13 @@ export class SnapshotSyncService {
     reason: NonNullable<SyncMetadataRecord['syncBlockReason']>,
     errorCode: string,
   ): Promise<SnapshotSyncResult> {
+    if (canRevalidateSnapshotManifest(setup.metadata)) {
+      return {
+        kind: 'blocked',
+        revision: setup.metadata.lastSnapshotRevision,
+        reason: 'fork-detected',
+      };
+    }
     await this.#repository.updateMetadata(
       setup.vault.vaultId,
       setup.metadata.lastSnapshotRevision,
@@ -717,6 +874,7 @@ export class SnapshotSyncService {
         lastErrorCode: errorCode,
         syncBlockReason: reason,
       }),
+      setup.metadata,
     );
     return { kind: 'blocked', revision: setup.metadata.lastSnapshotRevision, reason };
   }

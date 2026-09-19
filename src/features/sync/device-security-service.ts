@@ -40,7 +40,6 @@ import {
   deviceKeyEnvelopeSchema,
   deviceRenewRequestSchema,
   deviceRenewResponseSchema,
-  manifestChangesResponseSchema,
   recoveryBundleFetchRequestSchema,
   recoveryBundleFetchResponseSchema,
   recoveryChallengeSchema,
@@ -65,6 +64,7 @@ import {
 } from '@/db/sync/repository';
 import { localVaultKeyRecordId, type LocalSyncSetup } from '@/db/sync/records';
 import type { MirnaSyncApi } from './api';
+import { collectVerifiedManifestChain, ManifestChainError } from './manifest-chain';
 
 const MAX_RECOVERY_MANIFEST_PAGES = 100;
 const MAX_FUTURE_CLOCK_SKEW_MS = 2 * 60 * 1_000;
@@ -529,8 +529,7 @@ export class DeviceSecurityService {
     }
     const chain = await this.#collectManifestChanges(setup, remote);
     for (const manifest of chain) {
-      const prior = setup.vault.manifest;
-      await validateManifestTransition(prior, manifest);
+      // The shared collector has already verified every transition.
       if (!activeDevice(manifest, setup.device.deviceId)) {
         throw new DeviceSecurityError(
           'device-revoked',
@@ -560,45 +559,19 @@ export class DeviceSecurityService {
     setup: LocalSyncSetup,
     remote: VaultManifestV1,
   ): Promise<VaultManifestV1[]> {
-    const manifests: VaultManifestV1[] = [];
-    let afterManifestVersion = setup.vault.manifest.manifestVersion;
-    for (let page = 0; page < MAX_RECOVERY_MANIFEST_PAGES; page += 1) {
-      const response = manifestChangesResponseSchema.parse(
-        await this.#api.getManifestChanges(afterManifestVersion),
-      );
-      if (
-        response.manifests.length === 0 ||
-        response.manifests[0]?.manifestVersion !== afterManifestVersion + 1 ||
-        response.manifests.some(
-          (manifest, index) =>
-            index > 0 &&
-            manifest.manifestVersion !== response.manifests[index - 1].manifestVersion + 1,
-        )
-      ) {
-        throw new DeviceSecurityError(
-          'manifest-gap',
-          'Server nije vratio neprekidan manifest lanac.',
-        );
+    try {
+      return await collectVerifiedManifestChain({
+        getManifestChanges: (after) => this.#api.getManifestChanges(after),
+        previous: setup.vault.manifest,
+        expected: remote,
+        expectedHash: await manifestBodyHash(remote),
+      });
+    } catch (error) {
+      if (error instanceof ManifestChainError) {
+        throw new DeviceSecurityError(error.code, error.message);
       }
-      manifests.push(...response.manifests);
-      const lastVersion = manifests.at(-1)?.manifestVersion;
-      if (response.nextAfterManifestVersion === null) break;
-      if (
-        response.nextAfterManifestVersion !== lastVersion ||
-        response.nextAfterManifestVersion === afterManifestVersion ||
-        page === MAX_RECOVERY_MANIFEST_PAGES - 1
-      ) {
-        throw new DeviceSecurityError('manifest-gap', 'Manifest kursor nije validan.');
-      }
-      afterManifestVersion = response.nextAfterManifestVersion;
+      throw error;
     }
-    if (!same(manifests.at(-1), remote)) {
-      throw new DeviceSecurityError(
-        'manifest-fork',
-        'Manifest lanac se ne završava trenutnim server manifestom.',
-      );
-    }
-    return manifests;
   }
 
   async #adoptNextKeyEpoch(

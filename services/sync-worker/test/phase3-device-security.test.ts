@@ -453,6 +453,12 @@ describe('Phase 3 device security transitions', () => {
     });
     expect(first.status).toBe(201);
     expect(deviceRenewResponseSchema.parse(await first.json()).renewed).toBe(true);
+    const historyFromGenesis = await authenticatedGet('/v1/manifests?after=0', accessToken);
+    expect(historyFromGenesis.status).toBe(200);
+    expect(manifestChangesResponseSchema.parse(await historyFromGenesis.json()).manifests).toEqual([
+      fixture.manifest,
+      request.newManifest,
+    ]);
 
     const retry = await postCanonical(`/v1/devices/${fixture.deviceId}/renew`, request, {
       accessToken,

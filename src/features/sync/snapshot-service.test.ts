@@ -20,8 +20,9 @@ import {
   randomBytes,
 } from '@/domain/sync/crypto';
 import { bytesToBase64Url, clearBytes } from '@/domain/sync/encoding';
-import { createInitialManifest, manifestBodyHash } from '@/domain/sync/manifest';
+import { createInitialManifest, manifestBodyHash, signVaultManifest } from '@/domain/sync/manifest';
 import {
+  computeSyncFinanceDataHash,
   createBaselineSnapshotEntityStates,
   createEncryptedSnapshot,
   createSyncFinanceData,
@@ -29,10 +30,12 @@ import {
   type EncryptedSnapshotArtifactV1,
 } from '@/domain/sync/snapshot';
 import { emptyFinanceData, tx } from '@/tests/factories';
+import type { VaultManifestV1 } from '@/domain/sync/schemas';
 import type { FinanceData } from '@/domain/types';
 import { SYNC_CRYPTO_SUITE, SYNC_TRANSCRIPT_TYPES } from '@/domain/sync/constants';
 import { SyncApiError, type DownloadedSnapshotV1 } from './api';
 import { SnapshotSyncService, type SnapshotSyncApiPort } from './snapshot-service';
+import { collectVerifiedManifestChain } from './manifest-chain';
 
 const NOW = new Date('2026-07-31T12:00:00.000Z');
 const databaseNames: string[] = [];
@@ -154,6 +157,17 @@ const createSetup = async (): Promise<{ setup: LocalSyncSetup; vaultMasterKey: U
 class FakeSnapshotApi implements SnapshotSyncApiPort {
   remote?: EncryptedSnapshotArtifactV1;
   uploadError?: Error;
+  history: VaultManifestV1[] = [];
+
+  getManifestChanges(after: number): Promise<unknown> {
+    const remaining = this.history.filter((manifest) => manifest.manifestVersion > after);
+    const manifests = remaining.slice(0, 25);
+    return Promise.resolve({
+      protocolVersion: 1,
+      manifests,
+      nextAfterManifestVersion: remaining.length > 25 ? manifests.at(-1)!.manifestVersion : null,
+    });
+  }
   readonly uploads: EncryptedSnapshotArtifactV1[] = [];
 
   constructor(private readonly setup: LocalSyncSetup) {}
@@ -421,4 +435,416 @@ describe('Phase 2 snapshot sync service', () => {
     clearBytes(material.vaultMasterKey);
     database.close();
   });
+});
+
+const renewHistory = async (setup: LocalSyncSetup, count = 5): Promise<VaultManifestV1[]> => {
+  const history = [setup.vault.manifest];
+  for (let version = 2; version <= count; version += 1) {
+    const previous = history.at(-1)!;
+    const { signature: _signature, ...body } = previous;
+    void _signature;
+    history.push(
+      await signVaultManifest(
+        {
+          ...body,
+          manifestVersion: version,
+          previousManifestHash: await manifestBodyHash(previous),
+          devices: previous.devices.map((device) => ({
+            ...device,
+            authorizedAt: new Date(NOW.getTime() + version * 1000).toISOString(),
+            authorizationExpiresAt: new Date(
+              NOW.getTime() + 30 * 86400000 + version * 1000,
+            ).toISOString(),
+          })),
+          transition: {
+            ...previous.transition,
+            kind: 'renew-device',
+            transitionId: createOpaqueId(),
+            occurredAt: new Date(NOW.getTime() + version * 1000).toISOString(),
+          },
+        },
+        setup.device.signingPrivateKey,
+      ),
+    );
+  }
+  return history;
+};
+
+const historicalFixture = async (parentVersion = 1, count = 5) => {
+  const material = await createSetup();
+  const history = await renewHistory(material.setup, count);
+  const parent = history[parentVersion - 1];
+  const remote = await remoteArtifact({
+    ...material,
+    setup: {
+      ...material.setup,
+      vault: { ...material.setup.vault, manifest: parent },
+      metadata: { ...material.setup.metadata, lastManifestHash: await manifestBodyHash(parent) },
+    },
+    data: emptyFinanceData(),
+    revision: 1,
+    previousSnapshotHash: null,
+  });
+  const current = history.at(-1)!;
+  material.setup.vault.manifest = current;
+  material.setup.device.authorizationExpiresAt = current.devices[0].authorizationExpiresAt;
+  material.setup.metadata.lastManifestHash = await manifestBodyHash(current);
+  material.setup.vaultKey.encryptedKey = await createEncryptedKeyEnvelope(
+    material.vaultMasterKey,
+    material.setup.device.localWrappingKey,
+    {
+      ...material.setup.vaultKey.encryptedKey.aad,
+      parentManifestHash: material.setup.metadata.lastManifestHash,
+    },
+  );
+  const name = `mirna-ancestry-${crypto.randomUUID()}`;
+  databaseNames.push(name);
+  const database = new FinanceDatabase(name);
+  const repository = new SyncSnapshotRepository(database);
+  await repository.writeSetup(material.setup);
+  await seedFinanceData(database, emptyFinanceData());
+  const api = new FakeSnapshotApi(material.setup);
+  api.history = history;
+  api.remote = remote;
+  const service = new SnapshotSyncService({
+    api,
+    repository,
+    origin: 'https://mirna.test',
+    now: () => NOW,
+  });
+  return { ...material, history, database, repository, api, service };
+};
+
+describe('historical snapshot manifest ancestry', () => {
+  it.each([1, 3])('accepts a signed snapshot under M%i anchored at local M5', async (parent) => {
+    const fixture = await historicalFixture(parent);
+    await expect(fixture.service.synchronize()).resolves.toEqual({
+      kind: 'downloaded',
+      revision: 1,
+    });
+    expect((await fixture.repository.readSetup())?.metadata.syncBlockReason).toBeUndefined();
+    fixture.database.close();
+    clearBytes(fixture.vaultMasterKey);
+  });
+});
+
+const markStaleBlock = async (
+  fixture: Awaited<ReturnType<typeof historicalFixture>>,
+  sameRevision = true,
+) => {
+  await fixture.database.syncMetadata.update(SYNC_METADATA_RECORD_ID, {
+    syncBlockReason: 'fork-detected',
+    lastErrorCode: 'SNAPSHOT_MANIFEST_PIN_MISMATCH',
+    firstUploadConsent: 'accepted',
+    bootstrapMode: 'complete',
+    lastServerCursor: 480,
+    lastSnapshotServerCursor: 0,
+    lastLocalDataHash: await computeSyncFinanceDataHash(emptyFinanceData()),
+    ...(sameRevision
+      ? {
+          lastSnapshotRevision: 1,
+          lastSnapshotHash: await hashEncryptedSnapshotEnvelope(fixture.api.remote!.envelope),
+          lastSnapshotId: fixture.api.remote!.envelope.snapshotId,
+          lastSnapshotContentHash: fixture.api.remote!.snapshotContentHash,
+        }
+      : {}),
+  });
+};
+
+const closeFixture = (fixture: Awaited<ReturnType<typeof historicalFixture>>) => {
+  fixture.database.close();
+  clearBytes(fixture.vaultMasterKey);
+};
+
+describe('snapshot ancestry fail-closed and stale block revalidation', () => {
+  it('revalidates an already pinned M1 snapshot at M5 without losing dirty local data or operation progress', async () => {
+    const f = await historicalFixture();
+    await markStaleBlock(f);
+    const dirty = tx({
+      id: 'pending-local-edit',
+      type: 'expense',
+      amount: 12345,
+      categoryId: 'expense',
+    });
+    await f.database.transactions.put(dirty);
+    await expect(f.service.synchronize({ continuousOperations: true })).resolves.toEqual({
+      kind: 'up-to-date',
+      revision: 1,
+    });
+    expect(await f.database.transactions.get(dirty.id)).toEqual(dirty);
+    expect((await f.repository.readSetup())?.metadata).toMatchObject({
+      lastServerCursor: 480,
+      lastSnapshotServerCursor: 0,
+      lastSnapshotRevision: 1,
+      lastLocalDataHash: await computeSyncFinanceDataHash(emptyFinanceData()),
+      syncBlockReason: undefined,
+      lastErrorCode: undefined,
+    });
+    expect(f.api.uploads).toHaveLength(0);
+    closeFixture(f);
+  });
+
+  it('uses the existing conflict flow for a dirty local state and a newer verified snapshot', async () => {
+    const f = await historicalFixture();
+    await markStaleBlock(f, false);
+    const dirty = tx({ id: 'local-change', type: 'expense', amount: 3456, categoryId: 'expense' });
+    await f.database.transactions.put(dirty);
+    await expect(f.service.synchronize()).resolves.toMatchObject({
+      kind: 'blocked',
+      reason: 'local-remote-conflict',
+    });
+    expect(await f.database.transactions.get(dirty.id)).toEqual(dirty);
+    expect((await f.repository.readSetup())?.metadata.lastSnapshotRevision).toBe(0);
+    expect(await f.database.syncConflicts.count()).toBe(1);
+    closeFixture(f);
+  });
+
+  it.each([
+    'body',
+    'signature',
+    'previous-hash',
+    'gap',
+    'alternate',
+    'unknown-parent',
+    'ciphertext',
+    'vault',
+    'revision',
+    'epoch',
+    'missing-snapshot',
+  ] as const)(
+    'keeps an existing block, finance data and pins intact for invalid %s',
+    async (attack) => {
+      const f = await historicalFixture();
+      await markStaleBlock(f);
+      const before = (await f.repository.readSetup())!;
+      const data = await f.repository.readFinanceData();
+      const history = structuredClone(f.history);
+      if (attack === 'body') history[2].recoveryLookupId = createOpaqueId();
+      if (attack === 'signature') history[2].signature = bytesToBase64Url(randomBytes(64));
+      if (attack === 'previous-hash')
+        history[3].previousManifestHash = bytesToBase64Url(randomBytes(32));
+      if (attack === 'gap') history.splice(2, 1);
+      if (attack === 'alternate') {
+        const { signature: _signature, ...body } = history[2];
+        void _signature;
+        history[2] = await signVaultManifest(
+          { ...body, transition: { ...body.transition, transitionId: createOpaqueId() } },
+          f.setup.device.signingPrivateKey,
+        );
+      }
+      f.api.history = history;
+      if (attack === 'unknown-parent')
+        f.api.remote!.envelope.parentManifestHash = bytesToBase64Url(randomBytes(32));
+      if (attack === 'ciphertext') f.api.remote!.ciphertext[0] ^= 1;
+      if (attack === 'vault') f.api.remote!.envelope.vaultId = createOpaqueId();
+      if (attack === 'revision') f.api.remote!.envelope.revision = 2;
+      if (attack === 'epoch') f.api.remote!.envelope.keyEpoch = 2;
+      if (attack === 'missing-snapshot') f.api.remote = undefined;
+      await expect(f.service.synchronize({ continuousOperations: true })).resolves.toEqual({
+        kind: 'blocked',
+        reason: 'fork-detected',
+        revision: 1,
+      });
+      expect((await f.repository.readSetup())?.metadata).toEqual(before.metadata);
+      expect((await f.repository.readSetup())?.vault.manifest).toEqual(before.vault.manifest);
+      expect(await f.repository.readFinanceData()).toEqual(data);
+      closeFixture(f);
+    },
+  );
+
+  it.each([
+    'SNAPSHOT_FORK_DETECTED',
+    'SNAPSHOT_VAULT_MISMATCH',
+    'SNAPSHOT_CHAIN_GAP',
+    'SNAPSHOT_ROLLBACK_DETECTED',
+    'SNAPSHOT_INTEGRITY_FAILURE',
+    'LOCAL_FINANCE_STATE_MISSING',
+  ])('does not revalidate unrelated block %s', async (code) => {
+    const f = await historicalFixture();
+    await markStaleBlock(f);
+    await f.database.syncMetadata.update(SYNC_METADATA_RECORD_ID, { lastErrorCode: code });
+    f.api.getCurrentManifest = () => {
+      throw new Error('Other blocks must never contact manifest endpoint');
+    };
+    await expect(f.service.synchronize()).resolves.toMatchObject({ kind: 'blocked' });
+    expect((await f.repository.readSetup())?.metadata.lastErrorCode).toBe(code);
+    closeFixture(f);
+  });
+
+  it('rejects an unknown parent hash for a newer snapshot', async () => {
+    const f = await historicalFixture();
+    f.api.remote!.envelope.parentManifestHash = bytesToBase64Url(randomBytes(32));
+    f.api.remote!.envelope.aad.parentManifestHash = f.api.remote!.envelope.parentManifestHash;
+    await expect(f.service.synchronize()).resolves.toMatchObject({
+      kind: 'blocked',
+      reason: 'fork-detected',
+    });
+    expect((await f.repository.readSetup())?.metadata.lastErrorCode).toBe(
+      'SNAPSHOT_MANIFEST_PIN_MISMATCH',
+    );
+    closeFixture(f);
+  });
+
+  it('verifies all pages of a 28-manifest renewal history', async () => {
+    const f = await historicalFixture(1, 28);
+    await expect(f.service.synchronize()).resolves.toEqual({ kind: 'downloaded', revision: 1 });
+    closeFixture(f);
+  });
+
+  it.each([false, true])(
+    'advances local M2 to M5 through verified transitions (stale block: %s)',
+    async (blocked) => {
+      const f = await historicalFixture();
+      const local = f.history[1];
+      const localHash = await manifestBodyHash(local);
+      const setup = {
+        ...f.setup,
+        vault: { ...f.setup.vault, manifest: local },
+        device: {
+          ...f.setup.device,
+          authorizationExpiresAt: local.devices[0].authorizationExpiresAt,
+        },
+        metadata: { ...f.setup.metadata, lastManifestHash: localHash },
+        vaultKey: {
+          ...f.setup.vaultKey,
+          encryptedKey: await createEncryptedKeyEnvelope(
+            f.vaultMasterKey,
+            f.setup.device.localWrappingKey,
+            { ...f.setup.vaultKey.encryptedKey.aad, parentManifestHash: localHash },
+          ),
+        },
+      };
+      // Set up a fresh device checkpoint at the older authenticated pin.
+      await f.database.syncVault.put(setup.vault);
+      await f.database.syncDevice.put(setup.device);
+      await f.database.syncKeys.put(setup.vaultKey);
+      await f.database.syncMetadata.put(setup.metadata);
+      if (blocked) await markStaleBlock(f);
+      await expect(f.service.synchronize()).resolves.toMatchObject({
+        kind: blocked ? 'up-to-date' : 'downloaded',
+        revision: 1,
+      });
+      expect((await f.repository.readSetup())?.metadata.lastManifestHash).toBe(
+        await manifestBodyHash(f.history[4]),
+      );
+      closeFixture(f);
+    },
+  );
+});
+
+it('bounds manifest pagination to 100 pages even for a cryptographically valid longer chain', async () => {
+  const material = await createSetup();
+  const history = await renewHistory(material.setup, 102);
+  let pages = 0;
+  await expect(
+    collectVerifiedManifestChain({
+      getManifestChanges: async (after) => {
+        pages += 1;
+        return {
+          protocolVersion: 1,
+          manifests: [history[after]],
+          nextAfterManifestVersion: after + 1,
+        };
+      },
+      expected: history.at(-1)!,
+      expectedHash: await manifestBodyHash(history.at(-1)!),
+    }),
+  ).rejects.toMatchObject({ code: 'manifest-gap' });
+  expect(pages).toBe(100);
+  clearBytes(material.vaultMasterKey);
+});
+
+it('keeps the M2 manifest pin when stale-block revalidation of a newer M5 snapshot fails', async () => {
+  const f = await historicalFixture();
+  const local = f.history[1];
+  const hash = await manifestBodyHash(local);
+  await f.database.syncVault.put({ ...f.setup.vault, manifest: local });
+  await f.database.syncDevice.put({
+    ...f.setup.device,
+    authorizationExpiresAt: local.devices[0].authorizationExpiresAt,
+  });
+  await f.database.syncKeys.put({
+    ...f.setup.vaultKey,
+    encryptedKey: await createEncryptedKeyEnvelope(
+      f.vaultMasterKey,
+      f.setup.device.localWrappingKey,
+      { ...f.setup.vaultKey.encryptedKey.aad, parentManifestHash: hash },
+    ),
+  });
+  await f.database.syncMetadata.update(SYNC_METADATA_RECORD_ID, { lastManifestHash: hash });
+  await markStaleBlock(f);
+  const before = (await f.repository.readSetup())!;
+  f.api.remote!.ciphertext[0] ^= 1;
+  await expect(f.service.synchronize()).resolves.toMatchObject({
+    kind: 'blocked',
+    reason: 'fork-detected',
+  });
+  const after = (await f.repository.readSetup())!;
+  expect(after.metadata).toEqual(before.metadata);
+  expect(after.vault.manifest).toEqual(before.vault.manifest);
+  expect(after.vaultKey.encryptedKey).toEqual(before.vaultKey.encryptedKey);
+  closeFixture(f);
+});
+
+it('never clears a different block installed concurrently during ancestry verification', async () => {
+  const f = await historicalFixture();
+  await markStaleBlock(f);
+  const getHistory = f.api.getManifestChanges.bind(f.api);
+  f.api.getManifestChanges = async (after) => {
+    await f.database.syncMetadata.update(SYNC_METADATA_RECORD_ID, {
+      lastErrorCode: 'SNAPSHOT_FORK_DETECTED',
+    });
+    return getHistory(after);
+  };
+  await expect(f.service.synchronize({ continuousOperations: true })).resolves.toMatchObject({
+    kind: 'blocked',
+  });
+  expect((await f.repository.readSetup())?.metadata).toMatchObject({
+    syncBlockReason: 'fork-detected',
+    lastErrorCode: 'SNAPSHOT_FORK_DETECTED',
+    lastSnapshotRevision: 1,
+  });
+  closeFixture(f);
+});
+
+it('proves a newer snapshot without accepting its unseen operation frontier before catch-up', async () => {
+  const f = await historicalFixture();
+  await markStaleBlock(f);
+  const before = (await f.repository.readSetup())!;
+  const dirty = tx({
+    id: 'pending-before-catchup',
+    type: 'expense',
+    amount: 778,
+    categoryId: 'expense',
+  });
+  await f.database.transactions.put(dirty);
+  f.api.remote = await createEncryptedSnapshot({
+    data: emptyFinanceData(),
+    vaultId: f.setup.vault.vaultId,
+    revision: 2,
+    baseRevision: 1,
+    keyEpoch: 1,
+    creatingDeviceId: f.setup.device.deviceId,
+    createdAt: NOW.toISOString(),
+    parentManifestHash: await manifestBodyHash(f.history[0]),
+    previousSnapshotHash: before.metadata.lastSnapshotHash,
+    causalFrontier: { serverCursor: 600, devices: [] },
+    vaultMasterKey: f.vaultMasterKey,
+    signingPrivateKey: f.setup.device.signingPrivateKey,
+    compression: 'none',
+  });
+  await expect(f.service.synchronize({ continuousOperations: true })).resolves.toEqual({
+    kind: 'up-to-date',
+    revision: 1,
+  });
+  expect((await f.repository.readSetup())?.metadata).toMatchObject({
+    syncBlockReason: undefined,
+    lastErrorCode: undefined,
+    lastSnapshotHash: before.metadata.lastSnapshotHash,
+    lastSnapshotRevision: 1,
+    lastServerCursor: 480,
+  });
+  expect(await f.database.transactions.get(dirty.id)).toEqual(dirty);
+  expect(await f.database.syncConflicts.count()).toBe(0);
+  closeFixture(f);
 });
