@@ -885,7 +885,7 @@ export class MirnaSyncApi {
     afterManifestVersion: number,
     options?: SyncRequestOptions,
   ): Promise<z.output<typeof manifestChangesResponseSchema>> {
-    if (!Number.isSafeInteger(afterManifestVersion) || afterManifestVersion < 1) {
+    if (!Number.isSafeInteger(afterManifestVersion) || afterManifestVersion < 0) {
       throw new SyncApiError('INVALID_CLIENT_REQUEST');
     }
     return this.#request(

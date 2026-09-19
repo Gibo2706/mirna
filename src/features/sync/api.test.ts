@@ -647,3 +647,36 @@ describe('Mirna sync API transport', () => {
     expect(init?.cache).toBe('no-store');
   });
 });
+
+describe('manifest history cursor', () => {
+  it.each([0, 1])('requests authenticated history after %i', async (after) => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(sessionResponse())
+      .mockResolvedValueOnce(
+        protocolResponse({
+          protocolVersion: 1,
+          manifests: after === 0 ? [initialManifest] : [],
+          nextAfterManifestVersion: null,
+        }),
+      );
+    const api = new MirnaSyncApi(enabledConfig, { fetch: fetchMock });
+    await establishSession(api);
+    const response = await api.getManifestChanges(after);
+    expect(response.manifests).toHaveLength(after === 0 ? 1 : 0);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`${API_ORIGIN}/v1/manifests?after=${after}`);
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get('Authorization')).toBe(
+      `Bearer ${hash('T')}`,
+    );
+  });
+
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid cursor %s',
+    async (after) => {
+      const api = new MirnaSyncApi(enabledConfig);
+      await expect(api.getManifestChanges(after)).rejects.toMatchObject({
+        code: 'INVALID_CLIENT_REQUEST',
+      });
+    },
+  );
+});

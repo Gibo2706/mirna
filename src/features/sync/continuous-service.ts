@@ -1,6 +1,10 @@
 import { SyncOperationRepository } from '@/db/sync/operation-repository';
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
-import type { SnapshotSyncOptions, SnapshotSyncResult } from './snapshot-service';
+import {
+  canRevalidateSnapshotManifest,
+  type SnapshotSyncOptions,
+  type SnapshotSyncResult,
+} from './snapshot-service';
 import type { OperationSyncOptions, OperationSyncResult } from './operation-service';
 
 const COMPACTION_OPERATION_THRESHOLD = 100;
@@ -90,6 +94,14 @@ export class ContinuousSyncService {
   }
 
   async #synchronizeOnce(options: ContinuousSyncOptions): Promise<ContinuousSyncResult> {
+    const beforeSecurity = await this.#repository.readSetup();
+    if (beforeSecurity && canRevalidateSnapshotManifest(beforeSecurity.metadata)) {
+      const revalidated = await this.#snapshots.synchronize({
+        continuousOperations: true,
+        signal: options.signal,
+      });
+      if (!canContinueAfterSnapshot(revalidated)) return revalidated;
+    }
     await this.#security?.reconcileKeyEpoch();
     const initialSetup = await this.#repository.readSetup();
     if (!initialSetup) throw new Error('Sinhronizacija nije uključena na ovom uređaju.');

@@ -313,6 +313,28 @@ For a locally pinned `(manifestVersion, manifestHash)` pair, a client MUST:
   traversed;
 - update the durable pin only after the full transition is accepted.
 
+An older snapshot parent manifest is acceptable only when its body hash resolves
+uniquely in a complete, verified genesis-to-pin history. The authenticated
+`GET /v1/manifests?after=0` route includes genesis; later non-negative cursors
+retain the exclusive `manifestVersion > after` semantics. Clients verify genesis
+and every intervening transition, including recovery authority from the previous
+manifest, and require the endpoint body and hash to match their locally trusted
+manifest. Server history alone is not a trust anchor. Pagination is limited to
+25 manifests per page and 100 pages per traversal.
+
+Snapshot signatures use the active creator in the proven parent manifest.
+Historical ancestry does not relax key-epoch, revision, previous-snapshot-hash,
+or ciphertext-integrity checks. A stored `fork-detected` block with code
+`SNAPSHOT_MANIFEST_PIN_MISMATCH` may be re-evaluated without clearing it first:
+only successful ancestry and snapshot verification permits normal synchronization
+to resume. Failed proof leaves existing pins, block and financial data intact;
+other security blocks are not automatically cleared. Clearing compares the exact
+stale block and pins atomically. A newer verified snapshot waits for operation
+catch-up before compaction acceptance. Revalidation requires a compatible locally
+available key; an epoch mismatch remains blocked, while ordinary key rotation
+continues through the existing device-security envelope flow. Local dirty data continues
+through the existing operation or conflict flow.
+
 Pairing authenticates the first pin with the pairing-secret transcript MAC.
 Recovery authenticates it with the hash inside the decrypted recovery bundle.
 A server-provided self-signature alone is insufficient for a new device.

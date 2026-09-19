@@ -558,3 +558,37 @@ describe('Phase 1 challenge and access-session authentication', () => {
     expect(expiredGrant.status).toBe(401);
   });
 });
+
+describe('authenticated manifest history cursor', () => {
+  it('returns genesis after zero, preserves after-one semantics and rejects invalid cursors', async () => {
+    const fixture = await createInitialVaultFixture();
+    await registerInitialVault(fixture);
+    const { accessToken } = await createAccessSession(fixture);
+    const request = (cursor: string, authenticated = true) =>
+      SELF.fetch(
+        new Request(`https://sync.invalid/v1/manifests?after=${encodeURIComponent(cursor)}`, {
+          headers: {
+            Origin: TEST_ORIGIN,
+            'X-Mirna-Protocol-Version': '1',
+            ...(authenticated ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
+        }),
+      );
+    const genesis = await request('0');
+    expect(genesis.status).toBe(200);
+    expect(await genesis.json()).toMatchObject({
+      manifests: [fixture.manifest],
+      nextAfterManifestVersion: null,
+    });
+    const afterOne = await request('1');
+    expect(afterOne.status).toBe(200);
+    expect(await afterOne.json()).toMatchObject({ manifests: [], nextAfterManifestVersion: null });
+    for (const invalid of ['-1', '0.5', '1x', ' 0', '0 ', 'NaN', '9007199254740992', '00']) {
+      expect((await request(invalid)).status, invalid).toBe(400);
+    }
+    const future = await request('2');
+    expect(future.status).toBe(409);
+    expect(await errorCode(future)).toBe('MANIFEST_CURSOR_INVALID');
+    expect((await request('0', false)).status).toBe(401);
+  });
+});

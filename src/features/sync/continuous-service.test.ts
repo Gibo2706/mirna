@@ -236,3 +236,40 @@ describe('continuous encrypted sync orchestration', () => {
     expect(ports.operations.acknowledge).not.toHaveBeenCalled();
   });
 });
+
+describe('stale snapshot manifest block orchestration', () => {
+  it.each([true, false])(
+    'revalidates before security and operations and continues only after proof (valid: %s)',
+    async (valid) => {
+      const initial = metadata({
+        syncBlockReason: 'fork-detected',
+        lastErrorCode: 'SNAPSHOT_MANIFEST_PIN_MISMATCH',
+      });
+      const ports = createPorts({ initialMetadata: initial });
+      const order: string[] = [];
+      const security = {
+        reconcileKeyEpoch: vi.fn(async () => {
+          order.push('security');
+          return setup(initial);
+        }),
+      };
+      vi.mocked(ports.snapshots.synchronize).mockImplementation(async () => {
+        order.push('snapshot');
+        if (!valid) return { kind: 'blocked', reason: 'fork-detected', revision: 2 };
+        initial.syncBlockReason = undefined;
+        initial.lastErrorCode = undefined;
+        return { kind: 'up-to-date', revision: 2 };
+      });
+      vi.mocked(ports.operations.synchronize).mockImplementation(async () => {
+        if (initial.syncBlockReason) throw new Error('Operations cannot run while blocked');
+        order.push('operations');
+        return operationResult;
+      });
+      const result = await new ContinuousSyncService({ ...ports, security }).synchronize();
+      expect(result.kind).toBe(valid ? 'synchronized' : 'blocked');
+      expect(order).toEqual(
+        valid ? ['snapshot', 'security', 'operations', 'snapshot'] : ['snapshot'],
+      );
+    },
+  );
+});

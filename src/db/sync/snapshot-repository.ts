@@ -50,6 +50,13 @@ export type SnapshotMetadataChanges = Pick<
     >
   >;
 
+const sameBlock = (
+  current: SyncMetadataRecord,
+  expected: Pick<SyncMetadataRecord, 'syncBlockReason' | 'lastErrorCode'>,
+): boolean =>
+  current.syncBlockReason === expected.syncBlockReason &&
+  current.lastErrorCode === expected.lastErrorCode;
+
 const storedSnapshotEntityState = (
   vaultId: string,
   state: SnapshotEntityStateV1,
@@ -235,11 +242,33 @@ export class SyncSnapshotRepository {
     });
   }
 
+  /** Only call after complete snapshot and manifest proof. Never clear a newer block. */
+  async clearRevalidatedManifestBlock(setup: LocalSyncSetup): Promise<LocalSyncSetup> {
+    return this.database.transaction('rw', this.database.syncMetadata, async () => {
+      const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
+      if (
+        !current ||
+        current.vaultId !== setup.vault.vaultId ||
+        current.lastManifestHash !== setup.metadata.lastManifestHash ||
+        current.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
+        current.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+        current.syncBlockReason !== 'fork-detected' ||
+        current.lastErrorCode !== 'SNAPSHOT_MANIFEST_PIN_MISMATCH'
+      ) {
+        throw new LocalSnapshotRaceError();
+      }
+      const metadata = { ...current, syncBlockReason: undefined, lastErrorCode: undefined };
+      await this.database.syncMetadata.put(metadata);
+      return { ...setup, metadata };
+    });
+  }
+
   async updateMetadata(
     vaultId: string,
     expectedSnapshotRevision: number,
     expectedManifestHash: string,
     changes: SnapshotMetadataChanges,
+    expectedBlock?: Pick<SyncMetadataRecord, 'syncBlockReason' | 'lastErrorCode'>,
   ): Promise<void> {
     await this.database.transaction('rw', this.database.syncMetadata, async () => {
       const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
@@ -247,6 +276,7 @@ export class SyncSnapshotRepository {
         !current ||
         current.vaultId !== vaultId ||
         current.lastSnapshotRevision !== expectedSnapshotRevision ||
+        (expectedBlock !== undefined && !sameBlock(current, expectedBlock)) ||
         current.lastManifestHash !== expectedManifestHash
       ) {
         throw new LocalSnapshotRaceError();
@@ -270,6 +300,7 @@ export class SyncSnapshotRepository {
           current.vaultId !== setup.vault.vaultId ||
           current.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
           current.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          !sameBlock(current, setup.metadata) ||
           current.lastManifestHash !== setup.metadata.lastManifestHash
         ) {
           throw new LocalSnapshotRaceError();
@@ -308,6 +339,7 @@ export class SyncSnapshotRepository {
           current.vaultId !== setup.vault.vaultId ||
           current.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
           current.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          !sameBlock(current, setup.metadata) ||
           current.lastManifestHash !== setup.metadata.lastManifestHash
         ) {
           throw new LocalSnapshotRaceError();
@@ -350,6 +382,7 @@ export class SyncSnapshotRepository {
           currentMetadata.vaultId !== setup.vault.vaultId ||
           currentMetadata.lastSnapshotRevision !== setup.metadata.lastSnapshotRevision ||
           currentMetadata.lastSnapshotHash !== setup.metadata.lastSnapshotHash ||
+          !sameBlock(currentMetadata, setup.metadata) ||
           currentMetadata.lastManifestHash !== setup.metadata.lastManifestHash ||
           causalFrontier.serverCursor > currentMetadata.lastServerCursor
         ) {
@@ -445,6 +478,7 @@ export class SyncSnapshotRepository {
         if (
           !current ||
           current.vaultId !== setup.vault.vaultId ||
+          !sameBlock(current, setup.metadata) ||
           current.lastManifestHash !== setup.metadata.lastManifestHash
         ) {
           throw new LocalSnapshotRaceError();

@@ -55,6 +55,7 @@ import {
 } from './runtime/SyncRuntimeProvider';
 import { CLOUD_VAULT_DELETE_CONFIRMATION } from './device-security-service';
 import { SyncApiError } from './api';
+import { canRevalidateSnapshotManifest } from './snapshot-service';
 import { TurnstileCard } from './ui/TurnstileCard';
 import { LazyDiagnostics } from './ui/SyncDiagnostics';
 import { parsePairingQrPayload } from '@/domain/sync/crypto';
@@ -1267,7 +1268,11 @@ const ActivePanel = ({
           </Button>
           <Button
             variant="secondary"
-            disabled={busy || Boolean(setup.metadata.syncBlockReason)}
+            disabled={
+              busy ||
+              (Boolean(setup.metadata.syncBlockReason) &&
+                !canRevalidateSnapshotManifest(setup.metadata))
+            }
             onClick={() => void synchronize(false)}
           >
             {busy ? <BusyIcon /> : <RefreshCw size={17} aria-hidden="true" />}
@@ -1295,13 +1300,36 @@ const ActivePanel = ({
         ) : null}
         {setup.metadata.syncBlockReason ? (
           <p role="alert" className="rounded-xl bg-danger-soft p-3 text-sm leading-6 text-danger">
-            Automatska sinhronizacija je zaustavljena: {setup.metadata.syncBlockReason}. Lokalni
-            podaci nisu prepisani.
+            {canRevalidateSnapshotManifest(setup.metadata)
+              ? 'Potrebna je ponovna provera istorije sinhronizacije. Izaberite „Sinhronizuj sada”. Lokalni podaci su sačuvani.'
+              : `Automatska sinhronizacija je zaustavljena: ${setup.metadata.syncBlockReason}. Lokalni podaci nisu prepisani.`}
           </p>
         ) : null}
         <details className="rounded-xl border bg-surface-2 p-3 text-sm">
           <summary className="min-h-8 cursor-pointer font-bold">Tehnički detalji</summary>
           <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+            {setup.metadata.syncBlockReason ? (
+              <>
+                <div>
+                  <dt className="text-xs text-muted">Blokada</dt>
+                  <dd className="mt-1 break-all font-mono">{setup.metadata.syncBlockReason}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted">Kod</dt>
+                  <dd className="mt-1 break-all font-mono">
+                    {setup.metadata.lastErrorCode ?? '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted">Snapshot revizija</dt>
+                  <dd className="mt-1">{setup.metadata.lastSnapshotRevision}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted">Manifest verzija</dt>
+                  <dd className="mt-1">{setup.vault.manifest.manifestVersion}</dd>
+                </div>
+              </>
+            ) : null}
             <div>
               <dt className="text-xs text-muted">ID ovog uređaja</dt>
               <dd className="mt-1 break-all font-mono">{setup.device.deviceId}</dd>

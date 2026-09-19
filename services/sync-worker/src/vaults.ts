@@ -357,7 +357,7 @@ export const handleGetManifestChanges = async (
   authenticated: AuthenticatedDevice,
 ): Promise<Response> => {
   const rawAfter = new URL(context.request.url).searchParams.get('after');
-  if (rawAfter === null || !/^[1-9][0-9]*$/u.test(rawAfter)) {
+  if (rawAfter === null || !/^(0|[1-9][0-9]*)$/u.test(rawAfter)) {
     throw new HttpError(400, 'INVALID_REQUEST', 'Manifest cursor is invalid.');
   }
   const after = Number(rawAfter);

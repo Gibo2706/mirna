@@ -904,3 +904,39 @@ describe('Phase 1 sync UI', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('snapshot manifest block diagnostics', () => {
+  it.each(['SNAPSHOT_MANIFEST_PIN_MISMATCH', 'SNAPSHOT_FORK_DETECTED'])(
+    'shows safe diagnostics and permits only ancestry retries (%s)',
+    async (code) => {
+      const user = userEvent.setup();
+      const setup = localSetup();
+      setup.metadata.syncBlockReason = 'fork-detected';
+      setup.metadata.lastErrorCode = code;
+      setup.metadata.firstUploadConsent = 'accepted';
+      setup.metadata.lastSnapshotRevision = 1;
+      setup.vault.manifest.manifestVersion = 5;
+      renderManager(
+        baseServices(
+          {},
+          {
+            setup,
+            pendingConflictCount: 0,
+            pendingLocalOperationCount: 1,
+            pendingConflicts: [],
+            pendingPairingFinalization: false,
+            deviceAliases: [],
+          },
+        ),
+      );
+      await user.click((await screen.findAllByText('Tehnički detalji'))[0]);
+      expect(screen.getByText('Blokada')).toBeVisible();
+      expect(screen.getByText(code)).toBeVisible();
+      expect(screen.getByText('Snapshot revizija')).toBeVisible();
+      expect(screen.getByText('Manifest verzija')).toBeVisible();
+      const button = screen.getByRole('button', { name: 'Sinhronizuj sada' });
+      if (code === 'SNAPSHOT_MANIFEST_PIN_MISMATCH') expect(button).toBeEnabled();
+      else expect(button).toBeDisabled();
+    },
+  );
+});
