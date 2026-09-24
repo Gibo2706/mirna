@@ -60,6 +60,7 @@ const worker = spawn(
   [
     wranglerEntrypoint,
     'dev',
+    resolve(repositoryRoot, 'services/sync-worker/src/e2e-fixture.ts'),
     '--local',
     '--ip',
     '127.0.0.1',

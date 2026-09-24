@@ -65,9 +65,9 @@ const localD1Path = (): string => {
 };
 
 const localD1 = (command: string): readonly D1Row[] => {
-  // WAL inspections must not acquire a write-capable connection. The two
-  // deliberate expiry fixtures below still need writes to this isolated DB.
-  const database = new DatabaseSync(localD1Path(), { readOnly: /^\s*SELECT\b/iu.test(command) });
+  // The running Worker is the only writer to this isolated SQLite database.
+  if (!/^\s*SELECT\b/iu.test(command)) throw new Error('Local D1 inspection must be read-only.');
+  const database = new DatabaseSync(localD1Path(), { readOnly: true });
   try {
     database.exec('PRAGMA busy_timeout = 5000');
     const rows: unknown = database.prepare(command).all();
@@ -922,6 +922,7 @@ test('pairing finalization survives response loss and reload without duplicate a
 
 test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths, and recover', async ({
   browser,
+  request,
 }) => {
   test.setTimeout(180_000);
 
@@ -1057,9 +1058,13 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   }
   const expiringRequestId = expiringRequestIdValue;
   expect(expiringRequestId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
-  localD1(
-    `UPDATE pairing_requests SET expires_at = created_at + 1 WHERE pairing_request_id = ${sqlLiteral(expiringRequestId)} AND status = 'pending'`,
-  );
+  expect(
+    (
+      await request.post(`${SYNC_API_ORIGIN}/__e2e/expire-pairing`, {
+        data: { pairingRequestId: expiringRequestId },
+      })
+    ).status(),
+  ).toBe(204);
   await expiringDevice.waitForTimeout(1_100);
   await fillPairingCode(desktop, expiringCode);
   await desktop.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
@@ -1108,7 +1113,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
       .catch(() => false))
   ) {
     await expect(recoveryPage.getByRole('alert').last()).toContainText(
-      /servis trenutno ne može pouzdano da izmeri potrošnju/u,
+      /servis trenutno ne može pouzdano da izmeri potrošnju/iu,
     );
     await prepareRecovery.click();
   }
@@ -1192,6 +1197,7 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
 
 test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, revoke and delete cloud state', async ({
   browser,
+  request,
 }, testInfo) => {
   test.setTimeout(420_000);
   const performanceTimingsMs: Record<string, number> = {};
@@ -1242,6 +1248,10 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   expect(await transactionCount(desktop, 'AUTO-SYNC-FROM-B')).toBe(1);
 
   await phone.goto(`${ENABLED_APP_ORIGIN}/`);
+  // Automatic sync intentionally sleeps in hidden tabs. The other device may
+  // own focus after its reload, so foreground the device under test.
+  await phone.bringToFront();
+  await expect.poll(() => phone.evaluate(() => document.visibilityState)).toBe('visible');
   await phoneContext.setOffline(true);
   await addPresetExpense(phone, 'Kafa', '360 RSD');
   await expect
@@ -1336,9 +1346,13 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
     ).toBe('Telefon bira ovu vrednost');
   }
 
-  localD1(
-    `UPDATE device_grants SET issued_at = 0, expires_at = 1 WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND device_id = ${sqlLiteral(initial.desktop.deviceId)} AND revoked_at IS NULL`,
-  );
+  expect(
+    (
+      await request.post(`${SYNC_API_ORIGIN}/__e2e/expire-grant`, {
+        data: { vaultId: initial.phone.vaultId, deviceId: initial.desktop.deviceId },
+      })
+    ).status(),
+  ).toBe(204);
   const expiredGrant = localD1(
     `SELECT expires_at FROM device_grants WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND device_id = ${sqlLiteral(initial.desktop.deviceId)} AND revoked_at IS NULL`,
   );
