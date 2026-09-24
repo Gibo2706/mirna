@@ -555,8 +555,9 @@ describe('Phase 1 sync UI', () => {
     setup.metadata.firstUploadConsent = 'accepted';
     setup.metadata.lastSnapshotRevision = 1;
     setup.metadata.lastSuccessfulSyncAt = '2026-08-19T10:00:00.000Z';
-    const synchronize = vi.fn(() =>
-      Promise.resolve({
+    const synchronize = vi.fn(() => {
+      setup.metadata.lastSuccessfulSyncAt = new Date().toISOString();
+      return Promise.resolve({
         kind: 'synchronized' as const,
         revision: 1,
         uploadedOperations: 0,
@@ -566,8 +567,8 @@ describe('Phase 1 sync UI', () => {
         pendingLocalOperations: 0,
         acknowledgedServerCursor: 0,
         compacted: false,
-      }),
-    );
+      });
+    });
     const services = baseServices(
       { synchronize },
       {

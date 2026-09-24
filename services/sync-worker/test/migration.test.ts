@@ -59,7 +59,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(12);
+    expect(migrationCount).toBe(13);
 
     expect(
       await env.MIRNA_SYNC_DB.prepare(

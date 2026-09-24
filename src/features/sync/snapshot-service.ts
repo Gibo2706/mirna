@@ -755,7 +755,11 @@ export class SnapshotSyncService {
     options: SnapshotSyncOptions,
     initialUpload: boolean,
   ): Promise<SnapshotSyncResult> {
-    if (initialUpload && options.allowInitialUpload !== true) {
+    if (
+      initialUpload &&
+      setup.metadata.firstUploadConsent !== 'accepted' &&
+      options.allowInitialUpload !== true
+    ) {
       throw new SnapshotSyncError(
         'upload-consent-required',
         'Prvi upload zahteva eksplicitnu saglasnost.',

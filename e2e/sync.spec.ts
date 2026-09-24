@@ -1146,6 +1146,17 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   expect(Number(recoveredDeviceCounts.find((row) => row.status === 'active')?.count)).toBe(1);
   expect(Number(recoveredDeviceCounts.find((row) => row.status === 'revoked')?.count)).toBe(2);
 
+  const recoverySnapshots = await localD1(
+    request,
+    `SELECT key_epoch, revision, state FROM snapshots WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)} ORDER BY key_epoch, revision`,
+  );
+  expect(recoverySnapshots).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ key_epoch: 1, state: 'superseded' }),
+      expect.objectContaining({ key_epoch: 2, revision: 1, state: 'committed' }),
+    ]),
+  );
+
   const storedCiphertextRows = await localD1(
     request,
     `
@@ -1377,6 +1388,12 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   await expect.poll(async () => (await readLocalSyncSecurityView(phone)).manifestVersion).toBe(3);
   await synchronizeSuccessfully(desktop);
   expect((await readLocalSyncSecurityView(desktop)).manifestVersion).toBe(3);
+
+  await phone.goto(`${ENABLED_APP_ORIGIN}/`);
+  await addCustomExpense(phone, 'AFTER-RENEWAL-FROM-PHONE', 333);
+  await synchronizeSuccessfully(phone);
+  await synchronizeSuccessfully(desktop);
+  expect(await transactionCount(desktop, 'AFTER-RENEWAL-FROM-PHONE')).toBe(1);
 
   await phone.goto(`${ENABLED_APP_ORIGIN}/more/sync`);
   const revisionBeforeRevocation = (await readLocalSyncSecurityView(phone)).lastSnapshotRevision;

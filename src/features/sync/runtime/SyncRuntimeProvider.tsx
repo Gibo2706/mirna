@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { ContinuousSyncResult } from '../continuous-service';
+import { LocalOperationStateError } from '@/db/sync/operation-repository';
 import {
   useSnapshotSyncScheduler,
   type SyncSchedulerActivity,
@@ -42,6 +43,25 @@ export interface SyncRuntimeValue {
 }
 
 const SyncRuntimeContext = createContext<SyncRuntimeValue | null>(null);
+const INCOMPLETE_SYNC_MESSAGE =
+  'Sinhronizacija nije završena. Proverite tehničke detalje i pokušajte ponovo.';
+
+const completedAt = (
+  result: ContinuousSyncResult,
+  status: SyncUiLocalStatus | undefined,
+  startedAt: number,
+): string | undefined => {
+  if (
+    result.kind !== 'synchronized' ||
+    result.pendingLocalOperations > 0 ||
+    result.conflictedGroups > 0 ||
+    status?.pendingLocalOperationCount !== 0 ||
+    status.pendingConflictCount !== 0
+  )
+    return undefined;
+  const timestamp = status.setup?.metadata.lastSuccessfulSyncAt;
+  return timestamp && Date.parse(timestamp) >= startedAt ? timestamp : undefined;
+};
 
 const deriveRestingActivity = (status: SyncUiLocalStatus): SyncActivity => {
   if (!status.setup) return { kind: 'idle' };
@@ -79,11 +99,12 @@ export const SyncRuntimeProvider = ({
       statusRef.current = status;
       setLocalStatus(status);
       setActivity((current) =>
-        current.kind === 'syncing' || current.kind === 'paused'
+        current.kind === 'syncing' || current.kind === 'paused' || current.kind === 'attention'
           ? current
           : deriveRestingActivity(status),
       );
     } catch {
+      statusRef.current = undefined;
       setLoadError(
         'Lokalno sync podešavanje nije moguće bezbedno pročitati. Ne pokrećemo mrežne radnje.',
       );
@@ -99,10 +120,15 @@ export const SyncRuntimeProvider = ({
     };
   }, []);
 
-  const synchronizeAutomatically = useCallback(
-    () => services.synchronize(false, false),
-    [services],
-  );
+  const synchronizeAutomatically = useCallback(async () => {
+    const startedAt = Date.now();
+    const result = await services.synchronize(false, false);
+    const status = await services.loadLocalStatus();
+    if (!completedAt(result, status, startedAt)) {
+      throw new LocalOperationStateError(INCOMPLETE_SYNC_MESSAGE);
+    }
+    return result;
+  }, [services]);
 
   const handleSchedulerActivity = useCallback((next: SyncSchedulerActivity) => {
     switch (next.kind) {
@@ -125,7 +151,12 @@ export const SyncRuntimeProvider = ({
   }, []);
 
   useSnapshotSyncScheduler({
-    enabled: Boolean(localStatus?.setup),
+    enabled:
+      Boolean(localStatus?.setup) &&
+      !(
+        localStatus?.setup?.metadata.bootstrapMode === 'creator-upload' &&
+        localStatus.setup.metadata.firstUploadConsent !== 'accepted'
+      ),
     vaultId: localStatus?.setup?.vault.vaultId,
     getStatus: getSchedulerStatus,
     synchronize: synchronizeAutomatically,
@@ -150,6 +181,7 @@ export const SyncRuntimeProvider = ({
         kind: 'syncing',
         reason: options.reason ?? (options.allowInitialUpload ? 'first-upload' : 'manual'),
       });
+      const startedAt = Date.now();
       try {
         const result = await services.synchronize(options.allowInitialUpload ?? false, false);
         await refresh();
@@ -162,8 +194,12 @@ export const SyncRuntimeProvider = ({
           setActivity({ kind: 'attention', reason: result.kind });
         } else if (result.kind === 'synchronized' && result.pendingLocalOperations > 0) {
           setActivity({ kind: 'pending', count: result.pendingLocalOperations });
+        } else if (result.kind === 'synchronized') {
+          const at = completedAt(result, statusRef.current, startedAt);
+          if (!at) throw new LocalOperationStateError(INCOMPLETE_SYNC_MESSAGE);
+          setActivity({ kind: 'synced', at });
         } else {
-          setActivity({ kind: 'synced', at: new Date().toISOString() });
+          setActivity({ kind: 'attention', reason: 'sync-incomplete' });
         }
         return result;
       } catch (error) {

@@ -203,6 +203,14 @@ export const createDefaultSyncUiServices = (): SyncUiServices => {
     snapshots: snapshotService,
     security: securityService,
     repository: operationRepository,
+    reportDiagnostic: async ({ phase, outcome, code }) => {
+      await diagnostics.record({
+        eventType: outcome === 'error' ? 'sync_cycle_error' : 'sync_cycle_result',
+        severity: outcome === 'completed' ? 'info' : 'error',
+        route: phase,
+        safeCode: code,
+      });
+    },
   });
 
   return {
