@@ -1,4 +1,8 @@
-import { LocalOperationStateError, OperationChainGapError, SyncOperationRepository } from '@/db/sync/operation-repository';
+import {
+  LocalOperationStateError,
+  OperationChainGapError,
+  SyncOperationRepository,
+} from '@/db/sync/operation-repository';
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
 import {
   canRevalidateSnapshotManifest,

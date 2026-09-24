@@ -212,7 +212,8 @@ export class SnapshotSyncService {
       !setup.metadata.lastSnapshotId ||
       !setup.metadata.lastSnapshotHash ||
       setup.metadata.syncBlockReason
-    ) return false;
+    )
+      return false;
 
     await this.#authenticate(setup);
     const remote = await this.#api.downloadCurrentSnapshot();
@@ -222,7 +223,8 @@ export class SnapshotSyncService {
         envelope.snapshotId !== setup.metadata.lastSnapshotId ||
         envelope.revision !== setup.metadata.lastSnapshotRevision ||
         (await hashEncryptedSnapshotEnvelope(envelope)) !== setup.metadata.lastSnapshotHash
-      ) return false;
+      )
+        return false;
 
       const key = await openEncryptedKeyEnvelope(
         setup.vaultKey.encryptedKey,
