@@ -7,6 +7,7 @@ import {
   FOREGROUND_RESUME_STALE_MS,
   LOCAL_MUTATION_DEBOUNCE_MS,
   MIN_AUTO_SYNC_GAP_MS,
+  OFFLINE_RECHECK_MS,
   VISIBLE_SYNC_INTERVAL_MS,
   useSnapshotSyncScheduler,
   type SyncSchedulerStatus,
@@ -139,6 +140,31 @@ describe('global foreground sync scheduler', () => {
     });
     await flush(MIN_AUTO_SYNC_GAP_MS);
     expect(synchronize).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers pending offline work even when the browser misses the online event', async () => {
+    const status = { pendingLocalOperationCount: 0 };
+    const synchronize = vi.fn(() => {
+      status.pendingLocalOperationCount = 0;
+      return Promise.resolve();
+    });
+    render(<SchedulerHarness status={status} synchronize={synchronize} />);
+    await flush();
+    expect(synchronize).toHaveBeenCalledOnce();
+
+    setOnline(false);
+    status.pendingLocalOperationCount = 1;
+    window.dispatchEvent(new Event(MIRNA_SYNC_LOCAL_MUTATION_EVENT));
+    await flush(OFFLINE_RECHECK_MS * 2);
+    expect(synchronize).toHaveBeenCalledOnce();
+    expect(status.pendingLocalOperationCount).toBe(1);
+
+    setOnline(true);
+    await flush(OFFLINE_RECHECK_MS);
+    await flush(MIN_AUTO_SYNC_GAP_MS - OFFLINE_RECHECK_MS * 3);
+    expect(synchronize).toHaveBeenCalledTimes(2);
+    expect(synchronize).toHaveBeenLastCalledWith('local-mutation');
+    expect(status.pendingLocalOperationCount).toBe(0);
   });
 
   it('defers a mutation inside the minimum gap instead of losing it', async () => {

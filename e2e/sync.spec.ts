@@ -100,6 +100,12 @@ const captureSyncRequestBodies = (context: BrowserContext): void => {
   });
 };
 
+const restoreNetwork = async (context: BrowserContext, page: Page): Promise<void> => {
+  await context.setOffline(false);
+  await expect.poll(() => page.evaluate(() => navigator.onLine), { timeout: 10_000 }).toBe(true);
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+};
+
 const dismissOfflineReady = async (page: Page): Promise<void> => {
   const button = page.getByRole('button', { name: 'U redu' });
   if (await button.isVisible().catch(() => false)) await button.click();
@@ -1241,7 +1247,7 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   await expect
     .poll(async () => (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount)
     .toBe(1);
-  await phoneContext.setOffline(false);
+  await restoreNetwork(phoneContext, phone);
   performanceStartedAt = performance.now();
   await expect
     .poll(async () => (await readLocalSyncSecurityView(phone)).pendingLocalOperationCount, {
