@@ -28,6 +28,7 @@ import {
   createSyncFinanceData,
   hashEncryptedSnapshotEnvelope,
   type EncryptedSnapshotArtifactV1,
+  type SnapshotCausalFrontierV1,
 } from '@/domain/sync/snapshot';
 import { emptyFinanceData, tx } from '@/tests/factories';
 import type { VaultManifestV1 } from '@/domain/sync/schemas';
@@ -236,6 +237,7 @@ const remoteArtifact = async (input: {
   data: FinanceData;
   revision: number;
   previousSnapshotHash: string | null;
+  causalFrontier?: SnapshotCausalFrontierV1;
 }): Promise<EncryptedSnapshotArtifactV1> =>
   createEncryptedSnapshot({
     data: input.data,
@@ -247,7 +249,7 @@ const remoteArtifact = async (input: {
     createdAt: NOW.toISOString(),
     parentManifestHash: input.setup.metadata.lastManifestHash,
     previousSnapshotHash: input.previousSnapshotHash,
-    causalFrontier: { serverCursor: 0, devices: [] },
+    causalFrontier: input.causalFrontier ?? { serverCursor: 0, devices: [] },
     vaultMasterKey: input.vaultMasterKey,
     signingPrivateKey: input.setup.device.signingPrivateKey,
     compression: 'none',
@@ -436,14 +438,24 @@ describe('Phase 2 snapshot sync service', () => {
       tx({ id: 'paired-income', type: 'income', amount: 8_765, categoryId: 'income' }),
     );
     const api = new FakeSnapshotApi(material.setup);
+    const snapshotFrontier = {
+      serverCursor: 5,
+      devices: [{
+        deviceId: material.setup.device.deviceId,
+        deviceSequence: 2,
+        lastOperationHash: 'A'.repeat(43),
+      }],
+    };
     api.remote = await remoteArtifact({
       setup: material.setup,
       vaultMasterKey: material.vaultMasterKey,
       data: remoteData,
       revision: 1,
       previousSnapshotHash: null,
+      causalFrontier: snapshotFrontier,
     });
     material.setup.metadata.lastSnapshotId = api.remote.envelope.snapshotId;
+    material.setup.metadata.bootstrapMode = 'paired-download';
     const repository = new SyncSnapshotRepository(database);
     await repository.writeSetup(material.setup);
     const service = new SnapshotSyncService({
@@ -460,6 +472,24 @@ describe('Phase 2 snapshot sync service', () => {
       installHintDismissed: false,
     });
     expect(await database.syncCheckpoints.get(SYNC_CHECKPOINT_RECORD_ID)).toBeUndefined();
+    const frontierId = `${material.setup.vault.vaultId}:${material.setup.device.deviceId}`;
+    expect(await database.syncFrontier.get(frontierId)).toMatchObject({
+      lastDeviceSequence: 2,
+      lastOperationHash: 'A'.repeat(43),
+    });
+
+    // Simulate a device bootstrapped by an older build without its signed frontier.
+    await database.syncFrontier.delete(frontierId);
+    await expect(service.restorePinnedFrontier()).resolves.toBe(true);
+    expect(await database.syncFrontier.get(frontierId)).toMatchObject({
+      lastDeviceSequence: 2,
+      lastOperationHash: 'A'.repeat(43),
+    });
+    await database.syncFrontier.delete(frontierId);
+    api.remote.envelope.snapshotId = createOpaqueId();
+    await expect(service.restorePinnedFrontier()).resolves.toBe(false);
+    expect(await database.syncFrontier.get(frontierId)).toBeUndefined();
+    expect(await database.transactions.get('paired-income')).toMatchObject({ amount: 8_765 });
     clearBytes(material.vaultMasterKey);
     database.close();
   });
