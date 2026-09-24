@@ -2,6 +2,7 @@ import { LocalOperationStateError, SyncOperationRepository } from '@/db/sync/ope
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
 import {
   canRevalidateSnapshotManifest,
+  SnapshotSyncError,
   type SnapshotSyncOptions,
   type SnapshotSyncResult,
 } from './snapshot-service';
@@ -34,6 +35,22 @@ export interface ContinuousSyncOptions {
   readonly signal?: AbortSignal;
 }
 
+export type SyncCyclePhase =
+  | 'setup'
+  | 'manifest'
+  | 'security'
+  | 'bootstrap'
+  | 'operations'
+  | 'snapshot'
+  | 'acknowledgement'
+  | 'checkpoint';
+
+export interface SyncCycleDiagnostic {
+  readonly phase: SyncCyclePhase;
+  readonly outcome: 'completed' | 'incomplete' | 'error';
+  readonly code: string;
+}
+
 export interface ContinuousOperationSyncPort {
   readonly synchronize: (options?: OperationSyncOptions) => Promise<OperationSyncResult>;
   readonly acknowledge: () => Promise<number>;
@@ -64,6 +81,12 @@ export interface ContinuousSyncRepositoryPort {
   }>;
 }
 
+const diagnosticErrorCode = (error: unknown): string => {
+  if (error instanceof LocalOperationStateError) return 'LOCAL_STATE_CHANGED';
+  if (error instanceof SnapshotSyncError) return error.code.replaceAll('-', '_').toUpperCase();
+  return 'SYNC_CYCLE_FAILED';
+};
+
 const canContinueAfterSnapshot = (
   result: SnapshotSyncResult,
 ): result is Extract<SnapshotSyncResult, { kind: 'uploaded' | 'downloaded' | 'up-to-date' }> =>
@@ -74,6 +97,7 @@ export class ContinuousSyncService {
   readonly #snapshots: ContinuousSnapshotSyncPort;
   readonly #repository: ContinuousSyncRepositoryPort;
   readonly #security?: ContinuousDeviceSecurityPort;
+  readonly #reportDiagnostic?: (diagnostic: SyncCycleDiagnostic) => Promise<void>;
   #queue: Promise<void> = Promise.resolve();
 
   constructor(input: {
@@ -81,15 +105,43 @@ export class ContinuousSyncService {
     snapshots: ContinuousSnapshotSyncPort;
     security?: ContinuousDeviceSecurityPort;
     repository?: ContinuousSyncRepositoryPort;
+    reportDiagnostic?: (diagnostic: SyncCycleDiagnostic) => Promise<void>;
   }) {
     this.#operations = input.operations;
     this.#snapshots = input.snapshots;
     this.#security = input.security;
+    this.#reportDiagnostic = input.reportDiagnostic;
     this.#repository = input.repository ?? new SyncOperationRepository();
   }
 
   synchronize(options: ContinuousSyncOptions = {}): Promise<ContinuousSyncResult> {
-    const operation = this.#queue.then(() => this.#synchronizeOnce(options));
+    const operation = this.#queue.then(async () => {
+      const phase = { current: 'setup' as SyncCyclePhase };
+      const setPhase = (next: SyncCyclePhase) => {
+        phase.current = next;
+      };
+      try {
+        const result = await this.#synchronizeOnce(options, setPhase);
+        const completed =
+          result.kind === 'synchronized' &&
+          result.pendingLocalOperations === 0 &&
+          result.conflictedGroups === 0 &&
+          phase.current === 'checkpoint';
+        await this.#report({
+          phase: phase.current,
+          outcome: completed ? 'completed' : 'incomplete',
+          code: completed ? 'SYNC_COMPLETED' : 'SYNC_INCOMPLETE',
+        });
+        return result;
+      } catch (error) {
+        await this.#report({
+          phase: phase.current,
+          outcome: 'error',
+          code: diagnosticErrorCode(error),
+        });
+        throw error;
+      }
+    });
     this.#queue = operation.then(
       () => undefined,
       () => undefined,
@@ -97,20 +149,34 @@ export class ContinuousSyncService {
     return operation;
   }
 
-  async #synchronizeOnce(options: ContinuousSyncOptions): Promise<ContinuousSyncResult> {
+  async #report(diagnostic: SyncCycleDiagnostic): Promise<void> {
+    try {
+      await this.#reportDiagnostic?.(diagnostic);
+    } catch {
+      // Local diagnostics must never change the result of a financial sync.
+    }
+  }
+
+  async #synchronizeOnce(
+    options: ContinuousSyncOptions,
+    setPhase: (phase: SyncCyclePhase) => void,
+  ): Promise<ContinuousSyncResult> {
     const beforeSecurity = await this.#repository.readSetup();
     if (beforeSecurity && canRevalidateSnapshotManifest(beforeSecurity.metadata)) {
+      setPhase('manifest');
       const revalidated = await this.#snapshots.synchronize({
         continuousOperations: true,
         signal: options.signal,
       });
       if (!canContinueAfterSnapshot(revalidated)) return revalidated;
     }
+    setPhase('security');
     await this.#security?.reconcileKeyEpoch();
     const initialSetup = await this.#repository.readSetup();
     if (!initialSetup) throw new Error('Sinhronizacija nije uključena na ovom uređaju.');
     const bootstrapping = initialSetup.metadata.lastSnapshotRevision === 0;
     if (bootstrapping) {
+      setPhase('bootstrap');
       const bootstrap = await this.#snapshots.synchronize({
         allowInitialUpload: options.allowInitialUpload,
         continuousOperations: true,
@@ -119,6 +185,7 @@ export class ContinuousSyncService {
       if (!canContinueAfterSnapshot(bootstrap)) return bootstrap;
     }
 
+    setPhase('operations');
     const operationResult = await this.#operations.synchronize({ acknowledge: false });
     const setupAfterOperations = await this.#repository.readSetup();
     if (!setupAfterOperations) throw new Error('Lokalno sync stanje je uklonjeno tokom obrade.');
@@ -149,13 +216,16 @@ export class ContinuousSyncService {
             setupAfterOperations.vault.keyEpoch)) ||
       stats.operationCount >= COMPACTION_OPERATION_THRESHOLD ||
       stats.encryptedBytes >= COMPACTION_ENCRYPTED_BYTES_THRESHOLD;
+    setPhase('snapshot');
     const snapshotResult = await this.#snapshots.synchronize({
       continuousOperations: true,
       forceCompaction: shouldCompact,
       signal: options.signal,
     });
     if (!canContinueAfterSnapshot(snapshotResult)) return snapshotResult;
+    setPhase('acknowledgement');
     const acknowledgedServerCursor = await this.#operations.acknowledge();
+    setPhase('checkpoint');
     const metadata = await this.#repository.readMetadata();
     if (!metadata) throw new Error('Sync metadata nedostaje posle potvrde frontiera.');
     if (

@@ -302,6 +302,34 @@ describe('Phase 2 snapshot sync service', () => {
     database.close();
   });
 
+  it('uploads a recovered snapshot after consent was persisted before automatic sync', async () => {
+    const name = `mirna-snapshot-recovery-upload-${crypto.randomUUID()}`;
+    databaseNames.push(name);
+    const database = new FinanceDatabase(name);
+    const material = await createSetup();
+    material.setup.metadata.bootstrapMode = 'complete';
+    material.setup.metadata.firstUploadConsent = 'accepted';
+    const repository = new SyncSnapshotRepository(database);
+    await repository.writeSetup(material.setup);
+    await seedFinanceData(database, emptyFinanceData());
+    const api = new FakeSnapshotApi(material.setup);
+    const service = new SnapshotSyncService({
+      api,
+      origin: 'https://mirna.test',
+      repository,
+      now: () => NOW,
+    });
+
+    await expect(service.synchronize({ continuousOperations: true })).resolves.toEqual({
+      kind: 'uploaded',
+      revision: 1,
+    });
+    expect(api.uploads).toHaveLength(1);
+    expect((await repository.readSetup())?.metadata.lastSnapshotRevision).toBe(1);
+    clearBytes(material.vaultMasterKey);
+    database.close();
+  });
+
   it('keeps operation sync available when compaction awaits active-device ACKs', async () => {
     const name = `mirna-snapshot-ack-gate-${crypto.randomUUID()}`;
     databaseNames.push(name);

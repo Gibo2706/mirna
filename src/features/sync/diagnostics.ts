@@ -63,6 +63,8 @@ export const BETA_DIAGNOSTIC_EVENT_TYPES = [
   'turnstile_network_error',
   'turnstile_configuration_error',
   'sync_request_error',
+  'sync_cycle_result',
+  'sync_cycle_error',
   'budget_request_reservation_succeeded',
   'budget_route_reservation_succeeded',
   'vault_create_business_committed',

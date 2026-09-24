@@ -1110,12 +1110,8 @@ const ActivePanel = ({
               : 'Provera je završena; nema novih promena.',
           );
       } else {
-        success(
-          result.kind === 'uploaded'
-            ? 'Šifrovani snapshot je uspešno poslat.'
-            : result.kind === 'downloaded'
-              ? 'Šifrovani snapshot je proveren i primenjen.'
-              : 'Podaci su već sinhronizovani.',
+        setError(
+          'Snapshot je obrađen, ali sinhronizacija operacija nije potvrđena. Pokušajte ponovo.',
         );
       }
       await onChanged();

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
-import type { SnapshotSyncResult } from './snapshot-service';
+import { SnapshotSyncError, type SnapshotSyncResult } from './snapshot-service';
 import {
   ContinuousSyncService,
   type ContinuousOperationSyncPort,
@@ -183,6 +183,53 @@ describe('continuous encrypted sync orchestration', () => {
       signal: undefined,
     });
     expect(ports.repository.recordCompletedSync).toHaveBeenCalledWith(vaultId, 8);
+  });
+
+  it('records the local phase of a failed pull without changing the sync error', async () => {
+    const ports = createPorts();
+    const failure = new Error('private details must not be recorded');
+    vi.mocked(ports.operations.synchronize).mockRejectedValue(failure);
+    const reportDiagnostic = vi.fn(() => Promise.resolve());
+    const service = new ContinuousSyncService({ ...ports, reportDiagnostic });
+
+    await expect(service.synchronize()).rejects.toBe(failure);
+    expect(reportDiagnostic).toHaveBeenCalledWith({
+      phase: 'operations',
+      outcome: 'error',
+      code: 'SYNC_CYCLE_FAILED',
+    });
+    expect(JSON.stringify(reportDiagnostic.mock.calls)).not.toContain('private details');
+  });
+
+  it('records a known-safe bootstrap error code', async () => {
+    const ports = createPorts({ initialMetadata: metadata({ lastSnapshotRevision: 0 }) });
+    vi.mocked(ports.snapshots.synchronize).mockRejectedValue(
+      new SnapshotSyncError('upload-consent-required', 'Private message'),
+    );
+    const reportDiagnostic = vi.fn(() => Promise.resolve());
+    const service = new ContinuousSyncService({ ...ports, reportDiagnostic });
+
+    await expect(service.synchronize()).rejects.toBeInstanceOf(SnapshotSyncError);
+    expect(reportDiagnostic).toHaveBeenCalledWith({
+      phase: 'bootstrap',
+      outcome: 'error',
+      code: 'UPLOAD_CONSENT_REQUIRED',
+    });
+  });
+
+  it('records incomplete snapshot results and never lets diagnostics break sync', async () => {
+    const ports = createPorts({
+      snapshotResult: { kind: 'blocked', revision: 2, reason: 'local-remote-conflict' },
+    });
+    const reportDiagnostic = vi.fn(() => Promise.reject(new Error('diagnostics unavailable')));
+    const service = new ContinuousSyncService({ ...ports, reportDiagnostic });
+
+    await expect(service.synchronize()).resolves.toMatchObject({ kind: 'blocked' });
+    expect(reportDiagnostic).toHaveBeenCalledWith({
+      phase: 'snapshot',
+      outcome: 'incomplete',
+      code: 'SYNC_INCOMPLETE',
+    });
   });
 
   it('does not report success if local state changes before the final checkpoint', async () => {
