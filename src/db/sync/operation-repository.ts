@@ -36,6 +36,13 @@ export class LocalOperationStateError extends Error {
   }
 }
 
+export class OperationChainGapError extends LocalOperationStateError {
+  constructor() {
+    super('Prekinut je per-device lanac operacija.');
+    this.name = 'OperationChainGapError';
+  }
+}
+
 export interface OpenedRemoteOperation {
   readonly acceptedEnvelope: AcceptedOperationEnvelopeV1;
   readonly operation: SyncOperationV1;
@@ -561,7 +568,7 @@ export class SyncOperationRepository {
                 ? appliedFrontier.lastOperationHash
                 : null);
             if (predecessorHash !== operation.previousOperationHash) {
-              throw new LocalOperationStateError('Prekinut je per-device lanac operacija.');
+              throw new OperationChainGapError();
             }
           }
           for (const causal of operation.causalFrontier) {

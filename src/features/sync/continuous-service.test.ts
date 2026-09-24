@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { OperationChainGapError } from '@/db/sync/operation-repository';
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
 import { SnapshotSyncError, type SnapshotSyncResult } from './snapshot-service';
 import {
@@ -78,6 +79,42 @@ const createPorts = (input?: {
 };
 
 describe('continuous encrypted sync orchestration', () => {
+  it('repairs a missing snapshot frontier once, then retries operation catch-up', async () => {
+    const ports = createPorts();
+    const restorePinnedFrontier = vi.fn(() => Promise.resolve(true));
+    vi.mocked(ports.operations.synchronize)
+      .mockRejectedValueOnce(new OperationChainGapError())
+      .mockResolvedValue(operationResult);
+    const service = new ContinuousSyncService({
+      ...ports,
+      snapshots: { ...ports.snapshots, restorePinnedFrontier },
+    });
+
+    await expect(service.synchronize()).resolves.toMatchObject({ kind: 'synchronized' });
+    expect(restorePinnedFrontier).toHaveBeenCalledTimes(1);
+    expect(ports.operations.synchronize).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the original chain error if the pinned frontier cannot be restored', async () => {
+    const ports = createPorts();
+    const restorePinnedFrontier = vi.fn(() => Promise.resolve(false));
+    vi.mocked(ports.operations.synchronize).mockRejectedValue(new OperationChainGapError());
+    const reportDiagnostic = vi.fn(() => Promise.resolve());
+    const service = new ContinuousSyncService({
+      ...ports,
+      snapshots: { ...ports.snapshots, restorePinnedFrontier },
+      reportDiagnostic,
+    });
+
+    await expect(service.synchronize()).rejects.toBeInstanceOf(OperationChainGapError);
+    expect(ports.operations.synchronize).toHaveBeenCalledTimes(1);
+    expect(reportDiagnostic).toHaveBeenCalledWith({
+      phase: 'operations',
+      outcome: 'error',
+      code: 'OPERATION_CHAIN_GAP',
+    });
+  });
+
   it('serializes automatic and manual callers through one service queue', async () => {
     const ports = createPorts();
     let releaseFirst: (() => void) | undefined;

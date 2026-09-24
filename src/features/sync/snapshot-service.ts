@@ -195,6 +195,56 @@ export class SnapshotSyncService {
     return operation;
   }
 
+  restorePinnedFrontier(): Promise<boolean> {
+    const operation = this.#queue.then(() => this.#restorePinnedFrontierOnce());
+    this.#queue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  async #restorePinnedFrontierOnce(): Promise<boolean> {
+    const setup = await this.#repository.readSetup();
+    if (
+      !setup ||
+      setup.metadata.lastSnapshotRevision === 0 ||
+      !setup.metadata.lastSnapshotId ||
+      !setup.metadata.lastSnapshotHash ||
+      setup.metadata.syncBlockReason
+    ) return false;
+
+    await this.#authenticate(setup);
+    const remote = await this.#api.downloadCurrentSnapshot();
+    try {
+      const { envelope } = remote;
+      if (
+        envelope.snapshotId !== setup.metadata.lastSnapshotId ||
+        envelope.revision !== setup.metadata.lastSnapshotRevision ||
+        (await hashEncryptedSnapshotEnvelope(envelope)) !== setup.metadata.lastSnapshotHash
+      ) return false;
+
+      const key = await openEncryptedKeyEnvelope(
+        setup.vaultKey.encryptedKey,
+        setup.device.localWrappingKey,
+      );
+      try {
+        const snapshot = await this.#verifySnapshot(setup, key, remote);
+        return this.#repository.restorePinnedSnapshotFrontier({
+          setup,
+          snapshotId: envelope.snapshotId,
+          revision: envelope.revision,
+          snapshotHash: setup.metadata.lastSnapshotHash,
+          causalFrontier: snapshot.causalFrontier,
+        });
+      } finally {
+        clearBytes(key);
+      }
+    } finally {
+      clearBytes(remote.ciphertext);
+    }
+  }
+
   async #synchronizeOnce(options: SnapshotSyncOptions): Promise<SnapshotSyncResult> {
     let setup = await this.#repository.readSetup();
     if (!setup) {
@@ -677,6 +727,7 @@ export class SnapshotSyncService {
           syncBlockReason: undefined,
         }),
         snapshot.entityStates,
+        snapshot.causalFrontier,
       );
 
       return {

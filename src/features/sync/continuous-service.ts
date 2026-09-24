@@ -1,4 +1,4 @@
-import { LocalOperationStateError, SyncOperationRepository } from '@/db/sync/operation-repository';
+import { LocalOperationStateError, OperationChainGapError, SyncOperationRepository } from '@/db/sync/operation-repository';
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
 import {
   canRevalidateSnapshotManifest,
@@ -58,6 +58,7 @@ export interface ContinuousOperationSyncPort {
 
 export interface ContinuousSnapshotSyncPort {
   readonly synchronize: (options?: SnapshotSyncOptions) => Promise<SnapshotSyncResult>;
+  readonly restorePinnedFrontier?: () => Promise<boolean>;
 }
 
 export interface ContinuousDeviceSecurityPort {
@@ -82,6 +83,7 @@ export interface ContinuousSyncRepositoryPort {
 }
 
 const diagnosticErrorCode = (error: unknown): string => {
+  if (error instanceof OperationChainGapError) return 'OPERATION_CHAIN_GAP';
   if (error instanceof LocalOperationStateError) return 'LOCAL_STATE_CHANGED';
   if (error instanceof SnapshotSyncError) return error.code.replaceAll('-', '_').toUpperCase();
   return 'SYNC_CYCLE_FAILED';
@@ -186,7 +188,17 @@ export class ContinuousSyncService {
     }
 
     setPhase('operations');
-    const operationResult = await this.#operations.synchronize({ acknowledge: false });
+    let operationResult: OperationSyncResult;
+    try {
+      operationResult = await this.#operations.synchronize({ acknowledge: false });
+    } catch (error) {
+      if (!(error instanceof OperationChainGapError) || !this.#snapshots.restorePinnedFrontier) {
+        throw error;
+      }
+      const restored = await this.#snapshots.restorePinnedFrontier();
+      if (!restored) throw error;
+      operationResult = await this.#operations.synchronize({ acknowledge: false });
+    }
     const setupAfterOperations = await this.#repository.readSetup();
     if (!setupAfterOperations) throw new Error('Lokalno sync stanje je uklonjeno tokom obrade.');
     const stats = await this.#repository.compactionStats(

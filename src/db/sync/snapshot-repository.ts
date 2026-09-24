@@ -325,13 +325,19 @@ export class SyncSnapshotRepository {
     data: FinanceData,
     changes: SnapshotMetadataChanges,
     entityStates?: readonly SnapshotEntityStateV1[],
+    causalFrontier?: SnapshotCausalFrontierV1,
   ): Promise<void> {
     const validated = validateFinanceData(data);
     const snapshotStates =
       entityStates ?? (await createBaselineSnapshotEntityStates(createSyncFinanceData(validated)));
     await this.database.transaction(
       'rw',
-      [...financeTables(this.database), this.database.syncMetadata, this.database.syncEntityStates],
+      [
+        ...financeTables(this.database),
+        this.database.syncMetadata,
+        this.database.syncEntityStates,
+        this.database.syncFrontier,
+      ],
       async () => {
         const current = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
         if (
@@ -355,9 +361,93 @@ export class SyncSnapshotRepository {
             ),
           ),
         );
+        if (causalFrontier) {
+          if (causalFrontier.serverCursor !== changes.lastSnapshotServerCursor) {
+            throw new LocalSnapshotRaceError();
+          }
+          await this.#seedVerifiedFrontier(
+            setup.vault.vaultId,
+            causalFrontier,
+            changes.lastSyncAt ?? new Date().toISOString(),
+          );
+        }
         await this.database.syncMetadata.put({ ...current, ...changes });
       },
     );
+  }
+
+  async restorePinnedSnapshotFrontier(input: {
+    setup: LocalSyncSetup;
+    snapshotId: string;
+    revision: number;
+    snapshotHash: string;
+    causalFrontier: SnapshotCausalFrontierV1;
+  }): Promise<boolean> {
+    return this.database.transaction(
+      'rw',
+      [this.database.syncMetadata, this.database.syncFrontier],
+      async () => {
+        const metadata = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
+        if (
+          !metadata ||
+          metadata.vaultId !== input.setup.vault.vaultId ||
+          metadata.lastSnapshotId !== input.snapshotId ||
+          metadata.lastSnapshotRevision !== input.revision ||
+          metadata.lastSnapshotHash !== input.snapshotHash ||
+          metadata.lastManifestHash !== input.setup.metadata.lastManifestHash ||
+          metadata.lastSnapshotServerCursor !== input.causalFrontier.serverCursor ||
+          metadata.lastServerCursor < input.causalFrontier.serverCursor ||
+          !sameBlock(metadata, input.setup.metadata)
+        ) {
+          return false;
+        }
+        await this.#seedVerifiedFrontier(
+          metadata.vaultId,
+          input.causalFrontier,
+          new Date().toISOString(),
+        );
+        return true;
+      },
+    );
+  }
+
+  async #seedVerifiedFrontier(
+    vaultId: string,
+    causalFrontier: SnapshotCausalFrontierV1,
+    updatedAt: string,
+  ): Promise<void> {
+    for (const device of causalFrontier.devices) {
+      if (device.deviceSequence === 0) continue;
+      const id = `${vaultId}:${device.deviceId}`;
+      const existing = await this.database.syncFrontier.get(id);
+      if (existing) {
+        if (existing.lastDeviceSequence === 0 && existing.lastOperationHash === null) {
+          await this.database.syncFrontier.update(id, {
+            lastDeviceSequence: device.deviceSequence,
+            lastOperationHash: device.lastOperationHash,
+            updatedAt,
+          });
+          continue;
+        }
+        if (
+          existing.lastDeviceSequence < device.deviceSequence ||
+          (existing.lastDeviceSequence === device.deviceSequence &&
+            existing.lastOperationHash !== device.lastOperationHash)
+        ) {
+          throw new LocalSnapshotRaceError();
+        }
+        continue;
+      }
+      await this.database.syncFrontier.add({
+        id,
+        vaultId,
+        deviceId: device.deviceId,
+        lastDeviceSequence: device.deviceSequence,
+        lastOperationHash: device.lastOperationHash,
+        acknowledgedServerCursor: 0,
+        updatedAt,
+      });
+    }
   }
 
   async acceptCompactionSnapshot(
