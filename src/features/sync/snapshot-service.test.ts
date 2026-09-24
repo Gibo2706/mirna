@@ -584,6 +584,17 @@ describe('snapshot ancestry fail-closed and stale block revalidation', () => {
     closeFixture(f);
   });
 
+  it('defers a clean snapshot check timestamp until continuous operation catch-up finishes', async () => {
+    const f = await historicalFixture();
+    await markStaleBlock(f);
+    await expect(f.service.synchronize({ continuousOperations: true })).resolves.toEqual({
+      kind: 'up-to-date',
+      revision: 1,
+    });
+    expect((await f.repository.readSetup())?.metadata.lastSuccessfulSyncAt).toBeUndefined();
+    closeFixture(f);
+  });
+
   it('uses the existing conflict flow for a dirty local state and a newer verified snapshot', async () => {
     const f = await historicalFixture();
     await markStaleBlock(f, false);

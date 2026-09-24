@@ -1,10 +1,8 @@
-import { readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import {
   devices,
   expect,
   test,
+  type APIRequestContext,
   type BrowserContext,
   type Page,
   type Response,
@@ -26,10 +24,6 @@ const PHONE_DEVICE_NAME = 'Sintetički telefon';
 const DESKTOP_DEVICE_NAME = 'Sintetički računar';
 const RECOVERED_DEVICE_NAME = 'Sintetički oporavljeni uređaj';
 const LOCAL_DEVICE_ALIAS_SENTINEL = 'LOKALNI-ALIAS-NE-SALJI';
-
-const repositoryRoot = resolve(import.meta.dirname, '..');
-const workerState = resolve(repositoryRoot, '.wrangler/sync-e2e-state');
-const workerD1State = resolve(workerState, 'v3/d1/miniflare-D1DatabaseObject');
 
 interface LocalSyncSecurityView {
   readonly vaultId: string;
@@ -54,32 +48,19 @@ type D1Row = Readonly<Record<string, unknown>>;
 
 const sqlLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 
-const localD1Path = (): string => {
-  const candidates = readdirSync(workerD1State).filter(
-    (name) => name.endsWith('.sqlite') && name !== 'metadata.sqlite',
+const localD1 = async (request: APIRequestContext, command: string): Promise<readonly D1Row[]> => {
+  if (!/^\s*SELECT\b/iu.test(command) || command.includes(';')) {
+    throw new Error('Local D1 inspection must be read-only.');
+  }
+  const response = await request.post(`${SYNC_API_ORIGIN}/__e2e/query`, {
+    data: { sql: command },
+  });
+  if (!response.ok()) throw new Error(`Lokalna D1 provera nije uspela: HTTP ${response.status()}.`);
+  const rows: unknown = await response.json();
+  if (!Array.isArray(rows)) throw new Error('Local D1 result is invalid.');
+  return rows.filter(
+    (row): row is D1Row => typeof row === 'object' && row !== null && !Array.isArray(row),
   );
-  if (candidates.length !== 1 || !candidates[0]) {
-    throw new Error('Expected exactly one isolated Miniflare D1 database.');
-  }
-  return resolve(workerD1State, candidates[0]);
-};
-
-const localD1 = (command: string): readonly D1Row[] => {
-  // The running Worker is the only writer to this isolated SQLite database.
-  if (!/^\s*SELECT\b/iu.test(command)) throw new Error('Local D1 inspection must be read-only.');
-  const database = new DatabaseSync(localD1Path(), { readOnly: true });
-  try {
-    database.exec('PRAGMA busy_timeout = 5000');
-    const rows: unknown = database.prepare(command).all();
-    if (!Array.isArray(rows)) throw new Error('Local D1 result is invalid.');
-    return rows.filter(
-      (row): row is D1Row => typeof row === 'object' && row !== null && !Array.isArray(row),
-    );
-  } catch {
-    throw new Error('Lokalna D1 provera nije uspela; redovi nisu ispisani.');
-  } finally {
-    database.close();
-  }
 };
 
 const requestBodies: string[] = [];
@@ -114,7 +95,7 @@ const dismissOfflineReady = async (page: Page): Promise<void> => {
 const expectSyncActive = async (page: Page): Promise<void> => {
   await expect(
     page.getByRole('heading', {
-      name: /^(?:Sinhronizacija je uključena|Sve je sinhronizovano)$/u,
+      name: /^(?:Sinhronizacija je uključena|Nema promena na čekanju)$/u,
     }),
   ).toBeVisible();
 };
@@ -122,7 +103,7 @@ const expectSyncActive = async (page: Page): Promise<void> => {
 const expectPairedBootstrap = async (page: Page): Promise<void> => {
   await expect(
     page.getByRole('heading', {
-      name: /^(?:Povezano — preuzimanje počinje automatski|Preuzimam vaše podatke…|Sve je sinhronizovano)$/u,
+      name: /^(?:Povezano — preuzimanje počinje automatski|Preuzimam vaše podatke…|Nema promena na čekanju)$/u,
     }),
   ).toBeVisible();
 };
@@ -720,6 +701,7 @@ test('Turnstile activation UI fits 320-430 px and rerenders at the supported bre
 
 test('activation preserves the prepared setup and creates one vault after an accounting retry', async ({
   browser,
+  request,
 }) => {
   const context = await browser.newContext({
     ...devices['Pixel 7'],
@@ -786,12 +768,16 @@ test('activation preserves the prepared setup and creates one vault after an acc
   await expect(accountingError).toContainText('vault-create');
   await expect(accountingError).toContainText(failedRequestId);
   await expect(page.getByTestId('sync-recovery-code')).toHaveText(recoveryCode);
-  expect(Number(localD1('SELECT COUNT(*) AS count FROM vaults')[0]?.count)).toBe(0);
+  expect(Number((await localD1(request, 'SELECT COUNT(*) AS count FROM vaults'))[0]?.count)).toBe(
+    0,
+  );
 
   await page.getByRole('button', { name: 'Pokušaj ponovo' }).click();
   await expectSyncActive(page);
   expect(vaultCreateAttempts).toBe(2);
-  expect(Number(localD1('SELECT COUNT(*) AS count FROM vaults')[0]?.count)).toBe(1);
+  expect(Number((await localD1(request, 'SELECT COUNT(*) AS count FROM vaults'))[0]?.count)).toBe(
+    1,
+  );
   expect((await readLocalSyncSecurityView(page)).displayName).toBe('Accounting retry telefon');
 
   await context.close();
@@ -799,6 +785,7 @@ test('activation preserves the prepared setup and creates one vault after an acc
 
 test('pairing finalization survives response loss and reload without duplicate authorization', async ({
   browser,
+  request,
 }) => {
   test.setTimeout(180_000);
 
@@ -863,7 +850,10 @@ test('pairing finalization survives response loss and reload without duplicate a
     expect(pending.vaultId).toBe(phoneLocal.vaultId);
     expect(pending.deviceId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
 
-    const committedServerState = localD1(`
+    const committedServerState = (
+      await localD1(
+        request,
+        `
       SELECT
         (SELECT COUNT(*) FROM pairing_requests
           WHERE pairing_request_id = ${sqlLiteral(pending.requestId ?? '')}
@@ -876,7 +866,9 @@ test('pairing finalization survives response loss and reload without duplicate a
           WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
             AND device_id = ${sqlLiteral(pending.deviceId ?? '')}
             AND revoked_at IS NULL) AS active_grants
-    `)[0];
+    `,
+      )
+    )[0];
     expect(committedServerState).toEqual({
       finalized_pairings: 1,
       active_devices: 1,
@@ -900,7 +892,10 @@ test('pairing finalization survives response loss and reload without duplicate a
     expect(desktopLocal.agreementPrivateKeyExtractable).toBe(false);
     expect(desktopLocal.localWrappingKeyExtractable).toBe(false);
 
-    const retriedServerState = localD1(`
+    const retriedServerState = (
+      await localD1(
+        request,
+        `
       SELECT
         (SELECT COUNT(*) FROM pairing_requests
           WHERE pairing_request_id = ${sqlLiteral(pending.requestId ?? '')}
@@ -913,7 +908,9 @@ test('pairing finalization survives response loss and reload without duplicate a
           WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
             AND device_id = ${sqlLiteral(pending.deviceId ?? '')}
             AND revoked_at IS NULL) AS active_grants
-    `)[0];
+    `,
+      )
+    )[0];
     expect(retriedServerState).toEqual(committedServerState);
   } finally {
     await Promise.all([desktopContext.close(), phoneContext.close()]);
@@ -1036,7 +1033,8 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   await expect(
     mismatchDevice.getByRole('button', { name: 'Napravi zahtev za povezivanje' }),
   ).toBeVisible();
-  const cancelledPairings = localD1(
+  const cancelledPairings = await localD1(
+    request,
     `SELECT COUNT(*) AS count FROM pairing_requests WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)} AND status = 'cancelled'`,
   );
   expect(Number(cancelledPairings[0]?.count)).toBeGreaterThanOrEqual(1);
@@ -1049,7 +1047,8 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   captureSyncRequestBodies(expiringContext);
   const expiringDevice = await expiringContext.newPage();
   const expiringCode = await startPairingRequest(expiringDevice, 'Sintetički istekli uređaj');
-  const newestPending = localD1(
+  const newestPending = await localD1(
+    request,
     "SELECT pairing_request_id FROM pairing_requests WHERE status = 'pending' ORDER BY rowid DESC LIMIT 1",
   );
   const expiringRequestIdValue = newestPending[0]?.pairing_request_id;
@@ -1070,14 +1069,16 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   await desktop.getByRole('button', { name: 'Proveri zahtev lokalno i na serveru' }).click();
   await expect(desktop.getByRole('alert').last()).toBeVisible();
 
-  const pairedDeviceCounts = localD1(
+  const pairedDeviceCounts = await localD1(
+    request,
     `SELECT status, COUNT(*) AS count FROM devices WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)} GROUP BY status ORDER BY status`,
   );
   expect(
     Number(pairedDeviceCounts.find((row) => row.status === 'active')?.count),
     'Tačno dva uređaja moraju biti aktivna pre recovery-ja.',
   ).toBe(2);
-  const committedSnapshots = localD1(
+  const committedSnapshots = await localD1(
+    request,
     `SELECT COUNT(*) AS count FROM snapshots WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)} AND state = 'committed'`,
   );
   expect(Number(committedSnapshots[0]?.count)).toBe(1);
@@ -1138,13 +1139,16 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
   expect(recoveredLocal.agreementPrivateKeyExtractable).toBe(false);
   expect(recoveredLocal.localWrappingKeyExtractable).toBe(false);
 
-  const recoveredDeviceCounts = localD1(
+  const recoveredDeviceCounts = await localD1(
+    request,
     `SELECT status, COUNT(*) AS count FROM devices WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)} GROUP BY status ORDER BY status`,
   );
   expect(Number(recoveredDeviceCounts.find((row) => row.status === 'active')?.count)).toBe(1);
   expect(Number(recoveredDeviceCounts.find((row) => row.status === 'revoked')?.count)).toBe(2);
 
-  const storedCiphertextRows = localD1(`
+  const storedCiphertextRows = await localD1(
+    request,
+    `
     SELECT 'manifest' AS source, canonical_manifest AS payload
       FROM vault_manifests WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
     UNION ALL
@@ -1159,7 +1163,8 @@ test('Phase 1-2: two isolated devices sync ciphertext, pair, reject unsafe paths
     UNION ALL
     SELECT 'snapshot-envelope', canonical_envelope
       FROM snapshots WHERE vault_id = ${sqlLiteral(phoneLocal.vaultId)}
-  `);
+  `,
+  );
   const serverText = `${requestBodies.join('\n')}\n${JSON.stringify(storedCiphertextRows)}`;
   expectPrivateMaterialAbsent(serverText, [
     PLAINTEXT_SENTINEL,
@@ -1353,7 +1358,8 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
       })
     ).status(),
   ).toBe(204);
-  const expiredGrant = localD1(
+  const expiredGrant = await localD1(
+    request,
     `SELECT expires_at FROM device_grants WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND device_id = ${sqlLiteral(initial.desktop.deviceId)} AND revoked_at IS NULL`,
   );
   expect(expiredGrant).toEqual([{ expires_at: 1 }]);
@@ -1403,7 +1409,8 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
     performance.now() - performanceStartedAt,
   );
 
-  const epochEnvelopes = localD1(
+  const epochEnvelopes = await localD1(
+    request,
     `SELECT recipient_device_id FROM device_key_envelopes WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)} AND key_epoch = 2 ORDER BY recipient_device_id`,
   );
   expect(epochEnvelopes).toEqual([{ recipient_device_id: initial.phone.deviceId }]);
@@ -1432,10 +1439,14 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
     ),
   ).toBe(true);
   expect(
-    localD1(`SELECT status FROM vaults WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`),
+    await localD1(
+      request,
+      `SELECT status FROM vaults WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
+    ),
   ).toEqual([{ status: 'deleting' }]);
   expect(
-    localD1(
+    await localD1(
+      request,
       `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
     ),
   ).toEqual([{ state: 'pending' }]);
@@ -1443,19 +1454,23 @@ test('Phase 3: two devices merge operations, resolve conflicts, renew, rotate, r
   const scheduled = await phone.request.get(`${SYNC_API_ORIGIN}/__scheduled?cron=7+*+*+*+*`);
   expect(scheduled.ok()).toBe(true);
   await expect
-    .poll(() =>
-      localD1(
-        `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
-      ),
+    .poll(
+      async () =>
+        await localD1(
+          request,
+          `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
+        ),
     )
     .toEqual([{ state: 'completed' }]);
   expect(
-    localD1(
+    await localD1(
+      request,
       `SELECT COUNT(*) AS count FROM vaults WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
     ),
   ).toEqual([{ count: 0 }]);
   expect(
-    localD1(
+    await localD1(
+      request,
       `SELECT state FROM deletion_requests WHERE vault_id = ${sqlLiteral(initial.phone.vaultId)}`,
     ),
   ).toEqual([{ state: 'completed' }]);

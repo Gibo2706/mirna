@@ -1,5 +1,5 @@
 import Dexie from 'dexie';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SYNC_CRYPTO_SUITE } from '@/domain/sync/constants';
 import { canonicalizeJson } from '@/domain/sync/canonical';
 import {
@@ -504,6 +504,70 @@ class FakeOperationApi implements OperationSyncApiPort {
 }
 
 describe('operation sync service integration', () => {
+  it('records a successful incremental check only at the acknowledged cursor', async () => {
+    const database = createDatabase();
+    const { setup, vaultMasterKey } = await createSetup();
+    await writeLocalSyncSetup(setup, database);
+    await database.syncMetadata.update(SYNC_METADATA_RECORD_ID, { lastServerCursor: 4 });
+    const repository = new SyncOperationRepository(database, () => NOW);
+
+    expect(await repository.recordCompletedSync(setup.vault.vaultId, 3)).toBe(false);
+    expect((await repository.readMetadata())?.lastSuccessfulSyncAt).toBeUndefined();
+    expect(await repository.recordCompletedSync(setup.vault.vaultId, 4)).toBe(true);
+    expect((await repository.readMetadata())?.lastSuccessfulSyncAt).toBe(NOW.toISOString());
+
+    clearBytes(vaultMasterKey);
+    database.close();
+  });
+
+  it('does not report success while a received mutation group is incomplete', async () => {
+    const database = createDatabase();
+    const { setup, vaultMasterKey } = await createSetup();
+    await writeLocalSyncSetup(setup, database);
+    await database.syncMetadata.update(SYNC_METADATA_RECORD_ID, { lastServerCursor: 1 });
+    await database.syncInbox.add({
+      id: createOpaqueId(),
+      vaultId: setup.vault.vaultId,
+      operationId: createOpaqueId(),
+      serverCursor: 1,
+      mutationGroupId: createOpaqueId(),
+      mutationGroupIndex: 0,
+      mutationGroupSize: 2,
+      state: 'received',
+      encryptedEnvelope: '{}',
+      receivedAt: NOW.toISOString(),
+    });
+    const api = new FakeOperationApi(setup);
+    vi.spyOn(api, 'getChanges').mockResolvedValue({
+      protocolVersion: 1,
+      changes: [],
+      nextCursor: 1,
+      hasMore: false,
+    });
+    const service = new OperationSyncService({
+      api,
+      origin: 'https://mirna.test',
+      repository: new SyncOperationRepository(database, () => NOW),
+      snapshotRepository: new SyncSnapshotRepository(database),
+      now: () => NOW,
+    });
+
+    await expect(service.synchronize()).rejects.toThrow('Primljene operacije nisu kompletne');
+    expect(api.acknowledgements).toHaveLength(0);
+    expect(await database.syncInbox.count()).toBe(1);
+    expect(
+      await new SyncOperationRepository(database, () => NOW).recordCompletedSync(
+        setup.vault.vaultId,
+        1,
+      ),
+    ).toBe(false);
+    expect(
+      (await database.syncMetadata.get(SYNC_METADATA_RECORD_ID))?.lastSuccessfulSyncAt,
+    ).toBeUndefined();
+    clearBytes(vaultMasterKey);
+    database.close();
+  });
+
   it('authenticates, uploads a stable encrypted outbox operation, advances cursor and ACKs', async () => {
     const database = createDatabase();
     const { setup, vaultMasterKey } = await createSetup();

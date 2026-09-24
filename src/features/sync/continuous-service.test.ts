@@ -52,6 +52,7 @@ const createPorts = (input?: {
   const repository: ContinuousSyncRepositoryPort = {
     readSetup,
     readMetadata: vi.fn(() => Promise.resolve(initial)),
+    recordCompletedSync: vi.fn(() => Promise.resolve(true)),
     compactionStats: vi.fn(() =>
       Promise.resolve(
         input?.stats ?? {
@@ -157,6 +158,7 @@ describe('continuous encrypted sync orchestration', () => {
       compacted: true,
     });
     expect(order).toEqual(['operations', 'snapshot', 'ack']);
+    expect(ports.repository.recordCompletedSync).toHaveBeenCalledWith(vaultId, 8);
     expect(ports.operations.synchronize).toHaveBeenCalledWith({ acknowledge: false });
     expect(ports.snapshots.synchronize).toHaveBeenCalledWith({
       continuousOperations: true,
@@ -180,6 +182,18 @@ describe('continuous encrypted sync orchestration', () => {
       forceCompaction: false,
       signal: undefined,
     });
+    expect(ports.repository.recordCompletedSync).toHaveBeenCalledWith(vaultId, 8);
+  });
+
+  it('does not report success if local state changes before the final checkpoint', async () => {
+    const ports = createPorts();
+    vi.mocked(ports.repository.recordCompletedSync).mockResolvedValue(false);
+    const service = new ContinuousSyncService(ports);
+
+    await expect(service.synchronize()).rejects.toThrow(
+      'Sinhronizacija nije završena: lokalno stanje se promenilo tokom provere.',
+    );
+    expect(ports.repository.recordCompletedSync).toHaveBeenCalledWith(vaultId, 8);
   });
 
   it('still compacts when a key-rotation snapshot is mandatory', async () => {
