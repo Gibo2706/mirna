@@ -440,11 +440,13 @@ describe('Phase 2 snapshot sync service', () => {
     const api = new FakeSnapshotApi(material.setup);
     const snapshotFrontier = {
       serverCursor: 5,
-      devices: [{
-        deviceId: material.setup.device.deviceId,
-        deviceSequence: 2,
-        lastOperationHash: 'A'.repeat(43),
-      }],
+      devices: [
+        {
+          deviceId: material.setup.device.deviceId,
+          deviceSequence: 2,
+          lastOperationHash: 'A'.repeat(43),
+        },
+      ],
     };
     api.remote = await remoteArtifact({
       setup: material.setup,
