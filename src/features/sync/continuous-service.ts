@@ -1,4 +1,4 @@
-import { SyncOperationRepository } from '@/db/sync/operation-repository';
+import { LocalOperationStateError, SyncOperationRepository } from '@/db/sync/operation-repository';
 import type { LocalSyncSetup, SyncMetadataRecord } from '@/db/sync/records';
 import {
   canRevalidateSnapshotManifest,
@@ -50,6 +50,10 @@ export interface ContinuousDeviceSecurityPort {
 export interface ContinuousSyncRepositoryPort {
   readonly readSetup: () => Promise<LocalSyncSetup | undefined>;
   readonly readMetadata: () => Promise<SyncMetadataRecord | undefined>;
+  readonly recordCompletedSync: (
+    vaultId: string,
+    acknowledgedServerCursor: number,
+  ) => Promise<boolean>;
   readonly compactionStats: (
     vaultId: string,
     afterServerCursor: number,
@@ -154,6 +158,17 @@ export class ContinuousSyncService {
     const acknowledgedServerCursor = await this.#operations.acknowledge();
     const metadata = await this.#repository.readMetadata();
     if (!metadata) throw new Error('Sync metadata nedostaje posle potvrde frontiera.');
+    if (
+      operationResult.pendingLocalOperations === 0 &&
+      !(await this.#repository.recordCompletedSync(
+        setupAfterOperations.vault.vaultId,
+        acknowledgedServerCursor,
+      ))
+    ) {
+      throw new LocalOperationStateError(
+        'Sinhronizacija nije završena: lokalno stanje se promenilo tokom provere.',
+      );
+    }
     return this.#result(
       operationResult,
       acknowledgedServerCursor,

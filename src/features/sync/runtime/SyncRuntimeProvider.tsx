@@ -153,10 +153,22 @@ export const SyncRuntimeProvider = ({
       try {
         const result = await services.synchronize(options.allowInitialUpload ?? false, false);
         await refresh();
+        if (
+          result.kind === 'blocked' ||
+          result.kind === 'awaiting-upload-consent' ||
+          result.kind === 'consent-declined' ||
+          (result.kind === 'synchronized' && result.conflictedGroups > 0)
+        ) {
+          setActivity({ kind: 'attention', reason: result.kind });
+        } else if (result.kind === 'synchronized' && result.pendingLocalOperations > 0) {
+          setActivity({ kind: 'pending', count: result.pendingLocalOperations });
+        } else {
+          setActivity({ kind: 'synced', at: new Date().toISOString() });
+        }
         return result;
       } catch (error) {
-        setActivity({ kind: 'attention', reason: 'manual-sync-failure' });
         await refresh();
+        setActivity({ kind: 'attention', reason: 'manual-sync-failure' });
         throw error;
       }
     },

@@ -6,6 +6,21 @@ import type { Env } from './env';
 const fixtureWorker: ExportedHandler<Env> = {
   async fetch(request, env, context) {
     const path = new URL(request.url).pathname;
+    if (request.method === 'POST' && path === '/__e2e/query') {
+      const payload: unknown = await request.json();
+      if (
+        !payload ||
+        typeof payload !== 'object' ||
+        !('sql' in payload) ||
+        typeof payload.sql !== 'string' ||
+        payload.sql.length > 4_096 ||
+        !/^\s*SELECT\b/iu.test(payload.sql) ||
+        payload.sql.includes(';')
+      )
+        return new Response(null, { status: 400 });
+      const result = await env.MIRNA_SYNC_DB.prepare(payload.sql).all();
+      return Response.json(result.results);
+    }
     if (request.method === 'POST' && path === '/__e2e/expire-pairing') {
       const payload: unknown = await request.json();
       if (

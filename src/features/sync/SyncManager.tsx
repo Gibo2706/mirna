@@ -1067,8 +1067,8 @@ const ActivePanel = ({
     }
     if (setup.metadata.lastSuccessfulSyncAt) {
       return {
-        title: 'Sve je sinhronizovano',
-        description: `Poslednji put ${formatRelativeSyncTime(setup.metadata.lastSuccessfulSyncAt)}`,
+        title: 'Nema promena na čekanju',
+        description: `Poslednja uspešna provera ${formatRelativeSyncTime(setup.metadata.lastSuccessfulSyncAt)}`,
         tone: 'positive' as const,
         icon: <CheckCircle2 size={22} aria-hidden="true" />,
       };
@@ -1099,13 +1099,16 @@ const ActivePanel = ({
       } else if (result.kind === 'consent-declined') {
         setError('Prvi upload je odbijen na ovom uređaju.');
       } else if (result.kind === 'synchronized') {
-        success(
-          result.conflictedGroups > 0
-            ? 'Promene su prenete; jedan konflikt zahteva pregled.'
-            : result.uploadedOperations + result.downloadedOperations > 0
+        if (result.pendingLocalOperations > 0) {
+          setError('Sinhronizacija nije završena: lokalne promene još čekaju slanje.');
+        } else if (result.conflictedGroups > 0) {
+          setError('Promene su prenete, ali konflikt zahteva pregled.');
+        } else
+          success(
+            result.uploadedOperations + result.downloadedOperations > 0
               ? 'Šifrovane promene su sinhronizovane.'
-              : 'Sinhronizovano.',
-        );
+              : 'Provera je završena; nema novih promena.',
+          );
       } else {
         success(
           result.kind === 'uploaded'

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -85,26 +85,27 @@ export const monitorWorker = (worker, { saveStatus, fail, publishLog }) => {
 };
 
 const serviceState = async () => {
-  // Inspection only, never a write-capable connection or a production database.
-  const directory = resolve('.wrangler/sync-e2e-state/v3/d1/miniflare-D1DatabaseObject');
-  if (!existsSync(directory)) return { available: false };
-  const files = readdirSync(directory).filter(
-    (name) => name.endsWith('.sqlite') && name !== 'metadata.sqlite',
-  );
-  if (files.length !== 1) return { available: false };
-  const { DatabaseSync } = await import('node:sqlite');
-  let database;
+  // Read through the isolated E2E Worker binding; never open a second SQLite
+  // connection while workerd is writing to its local D1 database.
+  const query = async (sql) => {
+    const response = await fetch('http://127.0.0.1:8787/__e2e/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql }),
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) throw new Error('E2E D1 diagnostic query failed.');
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw new Error('E2E D1 diagnostic result is invalid.');
+    return rows;
+  };
   try {
-    database = new DatabaseSync(resolve(directory, files[0]), { readOnly: true });
-    database.exec('PRAGMA busy_timeout = 100');
-    const flags = database
-      .prepare(
-        'SELECT accept_new_vaults, accept_pairings, accept_writes, maintenance_mode, accounting_fault FROM service_flags WHERE singleton_id = 1',
-      )
-      .get();
-    const counts = database
-      .prepare("SELECT COUNT(*) AS reserved FROM usage_reservations WHERE state = 'reserved'")
-      .get();
+    const [flags] = await query(
+      'SELECT accept_new_vaults, accept_pairings, accept_writes, maintenance_mode, accounting_fault FROM service_flags WHERE singleton_id = 1',
+    );
+    const [counts] = await query(
+      "SELECT COUNT(*) AS reserved FROM usage_reservations WHERE state = 'reserved'",
+    );
     return {
       available: true,
       flags: Object.fromEntries(
@@ -114,8 +115,6 @@ const serviceState = async () => {
     };
   } catch {
     return { available: false };
-  } finally {
-    database?.close();
   }
 };
 

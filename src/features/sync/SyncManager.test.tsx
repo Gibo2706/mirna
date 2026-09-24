@@ -585,6 +585,48 @@ describe('Phase 1 sync UI', () => {
 
     await waitFor(() => expect(synchronize).toHaveBeenCalledWith(false, false));
     expect(synchronize).not.toHaveBeenCalledWith(false, true);
+    expect(await screen.findByText('Provera je završena; nema novih promena.')).toBeVisible();
+    expect(screen.getByText('Nema promena na čekanju')).toBeVisible();
+  });
+
+  it('warns instead of reporting success when local operations remain pending', async () => {
+    const user = userEvent.setup();
+    const setup = localSetup();
+    setup.metadata.bootstrapMode = 'complete';
+    setup.metadata.firstUploadConsent = 'accepted';
+    setup.metadata.lastSnapshotRevision = 1;
+    const services = baseServices(
+      {
+        synchronize: vi.fn(() =>
+          Promise.resolve({
+            kind: 'synchronized' as const,
+            revision: 1,
+            uploadedOperations: 0,
+            downloadedOperations: 0,
+            appliedGroups: 0,
+            conflictedGroups: 0,
+            pendingLocalOperations: 1,
+            acknowledgedServerCursor: 0,
+            compacted: false,
+          }),
+        ),
+      },
+      {
+        setup,
+        pendingConflictCount: 0,
+        pendingLocalOperationCount: 1,
+        pendingConflicts: [],
+        pendingPairingFinalization: false,
+        deviceAliases: [],
+      },
+    );
+
+    renderManager(services);
+    await user.click(await screen.findByRole('button', { name: 'Sinhronizuj sada' }));
+    expect(
+      await screen.findByText('Sinhronizacija nije završena: lokalne promene još čekaju slanje.'),
+    ).toBeVisible();
+    expect(screen.queryByText('Provera je završena; nema novih promena.')).not.toBeInTheDocument();
   });
 
   it('shows a human fallback and persists a local alias for a remote device', async () => {

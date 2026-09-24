@@ -623,13 +623,17 @@ export class SyncOperationRepository {
       .toArray();
     const grouped = new Map<string, SyncInboxRecord[]>();
     for (const record of received) {
-      if (!record.mutationGroupId) continue;
+      if (!record.mutationGroupId) {
+        throw new LocalOperationStateError('Primljene operacije nisu kompletne.');
+      }
       const records = grouped.get(record.mutationGroupId) ?? [];
       records.push(record);
       grouped.set(record.mutationGroupId, records);
     }
+    if ([...grouped.values()].some((records) => records.length !== records[0]?.mutationGroupSize)) {
+      throw new LocalOperationStateError('Primljene operacije nisu kompletne.');
+    }
     return [...grouped.values()]
-      .filter((records) => records.length === records[0]?.mutationGroupSize)
       .map((records) =>
         records.sort(
           (left, right) => (left.mutationGroupIndex ?? 0) - (right.mutationGroupIndex ?? 0),
@@ -884,6 +888,46 @@ export class SyncOperationRepository {
           });
         }
         return proposals.every((proposal) => proposal.accepted) ? 'applied' : 'conflicted';
+      },
+    );
+  }
+
+  async recordCompletedSync(vaultId: string, acknowledgedServerCursor: number): Promise<boolean> {
+    return this.database.transaction(
+      'rw',
+      [
+        this.database.syncMetadata,
+        this.database.syncOutbox,
+        this.database.syncInbox,
+        this.database.syncConflicts,
+      ],
+      async () => {
+        const metadata = await this.database.syncMetadata.get(SYNC_METADATA_RECORD_ID);
+        if (
+          !metadata ||
+          metadata.vaultId !== vaultId ||
+          metadata.syncBlockReason ||
+          metadata.lastServerCursor !== acknowledgedServerCursor ||
+          (await this.database.syncOutbox.where('vaultId').equals(vaultId).count()) > 0 ||
+          (await this.database.syncInbox
+            .where('[vaultId+state]')
+            .equals([vaultId, 'received'])
+            .count()) > 0 ||
+          (await this.database.syncConflicts
+            .where('[vaultId+resolutionState]')
+            .equals([vaultId, 'pending'])
+            .count()) > 0
+        ) {
+          return false;
+        }
+        const completedAt = this.now().toISOString();
+        await this.database.syncMetadata.put({
+          ...metadata,
+          lastSyncAt: completedAt,
+          lastSuccessfulSyncAt: completedAt,
+          lastErrorCode: undefined,
+        });
+        return true;
       },
     );
   }
