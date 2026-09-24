@@ -7,6 +7,7 @@ export const FOREGROUND_RESUME_STALE_MS = 2 * 60_000;
 export const LAST_SUCCESS_STALE_MS = 5 * 60_000;
 export const LOCAL_MUTATION_DEBOUNCE_MS = 3_000;
 export const MIN_AUTO_SYNC_GAP_MS = 30_000;
+export const OFFLINE_RECHECK_MS = 10_000;
 export const BUDGET_BACKOFF_MS = 6 * 60 * 60 * 1_000;
 
 const RETRY_BACKOFF_MS = [5_000, 15_000, 60_000, 5 * 60_000] as const;
@@ -117,18 +118,15 @@ export const useSnapshotSyncScheduler = (input: {
     };
 
     function schedulePending(delay = 0): void {
-      if (
-        disposed ||
-        inFlight ||
-        !pendingTrigger ||
-        document.visibilityState === 'hidden' ||
-        navigator.onLine === false
-      ) {
+      if (disposed || inFlight || !pendingTrigger || document.visibilityState === 'hidden') {
         return;
       }
 
       const now = Date.now();
-      const dueAt = Math.max(now + delay, nextAllowedAt, lastStartedAt + MIN_AUTO_SYNC_GAP_MS);
+      const dueAt =
+        navigator.onLine === false
+          ? now + OFFLINE_RECHECK_MS
+          : Math.max(now + delay, nextAllowedAt, lastStartedAt + MIN_AUTO_SYNC_GAP_MS);
       if (triggerTimer !== undefined && triggerTimerDueAt <= dueAt) return;
       clearTriggerTimer();
       triggerTimerDueAt = dueAt;
@@ -144,7 +142,11 @@ export const useSnapshotSyncScheduler = (input: {
 
     async function runPending(): Promise<void> {
       if (disposed || inFlight || !pendingTrigger) return;
-      if (document.visibilityState === 'hidden' || navigator.onLine === false) return;
+      if (document.visibilityState === 'hidden') return;
+      if (navigator.onLine === false) {
+        schedulePending();
+        return;
+      }
 
       const now = Date.now();
       if (now < nextAllowedAt || now - lastStartedAt < MIN_AUTO_SYNC_GAP_MS) {
