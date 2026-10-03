@@ -2,6 +2,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import {
+  ACCOUNTING_SNAPSHOT_SQL,
+  reconstructAccounting,
+  safeAccountingSummary,
+} from './sync-budget-reconcile-lib.mjs';
+import {
   parseCloudflareBucketBytes,
   parseCloudflareCount,
   verifyStagingSnapshot,
@@ -54,6 +59,7 @@ const runWrangler = (args) => {
     ['wrangler', ...args],
     {
       encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
@@ -73,6 +79,31 @@ const healthSnapshot = await waitForExpectedWorkerBuild({
 });
 
 const { health, healthHttpStatus } = healthSnapshot;
+
+const ledgerPayload = runWrangler([
+  'd1',
+  'execute',
+  DATABASE,
+  '--remote',
+  '--env',
+  'staging',
+  '--config',
+  CONFIG,
+  '--command',
+  ACCOUNTING_SNAPSHOT_SQL,
+  '--json',
+]);
+const ledger = JSON.parse(ledgerPayload[0]?.results?.[0]?.snapshot ?? 'null');
+if (!ledger) throw new Error('Accounting ledger snapshot is missing.');
+const accounting = reconstructAccounting(ledger, Date.now());
+const accountingSummary = safeAccountingSummary(ledger, accounting);
+process.stdout.write(`Accounting diagnostics: ${JSON.stringify(accountingSummary)}\n`);
+if (accounting.drift.length || accounting.errors.length) {
+  process.stderr.write(
+    `${accounting.drift.length ? 'ACCOUNTING_AGGREGATE_DRIFT' : 'INVALID_RESERVATION_EVIDENCE'}: read-only ledger verification failed.\n`,
+  );
+  process.exit(1);
+}
 
 const sql = `
 SELECT name FROM mirna_d1_migrations ORDER BY id;

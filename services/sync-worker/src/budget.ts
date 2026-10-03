@@ -1492,10 +1492,15 @@ export const runBudgetWindowMaintenance = async (
       `UPDATE service_flags
           SET accounting_fault = 1,
               state_reason = 'STALE_RESERVATION_REQUIRES_RECONCILIATION',
-              state_request_id = NULL,
+              state_request_id = (
+                SELECT substr(reservation_id, 1, 36) FROM usage_reservations
+                 WHERE state = 'reserved' AND created_at < ?2
+                 ORDER BY created_at, reservation_id LIMIT 1
+              ),
               accounting_fault_at = COALESCE(accounting_fault_at, ?1),
               updated_at = ?1
         WHERE singleton_id = 1
+          AND accounting_fault = 0
           AND EXISTS (
             SELECT 1 FROM usage_reservations
              WHERE state = 'reserved' AND created_at < ?2
@@ -1503,7 +1508,8 @@ export const runBudgetWindowMaintenance = async (
     ).bind(scheduledTime, scheduledTime - 60 * 60 * 1_000),
     env.MIRNA_SYNC_DB.prepare(
       `DELETE FROM usage_reservations
-        WHERE state IN ('committed', 'released') AND settled_at < ?1`,
+        WHERE state IN ('committed', 'released') AND settled_at < ?1
+          AND (settlement_failure_code IS NULL OR reconciled_at IS NOT NULL)`,
     ).bind(scheduledTime - 45 * 24 * 60 * 60 * 1_000),
   ]);
   return expired.results.length;
