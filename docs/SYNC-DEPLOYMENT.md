@@ -78,7 +78,11 @@ observed work exceeds its reviewed maximum, accounting stays conservative and
 the full reservation remains charged; an exceeded maximum also engages the
 maintenance kill switch. The ledger's own D1 cost is included in the first
 reservation and is not recursively metered. Scheduled cleanup uses the same
-reserve/measure/reconcile path, including every R2 ListObjects call.
+reserve/measure/reconcile path, including every R2 ListObjects call. It adds the
+measured budget-window maintenance and planning cost to the execution estimate,
+including runs that only prune ledger history. Each run prunes at most 1,000
+settled reservations older than 45 days through a retention index; unresolved
+settlement evidence is preserved.
 
 R2 classification is explicit and tested: Put/List/Copy are Class A; Get/Head
 are Class B; Delete is currently provider-free but its Worker/D1 work remains
@@ -286,7 +290,10 @@ family with the current reviewed reservation and no business commit or measured
 usage. The latter consumes its entire reservation conservatively and keeps
 `measurement_exact=0`; the actual interrupted request outcome is not invented.
 Other stale routes, settlement failures and unexplained fault origins stay
-blocked. A second application with identical reconciled evidence makes no D1
+blocked. A health conformance fault caused entirely by proven exact scheduled
+cleanup underestimation can be reconciled when the reviewed registry identity
+matches; the final service verifier still requires healthy conformance and zero
+unresolved reservations. A second application with identical reconciled evidence makes no D1
 changes. Larger R2 inventories require the existing bounded reconciliation.
 
 Set/rotate the real Turnstile secret without putting it in a command argument,

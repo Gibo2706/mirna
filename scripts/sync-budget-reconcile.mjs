@@ -7,14 +7,11 @@ import {
   ACCOUNTING_SNAPSHOT_SQL,
   planReconciliation,
   reconstructAccounting,
+  routeRegistryReadyForReconciliation,
   safeAccountingSummary,
 } from './sync-budget-reconcile-lib.mjs';
 import { parseCloudflareCount, parseCloudflareBucketBytes } from './sync-staging-contract.mjs';
 import { fetchWorkerHealthSnapshot } from './sync-staging-verify-lib.mjs';
-import {
-  API_ROUTE_REGISTRY,
-  ROUTE_BUDGET_REGISTRY_VERSION,
-} from '../services/sync-worker/src/route-registry.ts';
 
 const DATABASE = 'mirna-sync-staging-eu';
 const BUCKET = 'mirna-sync-staging-eu';
@@ -155,14 +152,7 @@ async function main() {
   const now = Date.now();
   const readiness = {
     schema: health.readiness?.accountingSchema === 'ok',
-    registry:
-      health.readiness?.routeBudgetConformance === 'ok' &&
-      health.readiness?.routeBudgetRegistryVersion === marker.registryVersion &&
-      marker.status === 'registry-complete' &&
-      marker.registryVersion === ROUTE_BUDGET_REGISTRY_VERSION &&
-      marker.routeCount === API_ROUTE_REGISTRY.length &&
-      marker.suite === 'npm run sync:route-budget:verify' &&
-      marker.coverage === 'complete-worker-runtime-suite-with-source-derived-bounds',
+    registry: routeRegistryReadyForReconciliation(before, health, marker, now),
     storage: storageVerified,
     providerD1Bytes: info.database_size,
   };

@@ -4,7 +4,7 @@ import {
   createScheduledController,
   waitOnExecutionContext,
 } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { estimateScheduledCleanupUsage } from '../src/budget';
 import {
   planScheduledCleanup,
@@ -281,6 +281,23 @@ const runCron = async (scheduledTime = NOW): Promise<void> => {
   await waitOnExecutionContext(context);
 };
 
+const seedSettledHistory = async (count: number, settledAt: number): Promise<void> => {
+  await env.MIRNA_SYNC_DB.prepare(
+    `WITH RECURSIVE history(n) AS (
+       SELECT 1 UNION ALL SELECT n + 1 FROM history WHERE n < ?1
+     )
+     INSERT INTO usage_reservations (
+       reservation_id, scope_type, scope_id, route_key, state,
+       reserved_worker_requests, reserved_d1_rows_read, reserved_d1_rows_written,
+       reserved_r2_class_a, reserved_r2_class_b, created_at, settled_at, measurement_exact
+     )
+     SELECT ?3 || ':' || n, 'global', 'service', 'history', 'committed',
+            0, 0, 0, 0, 0, ?2 - 1, ?2, 1 FROM history`,
+  )
+    .bind(count, settledAt, crypto.randomUUID())
+    .run();
+};
+
 describe('scheduled cleanup', () => {
   it('skips empty work across repeated daily runs without self-exhaustion', async () => {
     await env.MIRNA_SYNC_DB.prepare(
@@ -308,7 +325,7 @@ describe('scheduled cleanup', () => {
     ).toEqual({ accounting_fault: 0, maintenance_mode: 0, accept_writes: 1 });
   });
 
-  it('reproduces the current scheduled-cleanup underestimation with real D1 metadata', async () => {
+  it('covers ordinary cleanup with real D1 metadata', async () => {
     await seedExpiredData();
 
     const plan = await planScheduledCleanup(env, NOW);
@@ -392,6 +409,16 @@ describe('scheduled cleanup', () => {
     expect(oneUsage.d1RowsWritten).toBeLessThan(maximumUsage.d1RowsWritten);
     expect(maximumUsage.d1RowsWritten).toBeLessThan(80_000);
     expect(maximumUsage).toMatchObject({ workerRequests: 0, r2ClassB: 0 });
+    for (const planningUsage of [
+      { d1RowsRead: -1, d1RowsWritten: 0 },
+      { d1RowsRead: 0, d1RowsWritten: Number.NaN },
+      { d1RowsRead: Number.MAX_SAFE_INTEGER, d1RowsWritten: 0 },
+      { d1RowsRead: 0, d1RowsWritten: Number.MAX_SAFE_INTEGER },
+    ]) {
+      expect(() =>
+        estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(empty), planningUsage),
+      ).toThrow('Scheduled cleanup estimate is invalid.');
+    }
   });
 
   it('removes only eligible D1/R2 data in bounded, idempotent batches', async () => {
@@ -487,5 +514,129 @@ describe('scheduled cleanup', () => {
         `SELECT state FROM deletion_requests WHERE deletion_request_id = 'deletion-request-new'`,
       ).first<string>('state'),
     ).toBe('pending');
+  });
+});
+
+describe('scheduled cleanup ledger maintenance', () => {
+  beforeEach(async () => {
+    await env.MIRNA_SYNC_DB.batch([
+      ...[
+        'deletion_requests',
+        'pairing_envelopes',
+        'pairing_requests',
+        'snapshots',
+        'sync_changes',
+        'access_sessions',
+        'auth_challenges',
+        'recovery_challenges',
+        'recovery_records',
+        'devices',
+        'vaults',
+        'beta_diagnostic_events',
+        'usage_reservations',
+      ].map((table) => env.MIRNA_SYNC_DB.prepare(`DELETE FROM ${table}`)),
+      env.MIRNA_SYNC_DB.prepare(
+        `UPDATE service_flags SET accounting_fault = 0, state_reason = 'NONE',
+           state_request_id = NULL, accounting_fault_at = NULL
+         WHERE singleton_id = 1`,
+      ),
+      ...['usage_daily_buckets', 'usage_rolling_totals'].map((table) =>
+        env.MIRNA_SYNC_DB.prepare(
+          `UPDATE ${table} SET worker_requests = 0, d1_rows_read = 0,
+            d1_rows_written = 0, r2_class_a = 0, r2_class_b = 0`,
+        ),
+      ),
+      env.MIRNA_SYNC_DB.prepare(
+        'UPDATE resource_totals SET r2_reconciled_at = 0 WHERE singleton_id = 1',
+      ),
+    ]);
+  });
+
+  it('covers measured ledger pruning alongside ordinary cleanup', async () => {
+    const now = Date.now();
+    await seedExpiredData();
+    await seedSettledHistory(300, now - 46 * 24 * 60 * 60 * 1_000);
+    await seedSettledHistory(2_500, now - 1_000);
+
+    await runCron(now);
+
+    const reservation = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT reserved_d1_rows_read, reserved_d1_rows_written,
+              measured_d1_rows_read, measured_d1_rows_written,
+              measurement_exact, settlement_failure_code
+         FROM usage_reservations WHERE route_key = 'scheduled-cleanup'`,
+    ).first<Record<string, number | string | null>>();
+    expect(reservation).toMatchObject({ measurement_exact: 1, settlement_failure_code: null });
+    expect(Number(reservation?.measured_d1_rows_written)).toBeGreaterThan(300);
+    expect(Number(reservation?.reserved_d1_rows_written)).toBeGreaterThanOrEqual(
+      Number(reservation?.measured_d1_rows_written),
+    );
+    expect(Number(reservation?.reserved_d1_rows_read)).toBeGreaterThanOrEqual(
+      Number(reservation?.measured_d1_rows_read),
+    );
+    expect(
+      await scalar("SELECT COUNT(*) AS count FROM usage_reservations WHERE route_key = 'history'"),
+    ).toBe(2_500);
+  });
+
+  it('does not underestimate planning with a large retained ledger', async () => {
+    const now = Date.now();
+    await seedSettledHistory(10_000, now - 1_000);
+
+    await runCron(now);
+
+    const reservation = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT measured_d1_rows_read, measurement_exact, settlement_failure_code
+         FROM usage_reservations WHERE route_key = 'scheduled-cleanup'`,
+    ).first<{
+      measured_d1_rows_read: number;
+      measurement_exact: number;
+      settlement_failure_code: string | null;
+    }>();
+    expect(reservation).toMatchObject({ measurement_exact: 1, settlement_failure_code: null });
+    expect(reservation?.measured_d1_rows_read).toBeLessThan(4_096);
+    expect(
+      await scalar("SELECT COUNT(*) AS count FROM usage_reservations WHERE route_key = 'history'"),
+    ).toBe(10_000);
+  });
+
+  it('accounts for ledger-only pruning in bounded passes', async () => {
+    const now = Date.now();
+    await seedSettledHistory(1_100, now - 46 * 24 * 60 * 60 * 1_000);
+    await env.MIRNA_SYNC_DB.prepare(
+      'UPDATE resource_totals SET r2_reconciled_at = ?1 WHERE singleton_id = 1',
+    )
+      .bind(now)
+      .run();
+
+    await runCron(now);
+    expect(
+      await scalar("SELECT COUNT(*) AS count FROM usage_reservations WHERE route_key = 'history'"),
+    ).toBe(100);
+    await runCron(now + 1);
+    expect(
+      await scalar("SELECT COUNT(*) AS count FROM usage_reservations WHERE route_key = 'history'"),
+    ).toBe(0);
+    const reservations = await env.MIRNA_SYNC_DB.prepare(
+      `SELECT reserved_d1_rows_written, measured_d1_rows_written,
+              measurement_exact, settlement_failure_code
+         FROM usage_reservations WHERE route_key = 'scheduled-cleanup'`,
+    ).all<{
+      reserved_d1_rows_written: number;
+      measured_d1_rows_written: number;
+      measurement_exact: number;
+      settlement_failure_code: string | null;
+    }>();
+    expect(reservations.results).toHaveLength(2);
+    for (const row of reservations.results) {
+      expect(row).toMatchObject({ measurement_exact: 1, settlement_failure_code: null });
+      expect(row.measured_d1_rows_written).toBeGreaterThan(0);
+      expect(row.reserved_d1_rows_written).toBeGreaterThanOrEqual(row.measured_d1_rows_written);
+    }
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT accounting_fault FROM service_flags WHERE singleton_id = 1',
+      ).first<number>('accounting_fault'),
+    ).toBe(0);
   });
 });

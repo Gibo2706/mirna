@@ -81,19 +81,21 @@ export interface ScheduledCleanupEstimateInput {
   readonly deletionRows: number;
   readonly reconcileR2: boolean;
 }
-const SCHEDULED_CLEANUP_PLANNING_D1_READ_BASE = 4_096;
+const SCHEDULED_CLEANUP_D1_READ_BASE = 4_096;
 /**
- * Reserves from the inspected bounded work set, not from every category's
- * maximum at once. The fixed base covers budget-window maintenance, the large
- * planning scan, optional deletion-resume lookups and R2 reconciliation cursor
- * checks; the per-item factors then cover bounded cleanup execution and the
- * remaining provider/index amplification. Settlement still records the exact
- * provider metadata and releases the margin.
+ * Maintenance and planning have already run, so reserve their measured D1 cost
+ * in addition to the inspected bounded cleanup work. Their cost grows with
+ * retained history and ledger pruning, independently of expired business rows.
+ * The fixed base and per-item factors cover remaining execution and provider/
+ * index amplification. Settlement records exact usage and releases the margin.
  */
 export const estimateScheduledCleanupUsage = (
   input: ScheduledCleanupEstimateInput,
+  planningUsage: Pick<MeteredUsage, 'd1RowsRead' | 'd1RowsWritten'> = ZERO_USAGE,
 ): MeteredUsage => {
   for (const value of [
+    planningUsage.d1RowsRead,
+    planningUsage.d1RowsWritten,
     input.expiredUsageBuckets,
     input.inspectedRows,
     input.ordinaryRows,
@@ -105,25 +107,29 @@ export const estimateScheduledCleanupUsage = (
       throw new Error('Scheduled cleanup estimate is invalid.');
     }
   }
-  return Object.freeze(
-    usage(
-      SCHEDULED_CLEANUP_PLANNING_D1_READ_BASE +
-        (input.reconcileR2 ? 2 : 0) +
-        input.expiredUsageBuckets * 32 +
-        input.inspectedRows * 4 +
-        input.ordinaryRows * 32 +
-        input.snapshotRows * 256 +
-        input.deletionRequests * 512 +
-        input.deletionRows * 16,
+  const estimated = usage(
+    planningUsage.d1RowsRead +
+      SCHEDULED_CLEANUP_D1_READ_BASE +
+      (input.reconcileR2 ? 2 : 0) +
+      input.expiredUsageBuckets * 32 +
+      input.inspectedRows * 4 +
+      input.ordinaryRows * 32 +
+      input.snapshotRows * 256 +
+      input.deletionRequests * 512 +
+      input.deletionRows * 16,
+    planningUsage.d1RowsWritten +
       128 +
-        input.expiredUsageBuckets * 12 +
-        input.ordinaryRows * 12 +
-        input.snapshotRows * 64 +
-        input.deletionRequests * 128 +
-        input.deletionRows * 32,
-      (input.reconcileR2 ? 1 : 0) + input.deletionRequests * 100,
-    ),
+      input.expiredUsageBuckets * 12 +
+      input.ordinaryRows * 12 +
+      input.snapshotRows * 64 +
+      input.deletionRequests * 128 +
+      input.deletionRows * 32,
+    (input.reconcileR2 ? 1 : 0) + input.deletionRequests * 100,
   );
+  if (Object.values(estimated).some((value) => !Number.isSafeInteger(value))) {
+    throw new Error('Scheduled cleanup estimate is invalid.');
+  }
+  return Object.freeze(estimated);
 };
 
 const routeBudget = (request: Request): RouteBudget => {
@@ -1508,8 +1514,13 @@ export const runBudgetWindowMaintenance = async (
     ).bind(scheduledTime, scheduledTime - 60 * 60 * 1_000),
     env.MIRNA_SYNC_DB.prepare(
       `DELETE FROM usage_reservations
-        WHERE state IN ('committed', 'released') AND settled_at < ?1
-          AND (settlement_failure_code IS NULL OR reconciled_at IS NOT NULL)`,
+        WHERE reservation_id IN (
+          SELECT reservation_id FROM usage_reservations INDEXED BY idx_usage_reservations_prunable
+           WHERE state IN ('committed', 'released') AND settled_at < ?1
+             AND (settlement_failure_code IS NULL OR reconciled_at IS NOT NULL)
+           ORDER BY settled_at, reservation_id
+           LIMIT 1000
+        )`,
     ).bind(scheduledTime - 45 * 24 * 60 * 60 * 1_000),
   ]);
   return expired.results.length;

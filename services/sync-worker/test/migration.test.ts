@@ -59,7 +59,7 @@ describe('D1 migration foundation', () => {
     const migrationCount = await env.MIRNA_SYNC_DB.prepare(
       'SELECT COUNT(*) AS count FROM mirna_d1_migrations',
     ).first<number>('count');
-    expect(migrationCount).toBe(13);
+    expect(migrationCount).toBe(env.TEST_MIGRATIONS.length);
 
     expect(
       await env.MIRNA_SYNC_DB.prepare(
@@ -182,6 +182,7 @@ describe('D1 migration foundation', () => {
       'idx_device_security_transitions_vault_created',
       'idx_usage_daily_window',
       'idx_usage_reservations_state_created',
+      'idx_usage_reservations_prunable',
       'idx_resource_inventory_vault_state',
       'idx_resource_inventory_accounting_reservation',
       'idx_vault_resource_totals_release_reservation',

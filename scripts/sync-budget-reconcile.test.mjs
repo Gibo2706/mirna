@@ -8,6 +8,7 @@ import {
   planReconciliation,
   safeAccountingSummary,
   ACCOUNTING_SNAPSHOT_SQL,
+  routeRegistryReadyForReconciliation,
 } from './sync-budget-reconcile-lib.mjs';
 import { parseReconcileOptions } from './sync-budget-reconcile.mjs';
 import { Miniflare } from 'miniflare';
@@ -82,6 +83,91 @@ const snapshot = (reservations = [reservation()], at = now) => ({
   counts: [{ vaults: 0, devices: 0, snapshots: 0, sync_changes: 0, pairing_requests: 0 }],
 });
 const readiness = { schema: true, registry: true, storage: true, providerD1Bytes: 4096 };
+const registryMarker = JSON.parse(
+  readFileSync('services/sync-worker/route-budget-conformance.json', 'utf8'),
+);
+const cleanupUnderestimation = () =>
+  snapshot([
+    reservation({
+      reservation_id: `${root}:scheduled-cleanup`,
+      route_key: 'scheduled-cleanup',
+      reserved_d1_rows_written: 140,
+      measured_d1_rows_written: 188,
+      committed_d1_rows_written: 188,
+      released_d1_rows_written: 0,
+      settlement_failure_code: 'USAGE_RESERVATION_UNDERESTIMATED',
+    }),
+  ]);
+
+describe('reconciliation registry readiness', () => {
+  const health = (conformance) => ({
+    readiness: {
+      routeBudgetConformance: conformance,
+      routeBudgetRegistryVersion: registryMarker.registryVersion,
+    },
+  });
+
+  it('allows the health conformance fault explained by exact cleanup underestimation', () => {
+    const s = cleanupUnderestimation();
+    const registry = routeRegistryReadyForReconciliation(s, health('fault'), registryMarker, now);
+    expect(registry).toBe(true);
+    const plan = planReconciliation(s, now, { ...readiness, registry });
+    expect(plan.blockers).toEqual([]);
+    expect(plan.repairs).toEqual([
+      {
+        reservationId: `${root}:scheduled-cleanup`,
+        code: 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+      },
+    ]);
+    expect(plan.statements.length).toBeGreaterThan(0);
+  });
+
+  it('still requires matching reviewed registry identity and a valid health status', () => {
+    expect(routeRegistryReadyForReconciliation(snapshot(), health('ok'), registryMarker, now)).toBe(
+      true,
+    );
+    for (const marker of [
+      { ...registryMarker, registryVersion: 'wrong' },
+      { ...registryMarker, status: 'incomplete' },
+      { ...registryMarker, routeCount: 0 },
+      { ...registryMarker, coverage: 'incomplete' },
+      { ...registryMarker, suite: 'incomplete' },
+    ]) {
+      expect(
+        routeRegistryReadyForReconciliation(cleanupUnderestimation(), health('fault'), marker, now),
+      ).toBe(false);
+    }
+    for (const conformance of [undefined, 'unavailable', 'error']) {
+      expect(
+        routeRegistryReadyForReconciliation(
+          cleanupUnderestimation(),
+          health(conformance),
+          registryMarker,
+          now,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('refuses unexplained or unsupported conformance faults', () => {
+    expect(
+      routeRegistryReadyForReconciliation(snapshot(), health('fault'), registryMarker, now),
+    ).toBe(false);
+    for (const overrides of [
+      { route_key: 'manifest-current' },
+      { business_committed: 1 },
+      { measurement_exact: 0 },
+      { state: 'reserved' },
+      { reservation_id: `${root}:route` },
+    ]) {
+      const s = cleanupUnderestimation();
+      Object.assign(s.reservations[0], overrides);
+      const registry = routeRegistryReadyForReconciliation(s, health('fault'), registryMarker, now);
+      expect(registry).toBe(false);
+      expect(planReconciliation(s, now, { ...readiness, registry }).statements).toEqual([]);
+    }
+  });
+});
 const stale = (overrides = {}, at = now) =>
   reservation(
     {

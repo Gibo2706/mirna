@@ -1,5 +1,9 @@
 import { STAGING_BUDGETS } from '../services/sync-worker/src/config/staging-budgets.ts';
-import { API_ROUTE_REGISTRY } from '../services/sync-worker/src/route-registry.ts';
+import {
+  API_ROUTE_REGISTRY,
+  ROUTE_BUDGET_REGISTRY_VERSION,
+  routeRegistryIsConformant,
+} from '../services/sync-worker/src/route-registry.ts';
 
 export const METRICS = [
   'worker_requests',
@@ -309,6 +313,36 @@ function classifyRepair(row, snapshot, now) {
   )
     return null;
   return 'STALE_MANIFEST_READ_CONSERVATIVELY_COMMITTED';
+}
+
+export function routeRegistryReadyForReconciliation(snapshot, health, marker, now) {
+  if (
+    !routeRegistryIsConformant() ||
+    health.readiness?.routeBudgetRegistryVersion !== marker.registryVersion ||
+    marker.status !== 'registry-complete' ||
+    marker.registryVersion !== ROUTE_BUDGET_REGISTRY_VERSION ||
+    marker.routeCount !== API_ROUTE_REGISTRY.length ||
+    marker.suite !== 'npm run sync:route-budget:verify' ||
+    marker.coverage !== 'complete-worker-runtime-suite-with-source-derived-bounds'
+  )
+    return false;
+  if (health.readiness?.routeBudgetConformance === 'ok') return true;
+  if (health.readiness?.routeBudgetConformance !== 'fault') return false;
+
+  // Health reports historical underestimations as a conformance fault until
+  // reconciled. Only the exact supported cleanup evidence can explain it;
+  // planReconciliation still validates every ledger/resource invariant and CAS.
+  const faults = snapshot.reservations.filter(
+    (row) =>
+      row.settlement_failure_code === 'USAGE_RESERVATION_UNDERESTIMATED' &&
+      row.reconciled_at === null,
+  );
+  return (
+    faults.length > 0 &&
+    faults.every(
+      (row) => classifyRepair(row, snapshot, now) === 'SCHEDULED_CLEANUP_ESTIMATE_REPAIRED',
+    )
+  );
 }
 
 function resourceBlockers(snapshot, readiness) {
