@@ -296,10 +296,19 @@ const worker: ExportedHandler<Env> = {
             controller.scheduledTime,
           );
           const plan = await planScheduledCleanup(requestContext.env, controller.scheduledTime);
-          if (expiredUsageBuckets === 0 && !scheduledCleanupHasWork(plan)) return;
+          const planningUsage = usageMeter.snapshot().usage;
+          if (
+            expiredUsageBuckets === 0 &&
+            planningUsage.d1RowsWritten === 0 &&
+            !scheduledCleanupHasWork(plan)
+          )
+            return;
           await usageBudget.reserveScheduledCleanup(
             requestContext,
-            estimateScheduledCleanupUsage(scheduledCleanupEstimateInput(plan, expiredUsageBuckets)),
+            estimateScheduledCleanupUsage(
+              scheduledCleanupEstimateInput(plan, expiredUsageBuckets),
+              planningUsage,
+            ),
           );
           await runScheduledCleanup(requestContext.env, controller.scheduledTime, plan);
         } finally {
