@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
-import { SELF } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { SELF, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
+import { describe, expect, it, vi } from 'vitest';
+import worker from '../src/index';
 import {
   createAccessSession,
   createInitialVaultFixture,
@@ -8,8 +9,8 @@ import {
 } from './protocol-fixtures';
 import { checkAccountingReadiness } from '../src/health';
 
-const request = (path: string, init?: RequestInit): Request =>
-  new Request(`https://sync.invalid${path}`, init);
+const request = (path: string, init?: RequestInit): Request<unknown, IncomingRequestCfProperties> =>
+  new Request(`https://sync.invalid${path}`, init) as Request<unknown, IncomingRequestCfProperties>;
 
 const SUPPORT_ID = 'MIRNA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AA';
 const ALLOWED_ORIGIN = 'http://localhost:5173';
@@ -45,6 +46,31 @@ const rollingTotalsRow = async () =>
   }>();
 
 describe('Worker HTTP foundation', () => {
+  it('keeps route settlement alive when the caller stops awaiting the response', async () => {
+    const ctx = createExecutionContext();
+    const waitUntil = vi.spyOn(ctx, 'waitUntil');
+    const response = worker.fetch?.(
+      request('/v1/auth/challenge', {
+        method: 'POST',
+        headers: {
+          Origin: ALLOWED_ORIGIN,
+          'Content-Type': 'application/json',
+          'X-Mirna-Protocol-Version': '1',
+        },
+        body: '{}',
+      }),
+      env,
+      ctx,
+    );
+    expect(waitUntil).toHaveBeenCalledOnce();
+    await waitOnExecutionContext(ctx);
+    expect((await response)?.status).toBe(400);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        "SELECT COUNT(*) AS count FROM usage_reservations WHERE state='reserved'",
+      ).first<number>('count'),
+    ).toBe(0);
+  });
   it('reports D1 and R2 reachability without exposing binding identifiers', async () => {
     const response = await SELF.fetch(request('/v1/health'));
     const body = await response.json<{

@@ -257,6 +257,38 @@ state, unreconciled reservations, source-controlled hard limits, private R2
 inventory and the deployed Worker build all agree. Its output contains only
 aggregate safe status and never prints credentials, resource UUIDs or user data.
 
+For accounting incidents, inspect the durable ledger before attributing degraded
+health to quota exhaustion. The operator commands below require Node 22.22.0;
+the default reconciliation command is a dry run:
+
+```sh
+npm run sync:budget:reconcile -- --env staging
+npm run sync:budget:verify
+npm run sync:budget:reconcile -- --env staging --apply
+```
+
+The verifier compares daily and rolling caches with reservations over the same
+inclusive 30 UTC days. Reserved rows charge the full reservation; settled rows
+charge committed usage. It reports `ACCOUNTING_AGGREGATE_DRIFT` independently of
+the health endpoint, which does not scan the ledger. Evidence and proposed SQL
+stay in the git-ignored `.private/sync-accounting-incident/` directory.
+
+Application requires current schema/registry readiness, open service flags,
+pairing invariants, provider D1 size, inventory totals and actual R2 object reads
+below existing hard limits. One guarded D1 batch repairs caches and, when safe,
+clears the exact reviewed fault. Concurrent changes or an expired UTC day abort
+the batch. Financial rows, devices, R2 objects and reservation history are not
+deleted. R2 ciphertext hashes are compared before and after application.
+
+Only two unresolved contracts are supported: exact committed scheduled cleanup
+underestimation with no business commit, and an expired `manifest-current` read
+family with the current reviewed reservation and no business commit or measured
+usage. The latter consumes its entire reservation conservatively and keeps
+`measurement_exact=0`; the actual interrupted request outcome is not invented.
+Other stale routes, settlement failures and unexplained fault origins stay
+blocked. A second application with identical reconciled evidence makes no D1
+changes. Larger R2 inventories require the existing bounded reconciliation.
+
 Set/rotate the real Turnstile secret without putting it in a command argument,
 tracked file or report. Verify the secret binding only by name. Never print its
 value.

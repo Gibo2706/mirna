@@ -42,6 +42,8 @@
     "sync:deploy:staging": "wrangler deploy --env staging --config services/sync-worker/wrangler.jsonc --var MIRNA_BUILD_COMMIT:$(git rev-parse HEAD)",
     "sync:logs": "node scripts/query-sync-beta-logs.mjs",
     "sync:budget:diagnose": "node scripts/sync-budget-accounting.mjs diagnose",
+    "sync:budget:reconcile": "node scripts/sync-budget-reconcile.mjs",
+    "sync:budget:verify": "node scripts/sync-budget-reconcile.mjs --env staging --verify",
     "sync:budget:repair": "node scripts/sync-budget-accounting.mjs repair",
     "sync:budget:repair:current-cleanup": "node scripts/sync-budget-accounting.mjs repair --env staging --operation scheduled-cleanup --current --apply",
     "sync:staging:verify": "node scripts/sync-staging-verify.mjs",

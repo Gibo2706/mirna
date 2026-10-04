@@ -210,6 +210,11 @@ describe('staging usage budgets', () => {
         'SELECT accounting_fault FROM service_flags WHERE singleton_id = 1',
       ).first<number>('accounting_fault'),
     ).toBe(1);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT state_request_id FROM service_flags WHERE singleton_id=1',
+      ).first<string>('state_request_id'),
+    ).toBe(request.requestId);
     await env.MIRNA_SYNC_DB.batch([
       env.MIRNA_SYNC_DB.prepare(
         `UPDATE usage_reservations
@@ -224,6 +229,58 @@ describe('staging usage budgets', () => {
           WHERE singleton_id = 1`,
       ),
     ]);
+  });
+
+  it('does not replace an earlier fault origin when another reservation becomes stale', async () => {
+    const start = Date.parse('2026-08-01T10:00:00Z');
+    const request = context('/v1/vault/manifest', 'GET');
+    const configured = new UsageBudgetController(STAGING_BUDGETS, () => start);
+    await configured.reserveRoute(request);
+    const origin = crypto.randomUUID();
+    await env.MIRNA_SYNC_DB.prepare(
+      `UPDATE service_flags SET accounting_fault=1,
+      state_reason='USAGE_RESERVATION_UNDERESTIMATED',state_request_id=?1,accounting_fault_at=?2 WHERE singleton_id=1`,
+    )
+      .bind(origin, start)
+      .run();
+    await runBudgetWindowMaintenance(env, start + 3600001);
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT state_reason,state_request_id,accounting_fault_at FROM service_flags',
+      ).first(),
+    ).toEqual({
+      state_reason: 'USAGE_RESERVATION_UNDERESTIMATED',
+      state_request_id: origin,
+      accounting_fault_at: start,
+    });
+    await configured.settle(request);
+    await env.MIRNA_SYNC_DB.prepare(
+      "UPDATE service_flags SET accounting_fault=0,state_reason='NONE',state_request_id=NULL,accounting_fault_at=NULL WHERE singleton_id=1",
+    ).run();
+  });
+
+  it('retains unresolved settled fault evidence beyond the normal ledger retention', async () => {
+    const start = Date.parse('2026-08-01T10:00:00Z');
+    const configured = new UsageBudgetController(STAGING_BUDGETS, () => start);
+    const request = context('/v1/vault/manifest', 'GET');
+    await configured.reserveRoute(request);
+    await configured.settle(request);
+    await env.MIRNA_SYNC_DB.prepare(
+      "UPDATE usage_reservations SET settlement_failure_code='USAGE_RESERVATION_UNDERESTIMATED' WHERE reservation_id=?1",
+    )
+      .bind(`${request.requestId}:route`)
+      .run();
+    await runBudgetWindowMaintenance(env, Date.parse('2026-10-03T12:00:00Z'));
+    expect(
+      await env.MIRNA_SYNC_DB.prepare(
+        'SELECT COUNT(*) AS count FROM usage_reservations WHERE reservation_id=?1',
+      )
+        .bind(`${request.requestId}:route`)
+        .first<number>('count'),
+    ).toBe(1);
+    await env.MIRNA_SYNC_DB.prepare('DELETE FROM usage_reservations WHERE reservation_id=?1')
+      .bind(`${request.requestId}:route`)
+      .run();
   });
 
   it('expires only buckets outside the maintained rolling window after delayed cleanup', async () => {

@@ -232,34 +232,48 @@ const fetchHandler = async (
   return response;
 };
 
-const worker: ExportedHandler<Env> = {
-  async fetch(request, env) {
-    const requestId = createRequestId();
-    const allowedOrigin = getAllowedOrigin(request, env);
+const handleFetch = async (request: Request, env: Env): Promise<Response> => {
+  const requestId = createRequestId();
+  const allowedOrigin = getAllowedOrigin(request, env);
 
-    try {
-      return await fetchHandler(request, env, requestId, allowedOrigin);
-    } catch (error) {
-      if (error instanceof HttpError) {
-        await recordAccountingFailure(request, env, requestId, allowedOrigin, error);
-        const allowedMethods = allowedMethodsForPath(new URL(request.url).pathname);
-        return errorResponse(error.code, error.message, error.status, {
-          requestId,
-          allowedOrigin,
-          verificationReason:
-            env.MIRNA_ENVIRONMENT === 'staging' ? error.verificationReason : undefined,
-          accounting: env.MIRNA_ENVIRONMENT === 'staging' ? error.accounting : undefined,
-          headers:
-            error.status === 405 && allowedMethods
-              ? { Allow: [...allowedMethods, 'OPTIONS'].join(', ') }
-              : undefined,
-        });
-      }
-      return errorResponse('INTERNAL_ERROR', 'Request could not be processed.', 500, {
+  try {
+    return await fetchHandler(request, env, requestId, allowedOrigin);
+  } catch (error) {
+    if (error instanceof HttpError) {
+      await recordAccountingFailure(request, env, requestId, allowedOrigin, error);
+      const allowedMethods = allowedMethodsForPath(new URL(request.url).pathname);
+      return errorResponse(error.code, error.message, error.status, {
         requestId,
         allowedOrigin,
+        verificationReason:
+          env.MIRNA_ENVIRONMENT === 'staging' ? error.verificationReason : undefined,
+        accounting: env.MIRNA_ENVIRONMENT === 'staging' ? error.accounting : undefined,
+        headers:
+          error.status === 405 && allowedMethods
+            ? { Allow: [...allowedMethods, 'OPTIONS'].join(', ') }
+            : undefined,
       });
     }
+    return errorResponse('INTERNAL_ERROR', 'Request could not be processed.', 500, {
+      requestId,
+      allowedOrigin,
+    });
+  }
+};
+
+const worker: ExportedHandler<Env> = {
+  fetch(request, env, context) {
+    const work = handleFetch(request, env);
+    // Await the response as before, while giving settlement the documented grace
+    // period if the client disconnects during D1 work. Durable recovery remains
+    // necessary for crashes or work exceeding the runtime's 30-second grace.
+    context.waitUntil(
+      work.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return work;
   },
 
   scheduled(controller, env, context) {
