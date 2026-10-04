@@ -13,17 +13,18 @@ import { parseReconcileOptions } from './sync-budget-reconcile.mjs';
 import { Miniflare } from 'miniflare';
 
 const now = Date.parse('2026-10-03T12:00:00Z');
+const utcDay = (at) => new Date(at).toISOString().slice(0, 10);
 const root = '11111111-1111-4111-8111-111111111111';
 const vaultId = 'A'.repeat(22);
 const values = (n = 0) => Object.fromEntries(METRICS.map((m) => [m, n]));
-const reservation = (overrides = {}) => ({
+const reservation = (overrides = {}, at = now) => ({
   reservation_id: `${root}:route`,
   scope_type: 'global',
   scope_id: 'service',
   route_key: 'manifest-current',
   state: 'committed',
-  created_at: now - 7200000,
-  settled_at: now - 7199000,
+  created_at: at - 7200000,
+  settled_at: at - 7199000,
   measurement_exact: 1,
   business_committed: 0,
   settlement_failure_code: null,
@@ -39,7 +40,7 @@ const reservation = (overrides = {}) => ({
   ),
   ...overrides,
 });
-const snapshot = (reservations = [reservation()]) => ({
+const snapshot = (reservations = [reservation()], at = now) => ({
   flags: [
     {
       singleton_id: 1,
@@ -59,7 +60,7 @@ const snapshot = (reservations = [reservation()]) => ({
     {
       scope_type: 'global',
       scope_id: 'service',
-      utc_day: '2026-10-03',
+      utc_day: utcDay(at),
       ...values(3),
       updated_at: 0,
     },
@@ -81,43 +82,52 @@ const snapshot = (reservations = [reservation()]) => ({
   counts: [{ vaults: 0, devices: 0, snapshots: 0, sync_changes: 0, pairing_requests: 0 }],
 });
 const readiness = { schema: true, registry: true, storage: true, providerD1Bytes: 4096 };
-const stale = (overrides = {}) =>
-  reservation({
-    state: 'reserved',
-    settled_at: null,
-    measurement_exact: 0,
-    settlement_failure_code: 'STALE_RESERVATION_REQUIRES_RECONCILIATION',
-    ...Object.fromEntries(
-      METRICS.flatMap((m) => [
-        [
-          `reserved_${m}`,
-          m === 'worker_requests'
-            ? 1
-            : m === 'd1_rows_read'
-              ? 128
-              : m === 'd1_rows_written'
-                ? 8
-                : 0,
-        ],
-        [`committed_${m}`, 0],
-        [`released_${m}`, 0],
-        [`measured_${m}`, 0],
-      ]),
-    ),
-    ...overrides,
-  });
-const faultSnapshot = () => {
-  const s = snapshot([
-    stale(),
-    stale({ reservation_id: `${root}:vault-${vaultId}`, scope_type: 'vault', scope_id: vaultId }),
-  ]);
+const stale = (overrides = {}, at = now) =>
+  reservation(
+    {
+      state: 'reserved',
+      settled_at: null,
+      measurement_exact: 0,
+      settlement_failure_code: 'STALE_RESERVATION_REQUIRES_RECONCILIATION',
+      ...Object.fromEntries(
+        METRICS.flatMap((m) => [
+          [
+            `reserved_${m}`,
+            m === 'worker_requests'
+              ? 1
+              : m === 'd1_rows_read'
+                ? 128
+                : m === 'd1_rows_written'
+                  ? 8
+                  : 0,
+          ],
+          [`committed_${m}`, 0],
+          [`released_${m}`, 0],
+          [`measured_${m}`, 0],
+        ]),
+      ),
+      ...overrides,
+    },
+    at,
+  );
+const faultSnapshot = (at = now) => {
+  const s = snapshot(
+    [
+      stale({}, at),
+      stale(
+        { reservation_id: `${root}:vault-${vaultId}`, scope_type: 'vault', scope_id: vaultId },
+        at,
+      ),
+    ],
+    at,
+  );
   s.vaults.push({ vault_id: vaultId, status: 'active' });
   s.counts[0].vaults = 1;
   s.flags[0] = {
     ...s.flags[0],
     accounting_fault: 1,
     state_reason: 'STALE_RESERVATION_REQUIRES_RECONCILIATION',
-    accounting_fault_at: now - 3600000,
+    accounting_fault_at: at - 3600000,
   };
   return s;
 };
@@ -321,7 +331,7 @@ describe('operator boundaries', () => {
   });
 });
 
-const database = (s) => {
+const database = (s, at = now) => {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE vaults(vault_id TEXT PRIMARY KEY,status TEXT); CREATE TABLE devices(id TEXT);
     CREATE TABLE snapshots(id TEXT,ciphertext BLOB); CREATE TABLE sync_changes(id TEXT,ciphertext BLOB);
@@ -354,6 +364,12 @@ const database = (s) => {
       ).run(...Object.values(row));
     }
   }
+  // JavaScript fake timers do not control SQLite's native clock.
+  db.function('date', { varargs: true }, (value, modifier) => {
+    if (value === 'now' && modifier === undefined) return utcDay(at);
+    if (modifier === 'unixepoch') return utcDay(value * 1000);
+    throw new Error('Unexpected SQLite date arguments in the repair test');
+  });
   return db;
 };
 const apply = (db, statements) => {
@@ -383,24 +399,28 @@ describe('real SQLite repair transaction', () => {
     expect(planReconciliation(s, now + 1, readiness).statements).toEqual([]);
     db.close();
   });
-  it('settles a proven stale read family and clears the fault only after equality', () => {
-    const s = faultSnapshot();
-    const db = database(s);
-    apply(db, planReconciliation(s, now, readiness).statements);
-    expect(db.prepare('SELECT accounting_fault,state_reason FROM service_flags').get()).toEqual({
-      accounting_fault: 0,
-      state_reason: 'NONE',
-    });
-    const rows = db.prepare('SELECT * FROM usage_reservations').all();
-    expect(rows).toHaveLength(2);
-    expect(
-      rows.every(
-        (x) =>
-          x.committed_d1_rows_read === 128 && x.measurement_exact === 0 && x.reconciled_at === now,
-      ),
-    ).toBe(true);
-    db.close();
-  });
+  it.each(['2026-10-03T12:00:00Z', '2026-11-01T00:30:00Z'])(
+    'settles a proven stale read family and clears the fault only after equality (%s)',
+    (timestamp) => {
+      const at = Date.parse(timestamp);
+      const s = faultSnapshot(at);
+      const db = database(s, at);
+      apply(db, planReconciliation(s, at, readiness).statements);
+      expect(db.prepare('SELECT accounting_fault,state_reason FROM service_flags').get()).toEqual({
+        accounting_fault: 0,
+        state_reason: 'NONE',
+      });
+      const rows = db.prepare('SELECT * FROM usage_reservations').all();
+      expect(rows).toHaveLength(2);
+      expect(
+        rows.every(
+          (x) =>
+            x.committed_d1_rows_read === 128 && x.measurement_exact === 0 && x.reconciled_at === at,
+        ),
+      ).toBe(true);
+      db.close();
+    },
+  );
   it('CAS rejects a concurrent ledger/flags/cache/resource change with complete rollback', () => {
     for (const sql of [
       'UPDATE usage_reservations SET reserved_d1_rows_read=129',
@@ -421,24 +441,33 @@ describe('real SQLite repair transaction', () => {
       db.close();
     }
   });
-  it('refuses a plan whose UTC accounting day expired before application', () => {
-    const s = faultSnapshot(),
-      db = database(s),
-      plan = planReconciliation(s, now, readiness);
-    db.function('date', { varargs: true }, (...args) =>
-      args[0] === 'now' ? '2026-10-04' : new Date(args[0] * 1000).toISOString().slice(0, 10),
-    );
-    const before = db.prepare('SELECT * FROM usage_reservations').all();
-    expect(() => apply(db, plan.statements)).toThrow();
-    expect(db.prepare('SELECT * FROM usage_reservations').all()).toEqual(before);
-    expect(db.prepare('SELECT accounting_fault FROM service_flags').get().accounting_fault).toBe(1);
-    db.close();
-  });
+  it.each(['2026-10-03T23:59:59Z', '2026-12-31T23:59:59Z'])(
+    'accepts a current plan and refuses it after UTC midnight (%s)',
+    (timestamp) => {
+      const at = Date.parse(timestamp),
+        s = faultSnapshot(at),
+        plan = planReconciliation(s, at, readiness),
+        current = database(s, at),
+        db = database(s, at + 1000);
+      expect(plan.blockers).toEqual([]);
+      apply(current, plan.statements);
+      expect(
+        current.prepare('SELECT accounting_fault FROM service_flags').get().accounting_fault,
+      ).toBe(0);
+      const before = db.prepare('SELECT * FROM usage_reservations').all();
+      expect(() => apply(db, plan.statements)).toThrow();
+      expect(db.prepare('SELECT * FROM usage_reservations').all()).toEqual(before);
+      expect(db.prepare('SELECT accounting_fault FROM service_flags').get().accounting_fault).toBe(
+        1,
+      );
+      current.close();
+      db.close();
+    },
+  );
 });
 
 it('real Miniflare D1 batch rolls back all repairs and fault clearing on a late failure', async () => {
-  const s = faultSnapshot(),
-    sqlite = database(s);
+  let sqlite;
   const mf = new Miniflare({
     modules: true,
     script: 'export default { fetch() { return new Response("test"); } }',
@@ -447,6 +476,9 @@ it('real Miniflare D1 batch rolls back all repairs and fault clearing on a late 
   });
   try {
     const db = await mf.getD1Database('DB');
+    // Keep the real D1 clock and its fail-closed UTC-day guard aligned with the fixture.
+    const at = (await db.prepare("SELECT unixepoch('now') * 1000 AS now").first()).now;
+    sqlite = database(faultSnapshot(at), at);
     const schema = sqlite
       .prepare(
         "SELECT name,sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY rowid",
@@ -467,24 +499,24 @@ it('real Miniflare D1 batch rolls back all repairs and fault clearing on a late 
     const read = async () =>
       JSON.parse((await db.prepare(ACCOUNTING_SNAPSHOT_SQL).first()).snapshot);
     const before = await read(),
-      plan = planReconciliation(before, now, readiness);
+      plan = planReconciliation(before, at, readiness);
     expect(plan.blockers).toEqual([]);
     await expect(
       db.batch(
         [
           ...plan.statements,
-          'INSERT INTO resource_totals(singleton_id,updated_at) VALUES(2,0)',
+          'INSERT INTO resource_totals(singleton_id,updated_at) VALUES(1,0)',
         ].map((sql) => db.prepare(sql)),
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/UNIQUE constraint failed: resource_totals\.singleton_id/);
     expect(await read()).toEqual(before);
     await db.batch(plan.statements.map((sql) => db.prepare(sql)));
     const after = await read();
     expect(after.flags[0].accounting_fault).toBe(0);
     expect(after.counts).toEqual(before.counts);
-    expect(planReconciliation(after, now + 1, readiness).statements).toEqual([]);
+    expect(planReconciliation(after, at + 1, readiness).statements).toEqual([]);
   } finally {
-    sqlite.close();
+    sqlite?.close();
     await mf.dispose();
   }
 });
